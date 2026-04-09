@@ -1,4 +1,4 @@
-FROM docker.1ms.run/python:3.11-slim
+FROM python:3.11-slim
 
 LABEL maintainer="nginx302_proxy"
 LABEL description="HTTP Reverse Proxy with 302 Redirect Support"
