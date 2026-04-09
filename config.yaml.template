@@ -1,0 +1,58 @@
+server:
+  host: "0.0.0.0"
+  port: 18686
+  workers: 1
+  keepalive_timeout: 75
+  max_connections: 1000
+  max_connections_per_host: 100
+
+ssl:
+  enabled: false
+  cert_file: null
+  key_file: null
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_path: log/nginx302_proxy.log
+  max_size: 10MB
+  backup_count: 5
+
+streaming:
+  enabled: true
+  chunk_size: 64KB
+  large_file_threshold: 10MB
+  stream_timeout: 3600
+  read_timeout: 300
+  write_timeout: 300
+  buffer_size: 64KB
+  enable_range_support: true
+  max_request_body_size: 0
+
+cache:
+  enabled: true
+  cache_dir: "cache"
+  max_size: 5GB
+  max_entries: 1000
+  default_ttl: 7200
+  chunk_size: 64KB
+  max_entry_size: 0
+  max_request_cache_size: 0
+  enable_preload: true
+  preload_concurrency: 3
+  enable_validation: true
+  validation_interval: 3600
+
+proxy_rules:
+  - path_prefix: "/play"
+    target_url: "http://127.0.0.1"
+    strip_prefix: false
+    timeout: 30
+    max_redirects: 10
+    retry_times: 3
+    enable_streaming: true
+
+default_timeout: 30
+max_redirects: 10
+follow_redirects: true
+trust_forward_headers: true
