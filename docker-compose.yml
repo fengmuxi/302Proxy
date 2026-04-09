@@ -1,27 +1,18 @@
 version: '3.8'
 
 services:
-  nginx302-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: nginx302-proxy:latest
-    container_name: nginx302-proxy
+  302-proxy:
+    image: registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest
+    container_name: 302-proxy
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "18686:18686"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./log:/app/log
       - ./cache:/app/cache
     environment:
       - TZ=Asia/Shanghai
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/_health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
     logging:
       driver: "json-file"
       options:
