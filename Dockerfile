@@ -19,8 +19,8 @@ COPY . .
 
 COPY config.yaml.template ./config.yaml
 
-RUN mkdir -p /app/log /app/cache
+RUN mkdir -p /app/log /app/cache /app/data
 
-EXPOSE 8080
+EXPOSE 18686
 
 CMD ["python", "main.py", "-c", "config.yaml"]

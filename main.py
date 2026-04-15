@@ -1602,6 +1602,14 @@ def main():
     bootstrap_config = load_config(args.config)
     config_store = ConfigStore(bootstrap_config.database_path, bootstrap_config=bootstrap_config)
     config = config_store.load_runtime_config()
+    
+    # 确保必要的目录存在
+    from pathlib import Path
+    Path(config.cache.cache_dir).mkdir(parents=True, exist_ok=True)
+    if config.logging.file_path:
+        Path(config.logging.file_path).parent.mkdir(parents=True, exist_ok=True)
+    if config.geoip.offline.db_path:
+        Path(config.geoip.offline.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     # 默认使用配置文件中的服务端口/主机（除非命令行覆盖）
     if args.port is None:

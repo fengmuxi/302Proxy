@@ -867,12 +867,24 @@ def setup_logging(config: LoggingConfig) -> logging.Logger:
     return logger
 
 
+def ensure_config_file(config_path: str, config: Config) -> None:
+    config_file = Path(config_path)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config.save_yaml(str(config_file))
+
+
 def load_config(config_path: Optional[str] = None) -> Config:
-    if config_path and os.path.exists(config_path):
-        return Config.from_yaml(config_path)
+    if config_path:
+        if os.path.exists(config_path):
+            return Config.from_yaml(config_path)
+        config = Config()
+        ensure_config_file(config_path, config)
+        return config
 
     for default_path in ("config.yaml", "config.yml", "etc/config.yaml"):
         if os.path.exists(default_path):
             return Config.from_yaml(default_path)
 
-    return Config()
+    config = Config()
+    ensure_config_file("config.yaml", config)
+    return config

@@ -74,7 +74,88 @@ region_matching:
 geoip:
   enabled: true
   online_cache_ttl_seconds: 120
-  sources: []
+  sources: [
+    {
+      "name": "百度",
+      "enabled": true,
+      "weight": 5,
+      "url": "https://opendata.baidu.com/api.php?co=&resource_id=6006&oe=utf8",
+      "method": "GET",
+      "request_location": "query",
+      "body_format": "json",
+      "query_params_json": "{\"resource_id\": \"6006\", \"oe\": \"utf8\"}",
+      "headers_json": "{}",
+      "body_template": "",
+      "ip_param_name": "query",
+      "timeout": 3,
+      "country_path": "data[0].location",
+      "region_path": "data[0].location",
+      "city_path": "data[0].location",
+      "full_path": "data[0].location",
+      "priority": 1,
+      "notes": ""
+    },
+    {
+      "name": "ip.cn",
+      "enabled": true,
+      "weight": 5,
+      "url": "https://my.ip.cn/json/",
+      "method": "GET",
+      "request_location": "query",
+      "body_format": "json",
+      "query_params_json": "{\"ticket\": \"1aa83698973bb7fa6608072a3dd28eb81776067770\"}",
+      "headers_json": "{}",
+      "body_template": "",
+      "ip_param_name": "ip",
+      "timeout": 3,
+      "country_path": "data.country",
+      "region_path": "data.province",
+      "city_path": "data.city",
+      "full_path": "data.isp",
+      "priority": 1,
+      "notes": ""
+    },
+    {
+      "name": "太平洋",
+      "enabled": true,
+      "weight": 1,
+      "url": "https://whois.pconline.com.cn/ipJson.jsp",
+      "method": "GET",
+      "request_location": "query",
+      "body_format": "json",
+      "query_params_json": "{\"json\": \"true\"}",
+      "headers_json": "{}",
+      "body_template": "",
+      "ip_param_name": "ip",
+      "timeout": 3,
+      "country_path": "regionNames",
+      "region_path": "pro",
+      "city_path": "city",
+      "full_path": "addr",
+      "priority": 0,
+      "notes": "访问频率需小于1qps"
+    },
+    {
+      "name": "淘宝",
+      "enabled": true,
+      "weight": 1,
+      "url": "https://ip.taobao.com/outGetIpInfo",
+      "method": "GET",
+      "request_location": "query",
+      "body_format": "json",
+      "query_params_json": "{\"accessKey\": \"alibaba-inc\"}",
+      "headers_json": "{}",
+      "body_template": "",
+      "ip_param_name": "ip",
+      "timeout": 3,
+      "country_path": "data.country",
+      "region_path": "data.region",
+      "city_path": "data.city",
+      "full_path": "data.isp",
+      "priority": 0,
+      "notes": "访问频率需小于1qps"
+    }
+  ]
   offline:
     enabled: false
     db_path: ""
