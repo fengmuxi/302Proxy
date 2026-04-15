@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -135,7 +136,7 @@ class GeoResolver:
             raise ValueError("测试 IP 格式无效，请输入合法的 IPv4 或 IPv6 地址。")
 
         ip_text = str(parsed_ip)
-        location, message = await self._resolve_online_source_detailed(ip_text, source)
+        location, message, upstream_response = await self._resolve_online_source_detailed(ip_text, source)
         provider_name = source.name or source.url
 
         return {
@@ -144,6 +145,7 @@ class GeoResolver:
             "provider": provider_name,
             "message": message,
             "location": self._serialize_location(location) if location else None,
+            "upstream_response": upstream_response,
         }
 
     async def test_offline_database(
@@ -230,14 +232,14 @@ class GeoResolver:
         return attempts
 
     async def _resolve_online_source(self, ip_text: str, source: OnlineGeoIPSource) -> Optional[GeoLocation]:
-        location, _ = await self._resolve_online_source_detailed(ip_text, source)
+        location, _, _ = await self._resolve_online_source_detailed(ip_text, source)
         return location
 
     async def _resolve_online_source_detailed(
         self,
         ip_text: str,
         source: OnlineGeoIPSource,
-    ) -> tuple[Optional[GeoLocation], str]:
+    ) -> tuple[Optional[GeoLocation], str, Dict[str, Any]]:
         own_session = self._session_provider is None
         session = await self._get_session(source.timeout)
         headers = self._parse_json(source.headers_json, {})
@@ -246,16 +248,47 @@ class GeoResolver:
             "ssl": False,
             "timeout": aiohttp.ClientTimeout(total=source.timeout),
         }
+        payload: Any = None
+        upstream_response: Dict[str, Any] = {
+            "status": None,
+            "ok": False,
+            "content_type": "",
+            "payload": None,
+            "error": "",
+        }
+        method = (source.method or "GET").upper()
+        request_location = self._normalize_request_location(method, source.request_location)
+        request_url = self._build_online_request_url(source.url, ip_text, request_location)
 
         try:
-            request_kwargs.update(self._build_online_request_kwargs(source, ip_text))
-            logger.info("Online geo source '%s' request: %s", source.name or source.url, request_kwargs)
-            async with session.request(source.method.upper(), source.url, **request_kwargs) as response:
-                response.raise_for_status()
-                payload = await response.json(content_type=None)
+            request_kwargs.update(
+                self._build_online_request_kwargs(source, ip_text, request_location=request_location)
+            )
+            logger.info("Online geo source '%s' request: url=%s kwargs=%s", source.name or source.url, request_url, request_kwargs)
+            async with session.request(method, request_url, **request_kwargs) as response:
+                upstream_response["status"] = int(response.status)
+                upstream_response["ok"] = 200 <= response.status < 300
+                upstream_response["content_type"] = str(response.headers.get("Content-Type", ""))
+                response_bytes = await response.read()
+                response_charset = response.charset or "utf-8"
+                try:
+                    response_text = response_bytes.decode(response_charset, errors="replace")
+                except LookupError:
+                    response_text = response_bytes.decode("utf-8", errors="replace")
+                payload = self._parse_online_source_payload(response_text)
+                upstream_response["payload"] = payload
+                if response.status >= 400:
+                    logger.error(
+                        "Online geo source '%s' failed for %s: HTTP %s",
+                        source.name or source.url,
+                        ip_text,
+                        response.status,
+                    )
+                    return None, f"在线源请求失败: HTTP {response.status}", upstream_response
         except Exception as exc:
             logger.error("Online geo source '%s' failed for %s: %s", source.name or source.url, ip_text, exc)
-            return None, f"在线源请求失败: {exc}"
+            upstream_response["error"] = str(exc)
+            return None, f"在线源请求失败: {exc}", upstream_response
         finally:
             if own_session:
                 await session.close()
@@ -267,7 +300,7 @@ class GeoResolver:
         full_text = self._stringify(deep_get(payload, source.full_path, ""))
         if not any([country, region, city, full_text]):
             logger.warning("Online geo source '%s' returned no usable location for %s.", source.name or source.url, ip_text)
-            return None, "接口调用成功，但未根据字段路径提取到有效区域信息。"
+            return None, "接口调用成功，但未根据字段路径提取到有效区域信息。", upstream_response
 
         return (
             GeoLocation(
@@ -280,20 +313,25 @@ class GeoResolver:
                 raw=payload if isinstance(payload, dict) else {"payload": payload},
             ),
             "在线定位测试成功。",
+            upstream_response,
         )
 
-    def _build_online_request_kwargs(self, source: OnlineGeoIPSource, ip_text: str) -> Dict[str, Any]:
-        method = source.method.upper()
-        request_location = (source.request_location or "query").lower()
-        if method == "GET":
-            request_location = "query"
+    def _build_online_request_kwargs(
+        self,
+        source: OnlineGeoIPSource,
+        ip_text: str,
+        *,
+        request_location: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        method = (source.method or "GET").upper()
+        resolved_location = self._normalize_request_location(method, request_location or source.request_location)
 
         request_kwargs: Dict[str, Any] = {}
-        query_params = self._build_query_params(source, ip_text, include_ip=request_location == "query")
+        query_params = self._build_query_params(source, ip_text, include_ip=resolved_location == "query")
         if query_params:
             request_kwargs["params"] = query_params
 
-        if request_location == "query":
+        if resolved_location in {"query", "path"}:
             return request_kwargs
 
         rendered = self._render_template_text(source.body_template or "", ip_text)
@@ -325,6 +363,48 @@ class GeoResolver:
             return request_kwargs
         request_kwargs["json"] = {source.ip_param_name: ip_text}
         return request_kwargs
+
+    def _build_online_request_url(
+        self,
+        raw_url: str,
+        ip_text: str,
+        request_location: str,
+    ) -> str:
+        base_url = str(raw_url or "").strip()
+        if request_location != "path":
+            return self._render_template_text(base_url, ip_text)
+
+        rendered_url, has_ip_placeholder = self._render_path_template_text(base_url, ip_text)
+        if has_ip_placeholder:
+            return rendered_url
+        return self._append_url_path_segment(rendered_url, quote(ip_text, safe=""))
+
+    def _normalize_request_location(self, method: str, request_location: str) -> str:
+        normalized_location = str(request_location or "query").strip().lower() or "query"
+        if normalized_location not in {"query", "body", "path"}:
+            normalized_location = "query"
+        if method.upper() == "GET" and normalized_location == "body":
+            return "query"
+        return normalized_location
+
+    def _render_path_template_text(self, text: str, ip_text: str) -> tuple[str, bool]:
+        rendered = str(text or "")
+        encoded_ip = quote(ip_text, safe="")
+        placeholder_applied = False
+        for token in ("{{ip}}", "{ip}"):
+            if token in rendered:
+                rendered = rendered.replace(token, encoded_ip)
+                placeholder_applied = True
+        rendered = rendered.replace("{{timestamp}}", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        return rendered, placeholder_applied
+
+    def _append_url_path_segment(self, url_text: str, segment: str) -> str:
+        parsed = urlsplit(url_text)
+        path = parsed.path or ""
+        if not path.endswith("/"):
+            path = f"{path}/" if path else "/"
+        path = f"{path}{segment}"
+        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
     def _build_query_params(
         self,
@@ -504,6 +584,14 @@ class GeoResolver:
             logger.warning("Failed to parse geo headers JSON, using default headers.")
             return default
         return parsed if isinstance(parsed, dict) else default
+
+    def _parse_online_source_payload(self, response_text: str) -> Any:
+        if not response_text:
+            return {}
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            return response_text
 
     def _render_template_text(self, text: str, ip_text: str) -> str:
         rendered = text.replace("{{ip}}", ip_text)

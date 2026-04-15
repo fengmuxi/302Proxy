@@ -149,6 +149,24 @@ function getChecked(id) {
   return Boolean(el && el.checked);
 }
 
+function getNonNegativeIntValue(id, fallback = 0) {
+  const raw = String(getValue(id) || "").trim();
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
+    return Math.max(0, Number.parseInt(String(fallback), 10) || 0);
+  }
+  return Math.max(0, parsed);
+}
+
+function getPositiveIntValue(id, fallback = 1) {
+  const raw = String(getValue(id) || "").trim();
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
+    return Math.max(1, Number.parseInt(String(fallback), 10) || 1);
+  }
+  return Math.max(1, parsed);
+}
+
 function setText(id, value) {
   const el = document.getElementById(id);
   if (el) {
@@ -469,9 +487,35 @@ function collectRouteGroupForm() {
   };
 }
 
+function bindGeoNumericInputSafety() {
+  const bindInput = (id, sanitizer) => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.addEventListener("wheel", (event) => {
+      if (document.activeElement === input) {
+        event.preventDefault();
+        input.blur();
+      }
+    }, { passive: false });
+    input.addEventListener("change", () => {
+      sanitizer();
+    });
+    input.addEventListener("blur", () => {
+      sanitizer();
+    });
+  };
+
+  bindInput("geo_online_cache_ttl_seconds", () => {
+    setValue("geo_online_cache_ttl_seconds", getNonNegativeIntValue("geo_online_cache_ttl_seconds", 120));
+  });
+  bindInput("geo_offline_refresh_interval_hours", () => {
+    setValue("geo_offline_refresh_interval_hours", getPositiveIntValue("geo_offline_refresh_interval_hours", 24));
+  });
+}
+
 function fillGeoConfig(geo) {
   setChecked("geo_enabled", geo.enabled);
-  setValue("geo_online_cache_ttl_seconds", geo.online_cache_ttl_seconds ?? 120);
+  setValue("geo_online_cache_ttl_seconds", Math.max(0, Number.parseInt(String(geo.online_cache_ttl_seconds ?? 120), 10) || 120));
   state.geoSources = Array.isArray(geo.sources)
     ? geo.sources.map((item, index) => ({
         id: item.id ?? `source-${index}`,
@@ -504,7 +548,7 @@ function fillGeoConfig(geo) {
   setValue("geo_offline_locale", geo.offline?.locale || "zh-CN");
   setValue("geo_offline_download_url", geo.offline?.download_url || "");
   setValue("geo_offline_download_headers_json", geo.offline?.download_headers_json || "{}");
-  setValue("geo_offline_refresh_interval_hours", geo.offline?.refresh_interval_hours ?? 24);
+  setValue("geo_offline_refresh_interval_hours", Math.max(1, Number.parseInt(String(geo.offline?.refresh_interval_hours ?? 24), 10) || 24));
   renderOfflineStatus(geo.offline || {});
   resetOfflineGeoTestResult();
 }
@@ -614,6 +658,20 @@ function resetGeoSourceTestResult(message = "输入测试 IP 后，可查看测�
   container.innerHTML = `<p class="test-result-placeholder">${escapeHtml(message)}</p>`;
 }
 
+function formatTestRawPayload(payload) {
+  if (payload === undefined || payload === null) {
+    return "";
+  }
+  if (typeof payload === "string") {
+    return payload;
+  }
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
+}
+
 function renderGeoSourceTestResult(result) {
   const container = document.getElementById("geo-source-test-result");
   const location = result.location || {};
@@ -621,12 +679,16 @@ function renderGeoSourceTestResult(result) {
   const testIp = location.ip || getValue("geo_source_test_ip").trim() || "-";
   const statusText = result.success ? "测试成功" : "测试失败";
   const statusClass = result.success ? "success" : "failed";
+  const upstreamResponse = result.upstream_response || {};
+  const upstreamPayload =
+    upstreamResponse.payload !== undefined ? upstreamResponse.payload : location.raw;
+  const upstreamPayloadText = formatTestRawPayload(upstreamPayload);
   const rawJson =
-    location.raw && Object.keys(location.raw).length
+    upstreamPayloadText
       ? `
         <details class="test-result-raw">
           <summary>查看接口原始返回</summary>
-          <pre>${escapeHtml(JSON.stringify(location.raw, null, 2))}</pre>
+          <pre>${escapeHtml(upstreamPayloadText)}</pre>
         </details>
       `
       : "";
@@ -652,6 +714,10 @@ function renderGeoSourceTestResult(result) {
       <div class="result-item">
         <strong>定位阶段</strong>
         <span>${escapeHtml(result.stage || "-")}</span>
+      </div>
+      <div class="result-item">
+        <strong>上游状态</strong>
+        <span>${escapeHtml(String(upstreamResponse.status ?? "-"))}</span>
       </div>
       <div class="result-item">
         <strong>国家</strong>
@@ -1118,7 +1184,7 @@ async function loadDashboard() {
 function buildGeoSettingsPayload() {
   return {
     enabled: getChecked("geo_enabled"),
-    online_cache_ttl_seconds: Number(getValue("geo_online_cache_ttl_seconds") || 0),
+    online_cache_ttl_seconds: getNonNegativeIntValue("geo_online_cache_ttl_seconds", 120),
     sources: state.geoSources.map((source) => ({
       name: source.name,
       enabled: source.enabled,
@@ -1145,7 +1211,7 @@ function buildGeoSettingsPayload() {
       locale: getValue("geo_offline_locale"),
       download_url: getValue("geo_offline_download_url"),
       download_headers_json: getValue("geo_offline_download_headers_json"),
-      refresh_interval_hours: Number(getValue("geo_offline_refresh_interval_hours") || 24),
+      refresh_interval_hours: getPositiveIntValue("geo_offline_refresh_interval_hours", 24),
     },
   };
 }
@@ -1590,7 +1656,8 @@ document.getElementById("geo-sources-table-body").addEventListener("click", asyn
 
   if (action === "edit-geo-source") {
     fillGeoSourceForm(source, index);
-    scrollToElement("geoip-form");
+    setActiveModule("geoip-online");
+    scrollToElement("geoip-online-form");
     focusField("geo_source_name");
     return;
   }
@@ -1613,13 +1680,17 @@ document.getElementById("geo-sources-table-body").addEventListener("click", asyn
   }
 });
 
-document.getElementById("geoip-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    await persistGeoSettings();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+["geoip-online-form", "geoip-offline-form"].forEach((formId) => {
+  const form = document.getElementById(formId);
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await persistGeoSettings(formId === "geoip-online-form" ? "在线定位配置已保存。" : "离线定位配置已保存。");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
 });
 
 document.getElementById("rule-form").addEventListener("submit", async (event) => {
@@ -1728,6 +1799,7 @@ els.authLogoutBtn?.addEventListener("click", async () => {
 
 window.addEventListener("DOMContentLoaded", async () => {
   setActiveModule("overview");
+  bindGeoNumericInputSafety();
   resetRouteGroupForm();
   resetGeoSourceForm();
   resetRuleForm();

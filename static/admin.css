@@ -14,6 +14,7 @@
   --radius-lg: 28px;
   --radius-md: 18px;
   --radius-sm: 12px;
+  --panel-scroll-max-height: clamp(420px, 68vh, 860px);
   --font-sans: "Aptos", "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", sans-serif;
 }
 
@@ -463,6 +464,11 @@ textarea {
 .route-group-cards {
   display: grid;
   gap: 16px;
+  max-height: var(--panel-scroll-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
 }
 
 .prefix-card {
@@ -573,6 +579,14 @@ textarea {
 
 .rule-list-wrap {
   overflow-x: auto;
+}
+
+.rules-layout > .rule-list-wrap {
+  max-height: var(--panel-scroll-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
 }
 
 .rules-table {

@@ -154,6 +154,26 @@ geoip:
       "full_path": "data.isp",
       "priority": 0,
       "notes": "访问频率需小于1qps"
+    },
+    {
+      "name": "api.ip.sb",
+      "enabled": true,
+      "weight": 3,
+      "url": "https://api.ip.sb/geoip/{{ip}}",
+      "method": "GET",
+      "request_location": "query",
+      "body_format": "json",
+      "query_params_json": "{}",
+      "headers_json": "{}",
+      "body_template": "",
+      "ip_param_name": "ip",
+      "timeout": 3,
+      "country_path": "country",
+      "region_path": "region",
+      "city_path": "city",
+      "full_path": "",
+      "priority": 1,
+      "notes": ""
     }
   ]
   offline:
