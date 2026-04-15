@@ -25,12 +25,18 @@ import argparse
 import re
 import signal
 import sys
+import time
 from aiohttp import web
 from typing import Dict, Any, AsyncGenerator, Optional, Tuple
 import json
 import logging
+from datetime import datetime, timezone
 
 from config import Config, load_config, setup_logging
+from admin_console import AdminConsole
+from config_store import ConfigStore
+from geo_service import GeoResolver
+from offline_geoip_sync import OfflineGeoIPSyncService
 from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
 
 # ============================================================================
@@ -113,7 +119,7 @@ class ProxyServer:
         - 依赖注入：缓存管理器作为可选依赖注入
     """
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, config_store: ConfigStore):
         """
         初始化代理服务器
         
@@ -127,14 +133,24 @@ class ProxyServer:
             config: 配置对象，包含服务器的所有配置参数
         """
         self.config = config
-        # 创建请求处理器，负责处理代理请求的核心逻辑
-        self.request_handler = ProxyRequestHandler(config)
-        # 创建统计收集器，用于记录请求统计信息
+        self.config_store = config_store
+        self.geo_resolver = GeoResolver()
+        self.geo_resolver.set_online_cache_ttl_seconds(config.geoip.online_cache_ttl_seconds, reset_existing=True)
+        self.offline_geoip_sync_service = OfflineGeoIPSyncService(
+            config_store=self.config_store,
+            geo_resolver=self.geo_resolver,
+        )
+        self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver)
+        self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
-        # 缓存管理器，在启动时根据配置和依赖可用性初始化
         self.cache_manager: StreamingCacheManager = None
-        # 创建 aiohttp Web 应用
-        # client_max_size 设置请求体最大大小，用于限制上传文件大小
+        self.admin_console = AdminConsole(
+            config_store=self.config_store,
+            reload_callback=self.reload_runtime_config,
+            offline_sync_callback=self.sync_offline_geoip_now,
+            offline_rollback_callback=self.rollback_offline_geoip_now,
+            online_cache_clear_callback=self.clear_online_geoip_cache,
+        )
         self.app = web.Application(client_max_size=config.streaming.max_request_body_size)
         # 设置路由规则
         self._setup_routes()
@@ -163,7 +179,6 @@ class ProxyServer:
             管理接口使用 /_ 前缀，避免与代理路径冲突
         """
         # 代理路由：匹配所有路径，支持所有 HTTP 方法
-        self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
         
         # 健康检查接口 - 用于负载均衡器或监控系统检测服务状态
         self.app.router.add_get('/_health', self.health_check)
@@ -177,6 +192,8 @@ class ProxyServer:
         self.app.router.add_post('/_cache/clear', self.clear_cache)
         self.app.router.add_post('/_cache/preload', self.preload_cache)
         self.app.router.add_delete('/_cache/entry', self.remove_cache_entry)
+        self.admin_console.register(self.app)
+        self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
     def _setup_middleware(self):
         """
@@ -209,30 +226,137 @@ class ProxyServer:
             返回:
                 处理函数返回的响应对象
             """
-            # 记录请求开始时间，使用事件循环时间以获得更高精度
-            start_time = asyncio.get_event_loop().time()
+            # 使用高精度单调时钟记录请求耗时，避免毫秒级请求被显示为 0.000 秒
+            start_time = time.perf_counter()
             try:
                 # 执行实际的请求处理
                 response = await handler(request)
                 # 计算请求处理耗时
-                duration = asyncio.get_event_loop().time() - start_time
+                duration_ms = (time.perf_counter() - start_time) * 1000
                 # 记录成功请求的日志
                 logger.info(
-                    f"{request.method} {request.path} - 状态码: {response.status} - 耗时: {duration:.3f}秒"
+                    f"{request.method} {request.path} - 状态码: {response.status} - 耗时: {duration_ms:.2f}毫秒"
                 )
                 return response
             except Exception as e:
                 # 计算请求处理耗时（即使发生异常）
-                duration = asyncio.get_event_loop().time() - start_time
+                duration_ms = (time.perf_counter() - start_time) * 1000
                 # 记录失败请求的日志
                 logger.error(
-                    f"{request.method} {request.path} - 错误: {e} - 耗时: {duration:.3f}秒"
+                    f"{request.method} {request.path} - 错误: {e} - 耗时: {duration_ms:.2f}毫秒"
                 )
                 raise
         
         # 将中间件添加到应用
         self.app.middlewares.append(logging_middleware)
-    
+
+    async def reload_runtime_config(self) -> None:
+        self.config = self.config_store.load_runtime_config()
+        self.geo_resolver.set_online_cache_ttl_seconds(self.config.geoip.online_cache_ttl_seconds, reset_existing=True)
+        self.request_handler.update_config(self.config)
+
+    async def sync_offline_geoip_now(self) -> Dict[str, Any]:
+        return await self.offline_geoip_sync_service.sync_now(force=True)
+
+    async def rollback_offline_geoip_now(self) -> Dict[str, Any]:
+        return await self.offline_geoip_sync_service.rollback_now()
+
+    async def clear_online_geoip_cache(self) -> Dict[str, Any]:
+        summary_before = self.geo_resolver.get_online_cache_summary()
+        result = self.geo_resolver.clear_online_cache()
+        return {
+            "message": f"已清除 {result.get('cleared_count', 0)} 条在线定位缓存。",
+            "cleared_count": result.get("cleared_count", 0),
+            "ttl_seconds": summary_before.get("ttl_seconds", self.config.geoip.online_cache_ttl_seconds),
+        }
+
+    def _request_duration_ms(self, request: web.Request) -> int:
+        started_at = request.get("_route_log_started_at")
+        if started_at is None:
+            return 0
+        return max(0, int((time.perf_counter() - float(started_at)) * 1000))
+
+    def _infer_route_log_result_status(
+        self,
+        *,
+        route_decision,
+        upstream_status: int,
+        cache_status: str,
+        error_message: str = "",
+    ) -> str:
+        if error_message:
+            return "proxy_error"
+        if route_decision is None:
+            return "no_route"
+        if cache_status == "HIT":
+            return "cache_hit"
+        if upstream_status >= 500:
+            return "upstream_error"
+        if upstream_status >= 400:
+            return "forwarded_client_error"
+        return "forwarded"
+
+    def _record_route_log(
+        self,
+        request: web.Request,
+        *,
+        route_decision=None,
+        upstream_status: int = 0,
+        cache_status: str = "",
+        redirect_info=None,
+        transport_mode: str = "",
+        error_message: str = "",
+    ) -> None:
+        try:
+            geo_location = route_decision.geo_location if route_decision else None
+            geo_source = geo_location.source if geo_location else ""
+            if (
+                geo_location
+                and geo_location.online_cache_hit
+                and str(geo_source).startswith("online:")
+            ):
+                geo_source = f"{geo_source}|cache_hit"
+            payload = {
+                "request_method": request.method,
+                "request_path": request.path,
+                "request_query_string": request.query_string,
+                "path_prefix": route_decision.rule.path_prefix if route_decision else "",
+                "rule_id": route_decision.rule.rule_id if route_decision else None,
+                "rule_name": route_decision.rule.name if route_decision else "",
+                "rule_source": route_decision.rule.source if route_decision else "",
+                "target_url": route_decision.target_url if route_decision else "",
+                "original_client_ip": request.remote or "",
+                "client_ip": route_decision.client_ip if route_decision else (request.remote or ""),
+                "region_matching_enabled": route_decision.region_matching_enabled if route_decision else False,
+                "geo_source": geo_source,
+                "geo_summary": geo_location.summary if geo_location else "",
+                "geo_country": geo_location.country if geo_location else "",
+                "geo_region": geo_location.region if geo_location else "",
+                "geo_city": geo_location.city if geo_location else "",
+                "configured_ip_whitelist": route_decision.rule.ip_whitelist if route_decision else "",
+                "matched_ip_whitelist": route_decision.matched_ip_whitelist if route_decision else "",
+                "configured_regions": route_decision.rule.region_filters if route_decision else "",
+                "matched_region": route_decision.matched_region if route_decision else "",
+                "match_strategy": route_decision.match_strategy if route_decision else "no_route",
+                "match_detail": route_decision.match_detail if route_decision else "no_matching_rule_found",
+                "upstream_status": upstream_status,
+                "cache_status": cache_status,
+                "redirect_count": redirect_info.redirect_count if redirect_info else 0,
+                "transport_mode": transport_mode,
+                "operation_duration_ms": self._request_duration_ms(request),
+                "result_status": self._infer_route_log_result_status(
+                    route_decision=route_decision,
+                    upstream_status=upstream_status,
+                    cache_status=cache_status,
+                    error_message=error_message,
+                ),
+                "error_message": error_message,
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            self.config_store.insert_route_log(payload)
+        except Exception as exc:
+            logger.warning("Failed to record route log: %s", exc)
+
     def should_use_streaming(self, headers: Dict[str, str], content_length: int = None) -> bool:
         """
         判断是否应该使用流式传输
@@ -425,7 +549,9 @@ class ProxyServer:
             - 捕获所有异常并返回 500 错误
             - 记录详细的错误日志
         """
+        route_decision = None
         try:
+            request["_route_log_started_at"] = time.perf_counter()
             # ====================================================================
             # 第一阶段：解析客户端请求
             # ====================================================================
@@ -448,6 +574,16 @@ class ProxyServer:
             body = await request.read()       # 请求体（用于 POST/PUT 等）
             client_host = request.remote or ''  # 客户端 IP 地址
             scheme = request.scheme           # 请求协议（http/https）
+            route_decision = await self.request_handler.select_route(
+                path_decoded,
+                headers,
+                client_host,
+                query_string if query_string else None,
+            )
+            target_url = route_decision.target_url if route_decision else None
+            use_streaming_mode = bool(
+                route_decision and route_decision.rule.enable_streaming and self.config.streaming.enabled
+            )
             
             # 获取 Range 请求头，用于断点续传
             # 格式：bytes=start-end 或 bytes=start-
@@ -457,17 +593,12 @@ class ProxyServer:
             # 第二阶段：尝试从缓存获取响应
             # ====================================================================
             # 只有 GET 请求且缓存可用时才尝试缓存查找
-            if self.cache_manager and method == 'GET':
-                # 查找匹配的代理规则（使用解码后的路径进行匹配）
-                rule = self.request_handler.find_matching_rule(path_decoded)
-                if rule:
-                    # 构建目标 URL（使用解码后的路径 + 查询字符串）
-                    target_url = self.request_handler.build_target_url(path_decoded, rule, query_string)
+            if self.cache_manager and method == 'GET' and route_decision and target_url:
                     
                     # ----------------------------------------------------------------
                     # 流式传输模式下的缓存处理
                     # ----------------------------------------------------------------
-                    if self.config.streaming.enabled:
+                    if use_streaming_mode:
                         # 尝试从缓存获取流式响应
                         # get_stream 返回一个生成器，可以按需读取数据块
                         cached_stream = await self.cache_manager.get_stream(target_url, range_header)
@@ -549,6 +680,13 @@ class ProxyServer:
                                 streaming=True,
                                 bytes_count=bytes_transferred
                             )
+                            self._record_route_log(
+                                request,
+                                route_decision=route_decision,
+                                upstream_status=206 if range_header else 200,
+                                cache_status="HIT",
+                                transport_mode="streaming",
+                            )
                             return response
                     
                     # ----------------------------------------------------------------
@@ -571,6 +709,13 @@ class ProxyServer:
                             
                             # 记录请求统计
                             await self.stats.record_request(bytes_count=len(data))
+                            self._record_route_log(
+                                request,
+                                route_decision=route_decision,
+                                upstream_status=206 if range_header else 200,
+                                cache_status="HIT",
+                                transport_mode="standard",
+                            )
                             
                             # 返回完整响应
                             response_headers = self._build_cached_response_headers(
@@ -596,7 +741,7 @@ class ProxyServer:
             # ====================================================================
             # 第三阶段：缓存未命中，转发请求到上游服务器
             # ====================================================================
-            if self.config.streaming.enabled:
+            if use_streaming_mode:
                 # 流式传输模式
                 # 调用请求处理器获取流式响应
                 streaming_response = await self.request_handler.handle_request_streaming(
@@ -606,7 +751,8 @@ class ProxyServer:
                     body=body if body else None,
                     client_host=client_host,
                     scheme=scheme,
-                    query_string=query_string if query_string else None
+                    query_string=query_string if query_string else None,
+                    route_decision=route_decision,
                 )
                 
                 # 发送流式响应并尝试缓存
@@ -616,14 +762,15 @@ class ProxyServer:
             else:
                 # 普通传输模式
                 # 调用请求处理器获取完整响应
-                status, response_headers, response_body, redirect_info = await self.request_handler.handle_request(
+                status, response_headers, response_body, redirect_info, route_decision = await self.request_handler.handle_request(
                     method=method,
                     path=path_decoded,
                     headers=headers,
                     body=body if body else None,
                     client_host=client_host,
                     scheme=scheme,
-                    query_string=query_string if query_string else None
+                    query_string=query_string if query_string else None,
+                    route_decision=route_decision,
                 )
                 
                 # 记录请求统计
@@ -631,6 +778,14 @@ class ProxyServer:
                     redirected=redirect_info is not None and redirect_info.redirect_count > 0,
                     redirect_count=redirect_info.redirect_count if redirect_info else 0,
                     failed=status >= 400
+                )
+                self._record_route_log(
+                    request,
+                    route_decision=route_decision,
+                    upstream_status=status,
+                    cache_status=response_headers.get("X-Cache-Status", "BYPASS"),
+                    redirect_info=redirect_info,
+                    transport_mode="standard",
                 )
                 
                 # 如果发生了重定向，添加重定向信息到响应头
@@ -652,6 +807,14 @@ class ProxyServer:
         except Exception as e:
             logger.exception(f"处理请求时发生错误: {e}")
             await self.stats.record_request(failed=True)
+            self._record_route_log(
+                request,
+                route_decision=route_decision,
+                upstream_status=500,
+                cache_status="",
+                transport_mode="streaming" if request.get("_route_log_started_at") and route_decision and route_decision.rule.enable_streaming else "standard",
+                error_message=str(e),
+            )
             # 返回 500 内部服务器错误
             return web.Response(
                 status=500,
@@ -724,18 +887,10 @@ class ProxyServer:
             self.should_use_streaming(response_headers, streaming_response.content_length)
         )
 
-        if should_cache:
-            # 查找代理规则并构建目标 URL
-            # 从请求对象获取路径信息
-            path_decoded = request.path  # 解码后的路径
-            query_string = request.query_string  # 查询字符串
-            
-            rule = self.request_handler.find_matching_rule(path_decoded)
-            if rule:
-                # 使用解码后的路径构建目标 URL
-                target_url = self.request_handler.build_target_url(path_decoded, rule, query_string if query_string else None)
-                
-                try:
+        route_decision = streaming_response.route_decision
+        if should_cache and route_decision:
+            target_url = route_decision.target_url
+            try:
                     # ----------------------------------------------------------------
                     # 边传边缓存的核心逻辑
                     # ----------------------------------------------------------------
@@ -792,11 +947,19 @@ class ProxyServer:
                     
                     # 记录统计
                     await self.stats.record_request(bytes_count=bytes_transferred)
+                    self._record_route_log(
+                        request,
+                        route_decision=route_decision,
+                        upstream_status=streaming_response.status,
+                        cache_status="MISS",
+                        redirect_info=redirect_info,
+                        transport_mode="streaming",
+                    )
                     return response
-                    
-                except Exception as e:
-                    # 缓存失败，记录错误但继续传输
-                    logger.error(f"缓存流式响应时出错：{e}, 继续传输但不缓存")
+
+            except Exception as e:
+                # 缓存失败，记录错误但继续传输
+                logger.error(f"缓存流式响应时出错：{e}, 继续传输但不缓存")
         
         # ====================================================================
         # 不缓存的情况：直接传输
@@ -845,6 +1008,14 @@ class ProxyServer:
         finally:
             # 确保统计被记录
             await self.stats.record_request(bytes_count=bytes_transferred)
+            self._record_route_log(
+                request,
+                route_decision=route_decision,
+                upstream_status=streaming_response.status,
+                cache_status="BYPASS",
+                redirect_info=redirect_info,
+                transport_mode="streaming",
+            )
         
         return response
     
@@ -922,6 +1093,14 @@ class ProxyServer:
                 raise
         finally:
             await self.stats.record_request(bytes_count=bytes_transferred)
+            self._record_route_log(
+                request,
+                route_decision=streaming_response.route_decision,
+                upstream_status=streaming_response.status,
+                cache_status=response_headers.get("X-Cache-Status", "BYPASS"),
+                redirect_info=redirect_info,
+                transport_mode="streaming",
+            )
         
         return response
     
@@ -946,7 +1125,15 @@ class ProxyServer:
         return web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
-            body=json.dumps({'status': 'healthy'}).encode()
+            body=json.dumps({
+                'status': 'healthy',
+                'database_path': str(self.config_store.db_path),
+                'route_group_count': len(self.config.route_groups),
+                'region_enabled_group_count': sum(
+                    1 for group in self.config.route_groups if group.region_matching_enabled
+                ),
+                'rule_count': len(self.config.proxy_rules)
+            }, ensure_ascii=False).encode()
         )
     
     async def get_stats(self, request: web.Request) -> web.Response:
@@ -1211,6 +1398,16 @@ class ProxyServer:
         # 打印服务器启动信息
         logger.info(f"代理服务器启动于 {self.config.server.host}:{self.config.server.port}")
         logger.info(f"代理规则数量: {len(self.config.proxy_rules)}")
+        logger.info(f"路径前缀分组数量: {len(self.config.route_groups)}")
+        logger.info(
+            f"启用地区匹配的分组数量: {sum(1 for group in self.config.route_groups if group.region_matching_enabled)}"
+        )
+        pruned_logs = self.config_store.prune_route_logs(force=True)
+        logger.info(
+            f"规则日志保留天数: {self.config_store.get_route_log_settings().get('retention_days', 30)}, "
+            f"启动时清理过期日志数量: {pruned_logs.get('deleted_count', 0)}"
+        )
+        self.offline_geoip_sync_service.start()
         
         # 打印流式传输配置
         logger.info(f"流式传输已启用: {self.config.streaming.enabled}")
@@ -1283,6 +1480,8 @@ class ProxyServer:
         # 关闭缓存管理器
         if self.cache_manager:
             await self.cache_manager.close()
+        await self.offline_geoip_sync_service.stop()
+        await self.geo_resolver.close()
         logger.info("代理服务器已停止")
     
     def run(self):
@@ -1399,8 +1598,16 @@ def main():
     # 解析命令行参数
     args = parser.parse_args()
     
-    # 加载配置文件
-    config = load_config(args.config)
+    # 加载配置文件并初始化本地数据库配置中心
+    bootstrap_config = load_config(args.config)
+    config_store = ConfigStore(bootstrap_config.database_path, bootstrap_config=bootstrap_config)
+    config = config_store.load_runtime_config()
+
+    # 默认使用配置文件中的服务端口/主机（除非命令行覆盖）
+    if args.port is None:
+        config.server.port = bootstrap_config.server.port
+    if args.host is None:
+        config.server.host = bootstrap_config.server.host
     
     # 应用命令行参数覆盖
     if args.port is not None:
@@ -1419,11 +1626,11 @@ def main():
     
     # 检查代理规则
     if not config.proxy_rules:
-        logger.warning("未配置代理规则。代理服务器将不会转发任何请求。")
-        logger.info("请在 config.yaml 中配置代理规则。")
+        logger.warning("当前本地数据库尚无代理规则。")
+        logger.info("如果已启用远程同步，服务启动时会尝试加载远程规则；否则请在 /_admin 中新增规则。")
     
     # 创建服务器实例
-    server = ProxyServer(config)
+    server = ProxyServer(config, config_store)
     
     # 注册信号处理函数
     # 用于优雅地处理 Ctrl+C 和 kill 命令

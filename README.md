@@ -1,4 +1,14 @@
-# HTTP Reverse Proxy with 302 Redirect Handler
+# 带 302 重定向处理的 HTTP 反向代理
+
+## 运行时新增能力
+
+- 本地 SQLite 配置中心，持久化存储在 `data/proxy_config.db`
+- 内置后台 `/_admin`，支持本地转发规则增删改查、定位源配置和功能开关
+- 支持后台简易登录，账号密码从 `config.yaml` 的 `admin_auth` 读取
+- 基于 `path_prefix` 的分组转发，支持分组开关、地区逗号分隔过滤和默认线路回退
+- 在线 IP 定位支持多源配置，按权重轮询，单次失败回退，离线 MMDB 兜底
+- 双定位策略：在线接口优先，本地 MMDB 次之
+- 定位失败时优雅降级到默认转发规则
 
 一个高性能的Python反向代理服务器，能够自动处理并转发302重定向的外网链接地址流量，支持大媒体文件流式传输和智能缓存。
 
@@ -59,7 +69,7 @@ pip install -r requirements.txt
 ```
 
 4. 配置代理规则
-编辑 `config.yaml` 文件，配置您的代理规则。
+编辑 `config.yaml` 文件，配置您的代理规则。服务启动时会读取 `config.yaml` 中的 `server.host` / `server.port`，其余配置写入本地数据库供后台管理使用。
 
 5. 启动服务
 ```bash
@@ -73,7 +83,7 @@ python main.py
 ```yaml
 server:
   host: "0.0.0.0"          # 监听地址
-  port: 8080               # 监听端口
+  port: 8080               # 监听端口（启动时读取）
   workers: 1               # 工作进程数
   keepalive_timeout: 75    # 保持连接超时（秒）
   max_connections: 1000    # 最大连接数
@@ -102,6 +112,13 @@ streaming:
   enable_range_support: true       # 是否支持 Range 请求
   max_request_body_size: 0         # 最大请求体大小（0 表示无限制，支持 B/KB/MB/GB）
 
+admin_auth:
+  enabled: true
+  username: "admin"
+  password: "123456"
+  session_ttl_hours: 12
+  cookie_name: "proxy_admin_session"
+
 cache:
   enabled: true                    # 是否启用缓存
   cache_dir: "./cache"             # 缓存目录
@@ -120,12 +137,13 @@ proxy_rules:
     strip_prefix: false           # 是否移除路径前缀
     timeout: 30                   # 请求超时（秒）
     max_redirects: 10             # 最大重定向次数
+    follow_redirects: true        # 是否自动跟随重定向（规则级别）
     retry_times: 3                # 重试次数
     enable_streaming: true        # 是否启用流式传输
 
 default_timeout: 30        # 默认超时时间
 max_redirects: 10          # 默认最大重定向次数
-follow_redirects: true     # 是否跟随重定向
+follow_redirects: true     # 是否跟随重定向（全局默认值）
 trust_forward_headers: true # 是否添加转发头
 ```
 
@@ -157,7 +175,7 @@ max_size: 10485760  # 兼容：纯字节数
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | host | string | "0.0.0.0" | 服务器监听地址 |
-| port | int | 8080 | 服务器监听端口 |
+| port | int | 8080 | 服务器监听端口（启动时读取） |
 | workers | int | 1 | 工作进程数 |
 | keepalive_timeout | int | 75 | HTTP Keep-Alive超时时间 |
 | max_connections | int | 1000 | 最大并发连接数 |
@@ -192,6 +210,16 @@ max_size: 10485760  # 兼容：纯字节数
 | enable_validation | bool | true | 是否启用缓存校验 |
 | validation_interval | int | 3600 | 缓存校验间隔（1 小时） |
 
+#### 后台登录配置 (admin_auth)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| enabled | bool | false | 是否启用后台登录 |
+| username | string | admin | 后台登录账号 |
+| password | string | 空 | 后台登录密码 |
+| session_ttl_hours | int | 12 | 登录会话有效时长（小时） |
+| cookie_name | string | proxy_admin_session | 登录 Cookie 名称 |
+
 #### 代理规则 (proxy_rules)
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -201,6 +229,7 @@ max_size: 10485760  # 兼容：纯字节数
 | strip_prefix | bool | 否 | 是否在转发时移除路径前缀 |
 | timeout | int | 否 | 该规则的超时时间 |
 | max_redirects | int | 否 | 该规则的最大重定向次数 |
+| follow_redirects | bool | 否 | 是否自动跟随重定向（规则级别） |
 | retry_times | int | 否 | 失败重试次数 |
 | enable_streaming | bool | 否 | 是否为该规则启用流式传输 |
 
@@ -690,11 +719,11 @@ curl http://localhost:8080/_health
 
 ## 许可证
 
-MIT License
+MIT 许可证
 
 ## 贡献
 
-欢迎提交Issue和Pull Request。
+欢迎提交 Issue 和 Pull Request。
 
 ## 更新日志
 

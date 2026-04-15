@@ -18,6 +18,13 @@ logging:
   max_size: 10MB
   backup_count: 5
 
+admin_auth:
+  enabled: true
+  username: "admin"
+  password: "123456"
+  session_ttl_hours: 168
+  cookie_name: "proxy_admin_session"
+
 streaming:
   enabled: true
   chunk_size: 64KB
@@ -49,6 +56,7 @@ proxy_rules:
     strip_prefix: false
     timeout: 30
     max_redirects: 10
+    follow_redirects: true
     retry_times: 3
     enable_streaming: true
 
@@ -56,3 +64,21 @@ default_timeout: 30
 max_redirects: 10
 follow_redirects: true
 trust_forward_headers: true
+
+database:
+  path: "data/proxy_config.db"
+
+region_matching:
+  enabled: false
+
+geoip:
+  enabled: true
+  online_cache_ttl_seconds: 120
+  sources: []
+  offline:
+    enabled: false
+    db_path: ""
+    locale: "zh-CN"
+    download_url: ""
+    download_headers_json: "{}"
+    refresh_interval_hours: 24

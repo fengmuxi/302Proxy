@@ -10,6 +10,7 @@ log/
 
 # 忽略缓存文件
 cache/
+data/
 
 # 忽略编辑器配置
 .vscode/

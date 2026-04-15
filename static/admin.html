@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxy Control Center</title>
+  <link rel="icon" type="image/svg+xml" href="/_admin/static/favicon.svg">
+  <link rel="stylesheet" href="/_admin/static/admin.css">
+</head>
+<body>
+  <div id="auth-overlay" class="auth-overlay is-active">
+    <div class="auth-card">
+      <p class="eyebrow">Admin Login</p>
+      <h1>后台登录</h1>
+      <p class="auth-text">请输入 `config.yaml` 中配置的后台账号和密码。</p>
+      <form id="auth-login-form" class="stack-form">
+        <label>
+          <span>账号</span>
+          <input id="auth_username" type="text" autocomplete="username" placeholder="admin" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="auth_password" type="password" autocomplete="current-password" placeholder="请输入密码" />
+        </label>
+        <p id="auth-error" class="auth-error" hidden></p>
+        <button type="submit" class="primary-btn">登录后台</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Proxy Control Center</p>
+        <h1>地区转发配置台</h1>
+        <p class="hero-text">
+          以路径前缀为单位管理多目标地址转发。每个前缀可以单独控制是否启用地区匹配，
+          同一前缀下的多条目标地址通过地区过滤命中，不命中时走该前缀默认地址。
+        </p>
+      </div>
+      <div class="hero-panel">
+        <div class="metric">
+          <span>本地数据库</span>
+          <strong id="metric-db-path">-</strong>
+        </div>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <span>规则总数</span>
+            <strong id="metric-total-rules">0</strong>
+          </div>
+          <div class="metric-card">
+            <span>启用规则</span>
+            <strong id="metric-enabled-rules">0</strong>
+          </div>
+          <div class="metric-card">
+            <span>前缀分组</span>
+            <strong id="metric-route-groups">0</strong>
+          </div>
+          <div class="metric-card">
+            <span>启用地区匹配分组</span>
+            <strong id="metric-region-groups">0</strong>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <nav class="module-nav" aria-label="配置菜单">
+      <button class="module-btn is-active" data-module-target="overview" type="button">概览</button>
+      <button class="module-btn" data-module-target="route-groups" type="button">路径前缀</button>
+      <button class="module-btn" data-module-target="rules" type="button">转发规则</button>
+      <button class="module-btn" data-module-target="logs" type="button">日志管理</button>
+      <button class="module-btn" data-module-target="geoip" type="button">IP 定位源</button>
+      <button id="auth-logout-btn" class="module-btn auth-logout-btn" type="button" hidden>退出登录</button>
+    </nav>
+
+    <main class="module-stack">
+      <section class="module-panel active" data-module-panel="overview">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Overview</p>
+              <h2>配置概览</h2>
+            </div>
+          </div>
+          <div class="summary-grid">
+            <article class="sub-card">
+              <div class="sub-card-head">
+                <h3>路径前缀模式</h3>
+              </div>
+              <p class="hint">
+                每个路径前缀都在自己的规则区里维护地区匹配开关。开关关闭时，直接走该前缀的默认规则。
+              </p>
+            </article>
+            <article class="sub-card">
+              <div class="sub-card-head">
+                <h3>在线定位策略</h3>
+              </div>
+              <p class="hint">
+                在线 IP 定位源支持多源配置、按权重轮询，主源异常时只回退一次，再落到离线 IP 库。
+              </p>
+            </article>
+            <article class="sub-card">
+              <div class="sub-card-head">
+                <h3>规则组织方式</h3>
+              </div>
+              <p class="hint">
+                同一路径前缀下可以配置多条目标地址规则，其中至少建议保留一条默认规则作为兜底。
+              </p>
+            </article>
+            <article class="sub-card">
+              <div class="sub-card-head">
+                <h3>建议操作顺序</h3>
+              </div>
+              <p class="hint">
+                先新增路径前缀，再新增该前缀下的转发规则，最后按需要开启该前缀的地区匹配。
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="route-groups">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Prefix Groups</p>
+              <h2>路径前缀与规则</h2>
+            </div>
+          </div>
+          <div class="route-groups-layout">
+            <div id="route-group-cards" class="route-group-cards"></div>
+
+            <form id="route-group-form" class="rule-form">
+              <input id="route_group_old_path_prefix" type="hidden" />
+              <input id="route_group_old_request_host" type="hidden" />
+              <div class="form-head-inline">
+                <h3 id="route-group-form-title">新增路径前缀</h3>
+                <button id="route-group-reset-btn" type="button" class="ghost-btn">清空</button>
+              </div>
+              <p class="hint">
+                这里只维护路径前缀名称和备注。地区开关请在左侧对应前缀卡片的规则区里直接控制。
+              </p>
+              <label>
+                <span>路径前缀</span>
+                <input id="route_group_path_prefix" type="text" placeholder="/play" />
+              </label>
+              <label>
+                <span>请求域名（可选）</span>
+                <input id="route_group_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
+              </label>
+              <label>
+                <span>备注</span>
+                <textarea id="route_group_notes" rows="3" placeholder="用于说明该路径前缀的业务用途"></textarea>
+              </label>
+              <button type="submit" class="primary-btn">保存路径前缀</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="rules">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Forward Rules</p>
+              <h2>转发规则配置</h2>
+              <p class="hint">也可以在“路径前缀与规则”里直接点击某个前缀下的“新增规则”进入这里。</p>
+            </div>
+          </div>
+          <div class="rules-layout">
+            <div class="rule-list-wrap">
+              <table class="rules-table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>路径前缀</th>
+                    <th>目标地址</th>
+                    <th>地区条件</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="rules-table-body"></tbody>
+              </table>
+            </div>
+
+            <form id="rule-form" class="rule-form">
+              <input id="rule_id" type="hidden" />
+              <div class="form-head-inline">
+                <h3 id="rule-form-title">新增规则</h3>
+                <button id="rule-reset-btn" type="button" class="ghost-btn">清空</button>
+              </div>
+              <div class="two-col">
+                <label>
+                  <span>规则名称</span>
+                  <input id="rule_name" type="text" placeholder="华东默认线路" />
+                </label>
+                <label>
+                  <span>路径前缀</span>
+                  <input id="rule_path_prefix" list="route-group-options" type="text" placeholder="/play" />
+                  <datalist id="route-group-options"></datalist>
+                </label>
+                <label>
+                  <span>请求域名（可选）</span>
+                  <input id="rule_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
+                </label>
+                <label>
+                  <span>目标地址</span>
+                  <input id="rule_target_url" type="url" placeholder="https://backend.example.com" />
+                </label>
+                <label>
+                  <span>IP 白名单</span>
+                  <input id="rule_ip_whitelist" type="text" placeholder="1.1.1.1,2.2.2.2,203.0.113.0/24" />
+                </label>
+                <label>
+                  <span>地区条件</span>
+                  <input id="rule_region_filters" type="text" placeholder="广东,深圳,华南" />
+                </label>
+                <label>
+                  <span>优先级</span>
+                  <input id="rule_priority" type="number" value="0" />
+                </label>
+                <label>
+                  <span>超时(秒)</span>
+                  <input id="rule_timeout" type="number" min="1" value="30" />
+                </label>
+                <label>
+                  <span>最大重定向</span>
+                  <input id="rule_max_redirects" type="number" min="0" value="10" />
+                </label>
+                <label>
+                  <span>重试次数</span>
+                  <input id="rule_retry_times" type="number" min="0" value="3" />
+                </label>
+              </div>
+              <label>
+                <span>备注</span>
+                <textarea id="rule_notes" rows="2" placeholder="用于补充业务说明"></textarea>
+              </label>
+              <div class="check-grid">
+                <label class="toggle-row"><span>启用规则</span><input id="rule_enabled" type="checkbox" checked /></label>
+                <label class="toggle-row"><span>默认规则</span><input id="rule_is_default" type="checkbox" /></label>
+                <label class="toggle-row"><span>去掉前缀</span><input id="rule_strip_prefix" type="checkbox" /></label>
+                <label class="toggle-row"><span>自动跟随重定向</span><input id="rule_follow_redirects" type="checkbox" checked /></label>
+                <label class="toggle-row"><span>启用流式转发</span><input id="rule_enable_streaming" type="checkbox" checked /></label>
+              </div>
+              <button type="submit" class="primary-btn">保存规则</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="logs">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Route Logs</p>
+              <h2>规则转发日志</h2>
+              <p class="hint">查询每次路径规则选路、地区匹配和最终转发目标，也可以设置自动清理天数。</p>
+            </div>
+          </div>
+          <div class="rules-layout logs-layout">
+            <div class="stack-form">
+              <form id="route-log-filter-form" class="sub-card stack-form">
+                <div class="sub-card-head">
+                  <h3>日志查询</h3>
+                  <div class="table-actions">
+                    <button id="route-log-search-btn" type="submit" class="primary-btn">查询日志</button>
+                    <button id="route-log-reset-btn" type="button" class="ghost-btn">重置条件</button>
+                  </div>
+                </div>
+                <div class="two-col">
+                  <label>
+                    <span>关键词</span>
+                    <input id="log_keyword" type="text" placeholder="路径、目标地址、地区、IP、原始IP" />
+                  </label>
+                  <label>
+                    <span>路径前缀</span>
+                    <input id="log_path_prefix" type="text" placeholder="/play" />
+                  </label>
+                  <label>
+                    <span>匹配策略</span>
+                    <select id="log_match_strategy">
+                      <option value="">全部</option>
+                      <option value="ip_whitelist_match">IP 白名单命中</option>
+                      <option value="region_match">地区匹配命中</option>
+                      <option value="default_route">默认规则转发</option>
+                      <option value="priority_fallback">优先级回退</option>
+                      <option value="no_route">未匹配到规则</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>结果状态</span>
+                    <select id="log_result_status">
+                      <option value="">全部</option>
+                      <option value="forwarded">转发成功</option>
+                      <option value="cache_hit">缓存命中</option>
+                      <option value="forwarded_client_error">上游返回 4xx</option>
+                      <option value="upstream_error">上游异常</option>
+                      <option value="proxy_error">代理内部错误</option>
+                      <option value="no_route">未匹配到规则</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>开始时间</span>
+                    <input id="log_date_from" type="datetime-local" />
+                  </label>
+                  <label>
+                    <span>结束时间</span>
+                    <input id="log_date_to" type="datetime-local" />
+                  </label>
+                  <label>
+                    <span>返回条数</span>
+                    <input id="log_limit" type="number" min="1" max="500" value="100" />
+                  </label>
+                </div>
+              </form>
+
+              <div class="sub-card">
+                <div class="sub-card-head">
+                  <h3>日志列表</h3>
+                  <div class="table-actions">
+                    <span class="hint" id="route-log-total-count">共 0 条</span>
+                    <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
+                    <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
+                  </div>
+                </div>
+                <div class="rule-list-wrap">
+                  <table class="route-log-table compact-table">
+                    <thead>
+                      <tr>
+                        <th><input id="route-log-select-all" type="checkbox" /></th>
+                        <th>时间</th>
+                        <th>请求</th>
+                        <th>前缀</th>
+                        <th>地区信息</th>
+                        <th>匹配情况</th>
+                        <th>转发结果</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="route-logs-table-body"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack-form">
+              <form id="route-log-settings-form" class="sub-card stack-form">
+                <div class="sub-card-head">
+                  <h3>日志保留设置</h3>
+                </div>
+                <label>
+                  <span>最大保存天数</span>
+                  <input id="log_retention_days" type="number" min="1" value="30" />
+                </label>
+                <p class="hint">超过该天数的规则日志会自动删除。系统启动时和运行过程中都会定期清理。</p>
+                <button type="submit" class="primary-btn">保存保留策略</button>
+              </form>
+
+              <div id="route-log-settings-status" class="test-result-card is-empty">
+                <p class="test-result-placeholder">这里会显示日志总数、最近清理时间和当前保留策略。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="geoip">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Geo Resolver</p>
+              <h2>IP 定位源配置</h2>
+            </div>
+          </div>
+          <form id="geoip-form" class="stack-form">
+            <label class="toggle-row">
+              <span>启用 IP 定位链路</span>
+              <input type="checkbox" id="geo_enabled" />
+            </label>
+
+            <div class="sub-card">
+              <div class="sub-card-head">
+                <h3>在线定位缓存</h3>
+              </div>
+              <div class="two-col">
+                <label>
+                  <span>缓存时长(秒)</span>
+                  <input id="geo_online_cache_ttl_seconds" type="number" min="0" value="120" />
+                </label>
+                <div class="test-actions">
+                  <p class="hint">只缓存在线定位成功结果。填 `0` 表示关闭在线定位缓存。</p>
+                  <button id="geo-online-cache-clear-btn" type="button" class="ghost-btn">清空在线定位缓存</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="sub-card">
+              <div class="sub-card-head">
+                <h3>在线定位源</h3>
+              </div>
+              <div class="rule-list-wrap">
+                <table class="rules-table">
+                  <thead>
+                    <tr>
+                      <th>名称</th>
+                      <th>地址</th>
+                      <th>权重</th>
+                      <th>方式</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="geo-sources-table-body"></tbody>
+                </table>
+              </div>
+
+              <div class="rule-form">
+                <input id="geo_source_id" type="hidden" />
+                <div class="form-head-inline">
+                  <h3 id="geo-source-form-title">新增在线源</h3>
+                  <button id="geo-source-reset-btn" type="button" class="ghost-btn">清空</button>
+                </div>
+                <div class="two-col">
+                  <label><span>名称</span><input id="geo_source_name" type="text" placeholder="provider-a" /></label>
+                  <label><span>接口地址</span><input id="geo_source_url" type="url" placeholder="https://example.com/ip/query" /></label>
+                  <label><span>权重</span><input id="geo_source_weight" type="number" min="1" value="1" /></label>
+                  <label><span>优先级</span><input id="geo_source_priority" type="number" value="0" /></label>
+                  <label><span>请求方法</span><select id="geo_source_method"><option value="GET">GET</option><option value="POST">POST</option></select></label>
+                  <label><span>传参位置</span><select id="geo_source_request_location"><option value="query">query</option><option value="body">body</option></select></label>
+                  <label><span>Body 格式</span><select id="geo_source_body_format"><option value="json">json</option><option value="form">form</option><option value="raw">raw</option></select></label>
+                  <label><span>IP 参数名</span><input id="geo_source_ip_param_name" type="text" value="ip" /></label>
+                  <label><span>超时(秒)</span><input id="geo_source_timeout" type="number" min="1" value="3" /></label>
+                  <label><span>国家字段路径</span><input id="geo_source_country_path" type="text" value="country" /></label>
+                  <label><span>地区字段路径</span><input id="geo_source_region_path" type="text" value="region" /></label>
+                  <label><span>城市字段路径</span><input id="geo_source_city_path" type="text" value="city" /></label>
+                  <label><span>完整地区字段路径</span><input id="geo_source_full_path" type="text" placeholder="data.location" /></label>
+                </div>
+                <label><span>Query 参数 JSON</span><textarea id="geo_source_query_params_json" rows="2" placeholder='{"accessKey":"demo","format":"json","ip":"{{ip}}"}'></textarea></label>
+                <label><span>请求头 JSON</span><textarea id="geo_source_headers_json" rows="2" placeholder='{"Authorization":"Bearer xxx"}'></textarea></label>
+                <label><span>请求体模板</span><textarea id="geo_source_body_template" rows="2" placeholder='{"ip":"{{ip}}"}'></textarea></label>
+                <label><span>备注</span><textarea id="geo_source_notes" rows="2" placeholder="用于说明该在线源的特点"></textarea></label>
+                <div class="check-grid">
+                  <label class="toggle-row"><span>启用在线源</span><input id="geo_source_enabled" type="checkbox" checked /></label>
+                </div>
+                <button id="geo-source-save-btn" type="button" class="primary-btn">保存在线源</button>
+              </div>
+            </div>
+
+            <div class="sub-card test-panel">
+              <div class="sub-card-head">
+                <h3>在线定位源测试</h3>
+              </div>
+              <div class="two-col">
+                <label>
+                  <span>测试 IP</span>
+                  <input id="geo_source_test_ip" type="text" placeholder="8.8.8.8" />
+                </label>
+                <div class="test-actions">
+                  <p class="hint">使用当前在线源表单内容直接测试，无需先保存到列表或数据库。</p>
+                  <button id="geo-source-test-btn" type="button" class="ghost-btn">测试当前在线源</button>
+                </div>
+              </div>
+              <div id="geo-source-test-result" class="test-result-card is-empty">
+                <p class="test-result-placeholder">输入测试 IP 后，可以直接查看测试结果和区域信息。</p>
+              </div>
+            </div>
+
+            <div class="sub-card">
+              <div class="sub-card-head">
+                <h3>离线 IP 库兜底</h3>
+              </div>
+              <div class="two-col">
+                <label class="toggle-row">
+                  <span>启用离线库</span>
+                  <input type="checkbox" id="geo_offline_enabled" />
+                </label>
+                <label>
+                  <span>语言</span>
+                  <input id="geo_offline_locale" type="text" value="zh-CN" />
+                </label>
+                <label>
+                  <span>自动同步周期(小时)</span>
+                  <input id="geo_offline_refresh_interval_hours" type="number" min="1" value="24" />
+                </label>
+              </div>
+              <label>
+                <span>离线库路径</span>
+                <input id="geo_offline_db_path" type="text" placeholder="data/geoip/GeoLite2-City.mmdb" />
+              </label>
+              <label>
+                <span>离线库下载链接</span>
+                <input id="geo_offline_download_url" type="url" placeholder="https://example.com/GeoLite2-City.mmdb" />
+              </label>
+              <label>
+                <span>下载请求头 JSON</span>
+                <textarea id="geo_offline_download_headers_json" rows="2" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
+              </label>
+              <div class="test-actions inline-actions">
+                <button id="geo-offline-sync-btn" type="button" class="ghost-btn">立即拉取离线库</button>
+                <button id="geo-offline-rollback-btn" type="button" class="ghost-btn">回滚到备份</button>
+              </div>
+              <div id="geo-offline-status" class="test-result-card is-empty">
+                <p class="test-result-placeholder">保存配置后，这里会显示离线库文件状态、最近同步结果和下次同步时间。</p>
+              </div>
+            </div>
+
+            <div class="sub-card test-panel">
+              <div class="sub-card-head">
+                <h3>离线库测试</h3>
+              </div>
+              <div class="two-col">
+                <label>
+                  <span>测试 IP</span>
+                  <input id="geo_offline_test_ip" type="text" placeholder="8.8.8.8" />
+                </label>
+                <div class="test-actions">
+                  <p class="hint">使用当前离线库配置测试本地文件能否正常返回区域信息。</p>
+                  <button id="geo-offline-test-btn" type="button" class="ghost-btn">测试离线库</button>
+                </div>
+              </div>
+              <div id="geo-offline-test-result" class="test-result-card is-empty">
+                <p class="test-result-placeholder">输入测试 IP 后，可以直接查看离线库定位结果。</p>
+              </div>
+            </div>
+
+            <button type="submit" class="primary-btn">保存定位配置</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/_admin/static/admin.js" defer></script>
+</body>
+</html>
