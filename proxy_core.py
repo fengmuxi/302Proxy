@@ -156,7 +156,7 @@ class RedirectHandler:
                 response.release()
                 current_url = redirect_url
 
-            logger.warning("Exceeded max redirects (%s): %s", self.max_redirects, url)
+            logger.warning("超过最大重定向次数 (%s): %s", self.max_redirects, url)
             return None, RedirectInfo(
                 original_url=url,
                 redirect_url=current_url,
@@ -515,7 +515,7 @@ class ProxyRequestHandler:
         ):
             geo_source_for_log = f"{geo_source_for_log}|cache_hit"
         logger.info(
-            "Route selected: host=%s path=%s prefix=%s client_ip=%s strategy=%s detail=%s geo_source=%s target=%s",
+            "路由选择: 主机=%s 路径=%s 前缀=%s 客户端IP=%s 策略=%s 详情=%s 定位源=%s 目标=%s",
             request_host or "*",
             path,
             selected_rule.path_prefix,
@@ -547,13 +547,13 @@ class ProxyRequestHandler:
             async for chunk in response.content.iter_chunked(chunk_size):
                 yield chunk
         except asyncio.CancelledError:
-            logger.info("Streaming response cancelled by downstream client")
+            logger.info("流式响应被下游客户端取消")
             raise
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
-            logger.info("Downstream connection closed: %s", type(exc).__name__)
+            logger.info("下游连接已关闭: %s", type(exc).__name__)
             raise
         except Exception as exc:
-            logger.error("Streaming response failed: %s", exc)
+            logger.error("流式响应失败: %s", exc)
             raise
         finally:
             response.close()
@@ -572,7 +572,7 @@ class ProxyRequestHandler:
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
         if not route_decision:
             async def error_stream():
-                yield b'{"error": "No matching proxy rule found"}'
+                yield '{"error": "未找到匹配的代理规则"}'.encode("utf-8")
 
             return StreamingResponse(
                 status=404,
@@ -611,7 +611,7 @@ class ProxyRequestHandler:
 
                 if response is None:
                     async def error_stream():
-                        yield b'{"error": "Too many redirects"}'
+                        yield '{"error": "重定向次数过多"}'.encode("utf-8")
 
                     return StreamingResponse(
                         status=502,
@@ -655,7 +655,7 @@ class ProxyRequestHandler:
 
             retry_count += 1
             logger.warning(
-                "Streaming upstream retry %s/%s for %s due to %s: %s",
+                "流式上游重试 %s/%s %s 由于 %s: %s",
                 retry_count,
                 rule.retry_times,
                 target_url,
@@ -665,7 +665,7 @@ class ProxyRequestHandler:
             await asyncio.sleep(1)
 
         async def error_stream():
-            yield f'{{"error": "Failed after {rule.retry_times} retries: {last_error_type}: {last_error}"}}'.encode()
+            yield f'{{"error": "{rule.retry_times} 次重试后失败: {last_error_type}: {last_error}"}}'.encode("utf-8")
 
         return StreamingResponse(
             status=502,
@@ -688,7 +688,7 @@ class ProxyRequestHandler:
     ) -> Tuple[int, Dict[str, str], bytes, Optional[RedirectInfo], Optional[RouteDecision]]:
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
         if not route_decision:
-            error_body = b'{"error": "No matching proxy rule found"}'
+            error_body = '{"error": "未找到匹配的代理规则"}'.encode("utf-8")
             return 404, {"Content-Type": "application/json"}, error_body, None, None
 
         rule = route_decision.rule
@@ -718,7 +718,7 @@ class ProxyRequestHandler:
                 )
 
                 if response is None:
-                    error_body = b'{"error": "Too many redirects"}'
+                    error_body = '{"error": "重定向次数过多"}'.encode("utf-8")
                     return 502, {"Content-Type": "application/json"}, error_body, redirect_info, route_decision
 
                 response_headers = dict(response.headers)
@@ -739,7 +739,7 @@ class ProxyRequestHandler:
 
             retry_count += 1
             logger.warning(
-                "Upstream retry %s/%s for %s due to %s: %s",
+                "上游重试 %s/%s %s 由于 %s: %s",
                 retry_count,
                 rule.retry_times,
                 target_url,
@@ -748,7 +748,7 @@ class ProxyRequestHandler:
             )
             await asyncio.sleep(1)
 
-        error_body = f'{{"error": "Failed after {rule.retry_times} retries: {last_error_type}: {last_error}"}}'.encode()
+        error_body = f'{{"error": "{rule.retry_times} 次重试后失败: {last_error_type}: {last_error}"}}'.encode("utf-8")
         return 502, {"Content-Type": "application/json"}, error_body, None, route_decision
 
 
