@@ -32,7 +32,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from config import Config, load_config, setup_logging
+from config import Config, load_config, setup_logging, normalize_request_host
 from admin_console import AdminConsole
 from config_store import ConfigStore
 from geo_service import GeoResolver
@@ -310,6 +310,14 @@ class ProxyServer:
         try:
             geo_location = route_decision.geo_location if route_decision else None
             geo_source = geo_location.source if geo_location else ""
+            request_headers = {str(key): str(value) for key, value in request.headers.items()}
+            request_host = (
+                route_decision.request_host
+                if route_decision
+                else self.request_handler.extract_request_host(request_headers)
+            )
+            if not request_host:
+                request_host = normalize_request_host(request.host or "")
             if (
                 geo_location
                 and geo_location.online_cache_hit
@@ -320,9 +328,15 @@ class ProxyServer:
                 "request_method": request.method,
                 "request_path": request.path,
                 "request_query_string": request.query_string,
+                "request_host": request_host,
                 "path_prefix": route_decision.rule.path_prefix if route_decision else "",
                 "rule_id": route_decision.rule.rule_id if route_decision else None,
                 "rule_name": route_decision.rule.name if route_decision else "",
+                "rule_request_host": (
+                    route_decision.rule_request_host
+                    if route_decision
+                    else ""
+                ),
                 "rule_source": route_decision.rule.source if route_decision else "",
                 "target_url": route_decision.target_url if route_decision else "",
                 "original_client_ip": request.remote or "",

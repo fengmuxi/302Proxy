@@ -140,6 +140,14 @@
               </div>
               <p class="hint">
                 这里只维护路径前缀名称和备注。地区开关请在左侧对应前缀卡片的规则区里直接控制。
+                <br />
+                <br />
+                请求域名（可选）：用于指定该前缀只对指定域名生效，留空表示任意域名。
+                获取域名是优先顺序：X-Original-Host → X-Forwarded-Host（取最前）→ Forwarded 的 host= → X-Host → Host
+                反向代理记得添加相关头信息，否则会导致域名错误。
+                <br />
+                <br />
+                备注：用于说明该路径前缀的业务用途。
               </p>
               <label>
                 <span>路径前缀</span>
@@ -150,7 +158,7 @@
                 <input id="route_group_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
               </label>
               <label>
-                <span>备注</span>
+                <span>备注（可选）</span>
                 <textarea id="route_group_notes" rows="3" placeholder="用于说明该路径前缀的业务用途"></textarea>
               </label>
               <button type="submit" class="primary-btn">保存路径前缀</button>

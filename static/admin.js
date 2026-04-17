@@ -42,6 +42,7 @@ const MATCH_DETAIL_LABELS = {
   ip_whitelist_not_matched: "IP 白名单未命中",
   matched_by_region_filter: "地区规则命中",
   matched_by_region_filter_online_cache: "地区规则命中（在线定位缓存命中）",
+  geo_lookup_success_online_cache_but_no_region_match: "定位成功（在线定位缓存命中）但地区未命中",
   geo_lookup_success_but_no_region_match: "定位成功但地区未命中",
   geo_lookup_failed_or_unavailable: "定位失败或不可用",
   geo_resolver_unavailable: "定位解析器不可用",
@@ -260,16 +261,64 @@ function toIsoDateTime(value) {
   return date.toISOString().replace("Z", "+00:00");
 }
 
+function formatTypeLabel(value, labels) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "-";
+  if (labels[normalized]) return labels[normalized];
+  if (/^[a-z0-9_:-]+$/i.test(normalized)) {
+    return `未映射类型（${normalized}）`;
+  }
+  return normalized;
+}
+
 function formatMatchStrategy(value) {
-  return MATCH_STRATEGY_LABELS[value] || value || "-";
+  return formatTypeLabel(value, MATCH_STRATEGY_LABELS);
 }
 
 function formatResultStatus(value) {
-  return RESULT_STATUS_LABELS[value] || value || "-";
+  return formatTypeLabel(value, RESULT_STATUS_LABELS);
 }
 
 function formatMatchDetail(value) {
-  return MATCH_DETAIL_LABELS[value] || value || "-";
+  return formatTypeLabel(value, MATCH_DETAIL_LABELS);
+}
+
+function formatRouteLogRequestHost(value) {
+  const normalized = normalizeRequestHost(value);
+  if (!normalized) return "-";
+  return formatRequestHostLabel(normalized);
+}
+
+function formatRouteLogRuleRequestHost(value) {
+  const normalized = normalizeRequestHost(value);
+  if (!normalized) return "通配（未限定域名）";
+  return formatRequestHostLabel(normalized);
+}
+
+function ensureRouteLogFilterFields() {
+  const keywordInput = document.getElementById("log_keyword");
+  if (keywordInput) {
+    keywordInput.placeholder = "路径、域名、目标地址、地区、IP、原始IP";
+  }
+
+  const filtersContainer = document.querySelector("#route-log-filter-form .two-col");
+  if (!filtersContainer || document.getElementById("log_rule_request_host")) {
+    return;
+  }
+
+  const label = document.createElement("label");
+  label.innerHTML = `
+    <span>命中域名规则</span>
+    <input id="log_rule_request_host" type="text" placeholder="example.com（输入 * 查询通配规则）" />
+  `;
+
+  const pathPrefixInput = document.getElementById("log_path_prefix");
+  const anchorLabel = pathPrefixInput ? pathPrefixInput.closest("label") : null;
+  if (anchorLabel && anchorLabel.nextSibling) {
+    filtersContainer.insertBefore(label, anchorLabel.nextSibling);
+  } else {
+    filtersContainer.appendChild(label);
+  }
 }
 
 function setActiveModule(moduleName) {
@@ -904,10 +953,12 @@ function renderRouteLogs(payload) {
     const requestMethod = escapeHtml(log.request_method || "-");
     const requestPath = escapeHtml(log.request_path || "-");
     const requestQuery = escapeHtml(log.request_query_string || "");
+    const requestHost = escapeHtml(formatRouteLogRequestHost(log.request_host || ""));
     const originalClientIp = escapeHtml(log.original_client_ip || "-");
     const clientIp = escapeHtml(log.client_ip || "-");
     const pathPrefix = escapeHtml(log.path_prefix || "-");
     const ruleName = escapeHtml(log.rule_name || "-");
+    const ruleRequestHost = escapeHtml(formatRouteLogRuleRequestHost(log.rule_request_host || ""));
     const geoSummary = escapeHtml(log.geo_summary || "-");
     const matchedRegion = escapeHtml(log.matched_region || "-");
     const geoSource = escapeHtml(log.geo_source || "-");
@@ -939,6 +990,8 @@ function renderRouteLogs(payload) {
       <td class="route-log-prefix-cell">
         <strong>${pathPrefix}</strong>
         <div class="hint">规则: ${ruleName}</div>
+        <div class="hint">请求域名: ${requestHost}</div>
+        <div class="hint">命中域名规则: ${ruleRequestHost}</div>
       </td>
       <td class="route-log-geo-cell">
         <strong>${geoSummary}</strong>
@@ -972,6 +1025,7 @@ function collectRouteLogFilters() {
   return {
     keyword: getValue("log_keyword").trim(),
     path_prefix: getValue("log_path_prefix").trim(),
+    rule_request_host: normalizeRequestHost(getValue("log_rule_request_host").trim()),
     match_strategy: getValue("log_match_strategy"),
     result_status: getValue("log_result_status"),
     date_from: toIsoDateTime(getValue("log_date_from")),
@@ -1372,6 +1426,7 @@ document.getElementById("route-log-filter-form").addEventListener("submit", asyn
 document.getElementById("route-log-reset-btn").addEventListener("click", async () => {
   setValue("log_keyword", "");
   setValue("log_path_prefix", "");
+  setValue("log_rule_request_host", "");
   setValue("log_match_strategy", "");
   setValue("log_result_status", "");
   setValue("log_date_from", "");
@@ -1800,6 +1855,7 @@ els.authLogoutBtn?.addEventListener("click", async () => {
 window.addEventListener("DOMContentLoaded", async () => {
   setActiveModule("overview");
   bindGeoNumericInputSafety();
+  ensureRouteLogFilterFields();
   resetRouteGroupForm();
   resetGeoSourceForm();
   resetRuleForm();

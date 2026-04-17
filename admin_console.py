@@ -249,6 +249,7 @@ class AdminConsole:
         filters = {
             "keyword": request.query.get("keyword", ""),
             "path_prefix": request.query.get("path_prefix", ""),
+            "rule_request_host": request.query.get("rule_request_host", ""),
             "match_strategy": request.query.get("match_strategy", ""),
             "result_status": request.query.get("result_status", ""),
             "date_from": request.query.get("date_from", ""),

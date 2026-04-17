@@ -33,6 +33,8 @@ class RouteDecision:
     geo_location: Optional[GeoLocation]
     match_strategy: str
     region_matching_enabled: bool
+    request_host: str = ""
+    rule_request_host: str = ""
     matched_region: Optional[str] = None
     matched_ip_whitelist: Optional[str] = None
     match_detail: str = ""
@@ -215,13 +217,45 @@ class ProxyRequestHandler:
                 return str(value)
         return ""
 
+    def _extract_first_host_value(self, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        first = value.split(",", 1)[0].strip()
+        return normalize_request_host(first)
+
+    def _extract_host_from_forwarded_header(self, forwarded_header: str) -> str:
+        raw = str(forwarded_header or "").strip()
+        if not raw:
+            return ""
+
+        first_hop = raw.split(",", 1)[0]
+        parts = [item.strip() for item in first_hop.split(";") if item.strip()]
+        for part in parts:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            if key.strip().lower() != "host":
+                continue
+            cleaned = value.strip().strip('"')
+            return self._extract_first_host_value(cleaned)
+        return ""
+
     def extract_request_host(self, headers: Dict[str, str]) -> str:
-        request_host = self._get_header_value(headers, "Host")
         if self.config.trust_forward_headers:
-            forwarded_host = self._get_header_value(headers, "X-Forwarded-Host")
-            if forwarded_host:
-                request_host = forwarded_host.split(",", 1)[0].strip() or request_host
-        return normalize_request_host(request_host)
+            candidates = (
+                self._get_header_value(headers, "X-Original-Host"),
+                self._get_header_value(headers, "X-Forwarded-Host"),
+                self._extract_host_from_forwarded_header(self._get_header_value(headers, "Forwarded")),
+                self._get_header_value(headers, "X-Host"),
+            )
+            for candidate in candidates:
+                normalized = self._extract_first_host_value(candidate)
+                if normalized:
+                    return normalized
+
+        request_host = self._get_header_value(headers, "Host")
+        return self._extract_first_host_value(request_host)
 
     def find_matching_rules(self, path: str, request_host: str = "") -> List[ProxyRule]:
         request_hosts = set(split_request_hosts(request_host))
@@ -533,6 +567,8 @@ class ProxyRequestHandler:
             geo_location=geo_location,
             match_strategy=match_strategy,
             region_matching_enabled=region_matching_enabled,
+            request_host=request_host,
+            rule_request_host=normalize_request_host(selected_rule.request_host),
             matched_region=matched_region,
             matched_ip_whitelist=matched_ip_whitelist,
             match_detail=match_detail,

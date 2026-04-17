@@ -233,9 +233,11 @@ class ConfigStore:
                     request_method TEXT NOT NULL DEFAULT '',
                     request_path TEXT NOT NULL DEFAULT '',
                     request_query_string TEXT NOT NULL DEFAULT '',
+                    request_host TEXT NOT NULL DEFAULT '',
                     path_prefix TEXT NOT NULL DEFAULT '',
                     rule_id INTEGER,
                     rule_name TEXT NOT NULL DEFAULT '',
+                    rule_request_host TEXT NOT NULL DEFAULT '',
                     rule_source TEXT NOT NULL DEFAULT '',
                     target_url TEXT NOT NULL DEFAULT '',
                     original_client_ip TEXT NOT NULL DEFAULT '',
@@ -405,6 +407,30 @@ class ConfigStore:
                 "route_logs",
                 "matched_ip_whitelist",
                 "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_logs",
+                "request_host",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_logs",
+                "rule_request_host",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_route_logs_request_host
+                ON route_logs(request_host)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_route_logs_rule_request_host
+                ON route_logs(rule_request_host)
+                """
             )
 
     def _ensure_column(
@@ -1087,23 +1113,25 @@ class ConfigStore:
             cursor = connection.execute(
                 """
                 INSERT INTO route_logs (
-                    request_method, request_path, request_query_string, path_prefix, rule_id,
-                    rule_name, rule_source, target_url, original_client_ip, client_ip, region_matching_enabled,
+                    request_method, request_path, request_query_string, request_host, path_prefix, rule_id,
+                    rule_name, rule_request_host, rule_source, target_url, original_client_ip, client_ip, region_matching_enabled,
                     geo_source, geo_summary, geo_country, geo_region, geo_city,
                     configured_ip_whitelist, matched_ip_whitelist, configured_regions, matched_region, match_strategy, match_detail,
                     upstream_status, cache_status, redirect_count, transport_mode,
                     operation_duration_ms, result_status, error_message, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     str(payload.get("request_method", "")).strip(),
                     str(payload.get("request_path", "")).strip(),
                     str(payload.get("request_query_string", "")).strip(),
+                    normalize_request_host(payload.get("request_host", "")),
                     str(payload.get("path_prefix", "")).strip(),
                     payload.get("rule_id"),
                     str(payload.get("rule_name", "")).strip(),
+                    normalize_request_host(payload.get("rule_request_host", "")),
                     str(payload.get("rule_source", "")).strip(),
                     str(payload.get("target_url", "")).strip(),
                     str(payload.get("original_client_ip", "")).strip(),
@@ -1158,16 +1186,35 @@ class ConfigStore:
             like_value = f"%{keyword}%"
             clauses.append(
                 "("
-                "request_path LIKE ? OR path_prefix LIKE ? OR rule_name LIKE ? OR "
-                "target_url LIKE ? OR geo_summary LIKE ? OR matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ?"
+                "request_path LIKE ? OR request_host LIKE ? OR rule_request_host LIKE ? OR "
+                "path_prefix LIKE ? OR rule_name LIKE ? OR target_url LIKE ? OR geo_summary LIKE ? OR "
+                "matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ?"
                 ")"
             )
-            params.extend([like_value] * 8)
+            params.extend([like_value] * 10)
 
         path_prefix = str(filters.get("path_prefix", "")).strip()
         if path_prefix:
             clauses.append("path_prefix = ?")
             params.append(path_prefix)
+
+        raw_rule_request_host = str(filters.get("rule_request_host", "")).strip()
+        normalized_rule_request_host = normalize_request_host(raw_rule_request_host)
+        if raw_rule_request_host:
+            if raw_rule_request_host == "*":
+                clauses.append("rule_request_host = ''")
+            else:
+                rule_request_hosts = [
+                    host.strip()
+                    for host in normalized_rule_request_host.split(",")
+                    if host.strip()
+                ]
+                if rule_request_hosts:
+                    host_clauses = []
+                    for host in rule_request_hosts:
+                        host_clauses.append("(',' || rule_request_host || ',') LIKE ?")
+                        params.append(f"%,{host},%")
+                    clauses.append(f"({' OR '.join(host_clauses)})")
 
         match_strategy = str(filters.get("match_strategy", "")).strip()
         if match_strategy:
@@ -1215,6 +1262,7 @@ class ConfigStore:
             "filters": {
                 "keyword": keyword,
                 "path_prefix": path_prefix,
+                "rule_request_host": raw_rule_request_host,
                 "match_strategy": match_strategy,
                 "result_status": result_status,
                 "date_from": date_from,
@@ -1960,9 +2008,11 @@ class ConfigStore:
             "request_method": row["request_method"],
             "request_path": row["request_path"],
             "request_query_string": row["request_query_string"],
+            "request_host": row["request_host"],
             "path_prefix": row["path_prefix"],
             "rule_id": row["rule_id"],
             "rule_name": row["rule_name"],
+            "rule_request_host": row["rule_request_host"],
             "rule_source": row["rule_source"],
             "target_url": row["target_url"],
             "original_client_ip": row["original_client_ip"],

@@ -723,6 +723,20 @@ textarea {
 .route-log-table th:nth-child(8),
 .route-log-table td:nth-child(8) {
   width: 96px;
+  min-width: 96px;
+  max-width: 96px;
+  position: sticky;
+  right: 0;
+  background: rgba(255, 252, 247, 0.96);
+  box-shadow: -10px 0 16px -16px rgba(31, 38, 35, 0.55);
+}
+
+.route-log-table th:nth-child(8) {
+  z-index: 3;
+}
+
+.route-log-table td:nth-child(8) {
+  z-index: 2;
 }
 
 .route-log-table strong {

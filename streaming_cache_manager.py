@@ -618,6 +618,11 @@ class StreamingCacheManager:
         if entry.is_complete and entry.source_size is None:
             entry.source_size = entry.size
 
+        # 兼容历史条目：缺失 expires_at 时补齐默认过期时间，避免缓存永久占用磁盘。
+        if entry.expires_at is None:
+            base_time = entry.created_at if isinstance(entry.created_at, (int, float)) and entry.created_at > 0 else time.time()
+            entry.expires_at = base_time + self.default_ttl
+
         return entry
 
     def _get_entry_total_size(self, entry: CacheEntry) -> Optional[int]:
@@ -655,22 +660,38 @@ class StreamingCacheManager:
         返回 (cache_key, entry, start_byte, end_byte, total_size, local_offset)。
         """
         base_key = self._get_cache_key(url)
+        now = time.time()
+        expired_entries: Dict[str, CacheEntry] = {}
+
+        async def cleanup_expired_candidates():
+            if not expired_entries:
+                return
+            for expired_key, expired_entry in expired_entries.items():
+                await self.cache.remove(expired_key)
+                await self._delete_cache_files(expired_key, expired_entry)
+
         base_entry = await self.cache.get(base_key)
 
         if base_entry:
             base_entry = self._normalize_entry(base_key, base_entry)
-            total_size = self._get_entry_total_size(base_entry)
-            if total_size:
-                if range_header:
-                    requested_range = self._parse_range_header(range_header, total_size)
-                    if requested_range:
-                        start_byte, end_byte = requested_range
-                        if end_byte is not None and self._entry_covers_range(base_entry, start_byte, end_byte):
-                            return base_key, base_entry, start_byte, end_byte, total_size, start_byte - base_entry.range_start
-                elif base_entry.is_complete:
-                    return base_key, base_entry, 0, total_size - 1, total_size, 0
+            if base_entry.expires_at and now > base_entry.expires_at:
+                expired_entries[base_key] = base_entry
+            else:
+                total_size = self._get_entry_total_size(base_entry)
+                if total_size:
+                    if range_header:
+                        requested_range = self._parse_range_header(range_header, total_size)
+                        if requested_range:
+                            start_byte, end_byte = requested_range
+                            if end_byte is not None and self._entry_covers_range(base_entry, start_byte, end_byte):
+                                await cleanup_expired_candidates()
+                                return base_key, base_entry, start_byte, end_byte, total_size, start_byte - base_entry.range_start
+                    elif base_entry.is_complete:
+                        await cleanup_expired_candidates()
+                        return base_key, base_entry, 0, total_size - 1, total_size, 0
 
         if not range_header:
+            await cleanup_expired_candidates()
             return None
 
         parent_key = base_key
@@ -683,6 +704,10 @@ class StreamingCacheManager:
 
             candidate = self._normalize_entry(key, candidate)
             if candidate.parent_key != parent_key:
+                continue
+
+            if candidate.expires_at and now > candidate.expires_at:
+                expired_entries[key] = candidate
                 continue
 
             total_size = self._get_entry_total_size(candidate)
@@ -710,14 +735,22 @@ class StreamingCacheManager:
                     f"[缓存查询] 时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | "
                     f"操作: 查询 | 键: {base_key[:16]}... | 结果: 未命中 | 原因: 仅部分区间已缓存"
                 )
+            await cleanup_expired_candidates()
             return None
 
         _, key, start_byte, end_byte, total_size = best_candidate
         entry = await self.cache.get(key)
         if not entry:
+            await cleanup_expired_candidates()
             return None
 
         entry = self._normalize_entry(key, entry)
+        if entry.expires_at and now > entry.expires_at:
+            expired_entries[key] = entry
+            await cleanup_expired_candidates()
+            return None
+
+        await cleanup_expired_candidates()
         return key, entry, start_byte, end_byte, total_size, start_byte - entry.range_start
 
     def _is_range_cached(self, url: str, start_byte: int, end_byte: int) -> bool:
@@ -725,9 +758,12 @@ class StreamingCacheManager:
         判断目标 Range 是否已经被完整缓存。
         """
         parent_key = self._get_cache_key(url)
+        now = time.time()
         for key, entry in self.cache.cache.items():
             entry = self._normalize_entry(key, entry)
             if entry.parent_key != parent_key:
+                continue
+            if entry.expires_at and now > entry.expires_at:
                 continue
             if self._entry_covers_range(entry, start_byte, end_byte):
                 return True
@@ -747,7 +783,6 @@ class StreamingCacheManager:
                 pass
 
         parsed_content_range = self._parse_content_range(headers.get('Content-Range'))
-        expected_cache_size = self._get_expected_response_size(headers)
         if parsed_content_range:
             start_byte, end_byte, _ = parsed_content_range
             return end_byte - start_byte + 1
@@ -812,6 +847,62 @@ class StreamingCacheManager:
         logger.info(
             f"[缓存清理] 时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | "
             f"请求ID: {request_id} | 操作: 清理临时文件完成 | 文件数: {removed_count}"
+        )
+        return removed_count
+
+    async def cleanup_orphan_cache_files(self) -> int:
+        """
+        清理孤儿缓存文件（无元数据且未被当前索引引用）。
+        """
+        request_id = str(uuid.uuid4())[:8]
+        removed_count = 0
+        removed_size = 0
+        now = time.time()
+        orphan_grace_seconds = max(30, min(self.validation_interval, 300))
+        active_cache_files = set()
+
+        for key, entry in list(self.cache.cache.items()):
+            entry = self._normalize_entry(key, entry)
+            if not entry.file_path:
+                continue
+            try:
+                active_cache_files.add(str(Path(entry.file_path).resolve()))
+            except Exception:
+                active_cache_files.add(str(Path(entry.file_path)))
+
+        logger.info(
+            f"[缓存清理] 时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"请求ID: {request_id} | 操作: 扫描孤儿缓存文件 | 目录: {self.cache_dir}"
+        )
+
+        for cache_file in self.cache_dir.glob('*.cache'):
+            cache_path = str(cache_file.resolve())
+            if cache_path in active_cache_files:
+                continue
+
+            meta_path = self._get_meta_path(cache_file.stem)
+            if meta_path.exists():
+                continue
+
+            try:
+                stat = cache_file.stat()
+                # 避免误删刚写入但元数据还未来得及落盘的缓存文件。
+                if now - stat.st_mtime < orphan_grace_seconds:
+                    continue
+
+                cache_file.unlink()
+                removed_count += 1
+                removed_size += stat.st_size
+            except Exception as e:
+                logger.warning(
+                    f"[缓存清理] 时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"请求ID: {request_id} | 操作: 删除孤儿缓存文件 | 文件: {cache_file} | 结果: 失败 | 错误: {e}"
+                )
+
+        logger.info(
+            f"[缓存清理] 时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"请求ID: {request_id} | 操作: 清理孤儿缓存完成 | 文件数: {removed_count} | "
+            f"释放空间: {removed_size / 1024 / 1024:.2f} MB"
         )
         return removed_count
 
@@ -909,6 +1000,7 @@ class StreamingCacheManager:
         while True:
             try:
                 await asyncio.sleep(self.validation_interval)
+                await self.cleanup_orphan_cache_files()
                 await self.cleanup_expired_entries()
                 await self.enforce_cache_limits()
                 if self.enable_validation:
@@ -1097,6 +1189,7 @@ class StreamingCacheManager:
         启动后台维护任务。
         """
         await self.cleanup_orphan_temp_files()
+        await self.cleanup_orphan_cache_files()
         await self.cleanup_expired_entries()
         await self.enforce_cache_limits()
 
@@ -2540,6 +2633,12 @@ class StreamingCacheManager:
                 
                 # 检查是否已缓存
                 existing = await self.cache.get(key)
+                if existing:
+                    existing = self._normalize_entry(key, existing)
+                    if existing.expires_at and time.time() > existing.expires_at:
+                        await self.cache.remove(key)
+                        await self._delete_cache_files(key, existing)
+                        existing = None
                 
                 if existing and existing.is_complete:
                     self.stats.preload_hits += 1
