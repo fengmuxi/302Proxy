@@ -36,20 +36,6 @@ streaming:
   enable_range_support: true
   max_request_body_size: 0
 
-cache:
-  enabled: true
-  cache_dir: "cache"
-  max_size: 5GB
-  max_entries: 1000
-  default_ttl: 7200
-  chunk_size: 64KB
-  max_entry_size: 0
-  max_request_cache_size: 0
-  enable_preload: true
-  preload_concurrency: 3
-  enable_validation: true
-  validation_interval: 3600
-
 proxy_rules:
   - path_prefix: "/play"
     target_url: "http://127.0.0.1"
@@ -97,7 +83,7 @@ geoip:
     },
     {
       "name": "ip.cn",
-      "enabled": true,
+      "enabled": false,
       "weight": 5,
       "url": "https://my.ip.cn/json/",
       "method": "GET",
@@ -137,7 +123,7 @@ geoip:
     },
     {
       "name": "淘宝",
-      "enabled": true,
+      "enabled": false,
       "weight": 1,
       "url": "https://ip.taobao.com/outGetIpInfo",
       "method": "GET",

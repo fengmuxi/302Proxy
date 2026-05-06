@@ -154,21 +154,6 @@ class StreamingConfig:
     max_request_body_size: int = 0
 
 
-@dataclass
-class CacheConfig:
-    enabled: bool = False
-    cache_dir: str = "./cache"
-    max_size: int = 10 * 1024 * 1024 * 1024
-    max_entries: int = 1000
-    default_ttl: int = 86400
-    chunk_size: int = 64 * 1024
-    max_entry_size: int = 0
-    max_request_cache_size: int = 0
-    enable_preload: bool = True
-    preload_concurrency: int = 3
-    enable_validation: bool = True
-    validation_interval: int = 3600
-
 
 @dataclass
 class RemoteConfigSettings:
@@ -270,7 +255,6 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     admin_auth: AdminAuthConfig = field(default_factory=AdminAuthConfig)
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
-    cache: CacheConfig = field(default_factory=CacheConfig)
     proxy_rules: List[ProxyRule] = field(default_factory=list)
     default_timeout: int = 30
     max_redirects: int = 10
@@ -369,28 +353,6 @@ class Config:
                 max_request_body_size=parse_size(
                     streaming_data.get("max_request_body_size", config.streaming.max_request_body_size)
                 ),
-            )
-
-        cache_data = data.get("cache", {})
-        if cache_data:
-            config.cache = CacheConfig(
-                enabled=coerce_bool(cache_data.get("enabled"), config.cache.enabled),
-                cache_dir=str(cache_data.get("cache_dir", config.cache.cache_dir)),
-                max_size=parse_size(cache_data.get("max_size", config.cache.max_size)),
-                max_entries=int(cache_data.get("max_entries", config.cache.max_entries)),
-                default_ttl=int(cache_data.get("default_ttl", config.cache.default_ttl)),
-                chunk_size=parse_size(cache_data.get("chunk_size", config.cache.chunk_size)),
-                max_entry_size=parse_size(cache_data.get("max_entry_size", config.cache.max_entry_size)),
-                max_request_cache_size=parse_size(
-                    cache_data.get("max_request_cache_size", config.cache.max_request_cache_size)
-                ),
-                enable_preload=coerce_bool(cache_data.get("enable_preload"), config.cache.enable_preload),
-                preload_concurrency=int(cache_data.get("preload_concurrency", config.cache.preload_concurrency)),
-                enable_validation=coerce_bool(
-                    cache_data.get("enable_validation"),
-                    config.cache.enable_validation,
-                ),
-                validation_interval=int(cache_data.get("validation_interval", config.cache.validation_interval)),
             )
 
         config.proxy_rules = []
@@ -656,20 +618,6 @@ class Config:
                 "buffer_size": self.streaming.buffer_size,
                 "enable_range_support": self.streaming.enable_range_support,
                 "max_request_body_size": self.streaming.max_request_body_size,
-            },
-            "cache": {
-                "enabled": self.cache.enabled,
-                "cache_dir": self.cache.cache_dir,
-                "max_size": self.cache.max_size,
-                "max_entries": self.cache.max_entries,
-                "default_ttl": self.cache.default_ttl,
-                "chunk_size": self.cache.chunk_size,
-                "max_entry_size": self.cache.max_entry_size,
-                "max_request_cache_size": self.cache.max_request_cache_size,
-                "enable_preload": self.cache.enable_preload,
-                "preload_concurrency": self.cache.preload_concurrency,
-                "enable_validation": self.cache.enable_validation,
-                "validation_interval": self.cache.validation_interval,
             },
             "proxy_rules": [
                 {

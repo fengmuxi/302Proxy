@@ -19,7 +19,7 @@ COPY . .
 
 COPY config.yaml.template ./config.yaml
 
-RUN mkdir -p /app/log /app/cache /app/data
+RUN mkdir -p /app/log /app/data
 
 EXPOSE 18686
 

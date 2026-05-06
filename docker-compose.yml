@@ -10,7 +10,6 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./log:/app/log
-      - ./cache:/app/cache
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
