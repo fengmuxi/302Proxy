@@ -262,7 +262,8 @@ class AdminConsole:
             "result_status": request.query.get("result_status", ""),
             "date_from": request.query.get("date_from", ""),
             "date_to": request.query.get("date_to", ""),
-            "limit": request.query.get("limit", "100"),
+            "limit": request.query.get("limit", "50"),
+            "page": request.query.get("page", "1"),
         }
         return await self._run_protected(request, lambda: self.config_store.list_route_logs(filters))
 

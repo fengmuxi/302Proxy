@@ -10,6 +10,8 @@ const state = {
   routeLogs: [],
   routeLogSettings: null,
   activeModule: "overview",
+  logCurrentPage: 1,
+  logTotalPages: 1,
 };
 
 const els = {
@@ -958,7 +960,17 @@ function renderRouteLogSettings(settings) {
 
 function renderRouteLogs(payload) {
   state.routeLogs = Array.isArray(payload.items) ? payload.items : [];
-  setText("route-log-total-count", `共 ${payload.total ?? state.routeLogs.length} 条`);
+  const total = payload.total ?? state.routeLogs.length;
+  const totalPages = payload.total_pages ?? 1;
+  const currentPage = payload.page ?? 1;
+  const limit = payload.limit ?? 50;
+  state.logTotalPages = totalPages;
+  state.logCurrentPage = currentPage;
+
+  const startOffset = (currentPage - 1) * limit + 1;
+  const endOffset = Math.min(currentPage * limit, total);
+  const rangeText = total > 0 ? `${startOffset}-${endOffset} / ${total}` : "0 / 0";
+  setText("route-log-total-count", `共 ${total} 条（${rangeText}）`);
 
   const tbody = document.getElementById("route-logs-table-body");
   tbody.innerHTML = "";
@@ -966,6 +978,7 @@ function renderRouteLogs(payload) {
 
   if (!state.routeLogs.length) {
     tbody.innerHTML = '<tr><td colspan="8">当前没有匹配到规则转发日志。</td></tr>';
+    renderPagination(1, 1);
     return;
   }
 
@@ -1042,6 +1055,95 @@ function renderRouteLogs(payload) {
     `;
     tbody.appendChild(tr);
   });
+  renderPagination(state.logCurrentPage, state.logTotalPages);
+}
+
+function renderPagination(currentPage, totalPages) {
+  const container = document.getElementById("log-pagination");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!container.offsetParent) return;
+  container.classList.remove("is-hidden");
+
+  const maxVisible = 7;
+  let pages = [];
+  if (totalPages <= maxVisible + 2) {
+    for (let i = 1; i <= totalPages; i++) pages.push(i);
+  } else {
+    pages.push(1);
+    let start = Math.max(2, currentPage - 2);
+    let end = Math.min(totalPages - 1, currentPage + 2);
+    if (start > 2) pages.push("...");
+    for (let i = start; i <= end; i++) pages.push(i);
+    if (end < totalPages - 1) pages.push("...");
+    pages.push(totalPages);
+  }
+
+  const frag = document.createDocumentFragment();
+
+  const prevBtn = document.createElement("button");
+  prevBtn.type = "button";
+  prevBtn.className = `page-btn ${currentPage <= 1 ? "disabled" : ""}`;
+  prevBtn.textContent = "‹ 上一页";
+  prevBtn.disabled = currentPage <= 1;
+  prevBtn.addEventListener("click", () => goToPage(currentPage - 1, totalPages));
+  frag.appendChild(prevBtn);
+
+  pages.forEach((p) => {
+    if (p === "...") {
+      const dots = document.createElement("span");
+      dots.className = "page-ellipsis";
+      dots.textContent = "…";
+      frag.appendChild(dots);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `page-btn ${p === currentPage ? "active" : ""}`;
+      btn.textContent = p;
+      btn.addEventListener("click", () => goToPage(p, totalPages));
+      frag.appendChild(btn);
+    }
+  });
+
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.className = `page-btn ${currentPage >= totalPages ? "disabled" : ""}`;
+  nextBtn.textContent = "下一页 ›";
+  nextBtn.disabled = currentPage >= totalPages;
+  nextBtn.addEventListener("click", () => goToPage(currentPage + 1, totalPages));
+  frag.appendChild(nextBtn);
+
+  const jumpWrap = document.createElement("div");
+  jumpWrap.className = "page-jump";
+  jumpWrap.innerHTML = `
+    <span class="jump-label">跳至</span>
+    <input id="log-page-jump-input" type="number" min="1" max="${totalPages}" value="${currentPage}" />
+    <span class="jump-label">/ ${totalPages} 页</span>
+    <button type="button" class="page-btn jump-btn">跳转</button>
+  `;
+  frag.appendChild(jumpWrap);
+
+  container.appendChild(frag);
+
+  container.querySelector("#log-page-jump-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = parseInt(e.target.value, 10);
+      if (val >= 1 && val <= totalPages) goToPage(val, totalPages);
+    }
+  });
+
+  container.querySelector(".jump-btn")?.addEventListener("click", () => {
+    const input = container.querySelector("#log-page-jump-input");
+    const val = parseInt(input?.value, 10);
+    if (val >= 1 && val <= totalPages) goToPage(val, totalPages);
+  });
+}
+
+async function goToPage(page, totalPages) {
+  page = Math.max(1, Math.min(totalPages, page));
+  state.logCurrentPage = page;
+  await loadRouteLogs();
 }
 
 function collectRouteLogFilters() {
@@ -1053,7 +1155,8 @@ function collectRouteLogFilters() {
     result_status: getValue("log_result_status"),
     date_from: toIsoDateTime(getValue("log_date_from")),
     date_to: toIsoDateTime(getValue("log_date_to")),
-    limit: Number(getValue("log_limit") || 100),
+    limit: Number(getValue("log_limit") || 50),
+    page: state.logCurrentPage,
   };
 }
 
@@ -1126,6 +1229,10 @@ function startAutoRefresh() {
   const interval = Math.max(1, parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5);
   saveAutoRefreshConfig({ enabled: true, interval });
   _autoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "logs") {
+      stopAutoRefresh();
+      return;
+    }
     loadRouteLogs().catch((error) => {
       showToast(error.message, true);
       stopAutoRefresh();
@@ -1502,6 +1609,7 @@ document.getElementById("route-group-cards").addEventListener("change", async (e
 
 document.getElementById("route-log-filter-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  state.logCurrentPage = 1;
   try {
     await loadRouteLogs();
     showToast("日志查询已更新。");
@@ -1518,7 +1626,8 @@ document.getElementById("route-log-reset-btn").addEventListener("click", async (
   setValue("log_result_status", "");
   setValue("log_date_from", "");
   setValue("log_date_to", "");
-  setValue("log_limit", "100");
+  setValue("log_limit", "50");
+  state.logCurrentPage = 1;
   try {
     await loadRouteLogs();
   } catch (error) {
@@ -2148,9 +2257,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   const savedAutoRefresh = getAutoRefreshConfig();
   setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
   setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
-  if (savedAutoRefresh.enabled) {
-    startAutoRefresh();
-  }
   updateAutoRefreshStatusUI();
   try {
     const auth = await loadAuthStatus();

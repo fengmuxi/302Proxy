@@ -1236,7 +1236,9 @@ class ConfigStore:
             params.append(date_to)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        limit = max(1, min(500, int(filters.get("limit", 100) or 100)))
+        limit = max(1, min(500, int(filters.get("limit", 50) or 50)))
+        page = max(1, int(filters.get("page", 1) or 1))
+        offset = (page - 1) * limit
 
         with self._connect() as connection:
             rows = connection.execute(
@@ -1245,9 +1247,9 @@ class ConfigStore:
                 FROM route_logs
                 {where_sql}
                 ORDER BY created_at DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (*params, limit),
+                (*params, limit, offset),
             ).fetchall()
             total = connection.execute(
                 f"SELECT COUNT(*) FROM route_logs {where_sql}",
@@ -1258,6 +1260,9 @@ class ConfigStore:
             "items": [self.serialize_route_log(row) for row in rows],
             "total": total,
             "limit": limit,
+            "page": page,
+            "offset": offset,
+            "total_pages": max(1, (total + limit - 1) // limit),
             "filters": {
                 "keyword": keyword,
                 "path_prefix": path_prefix,

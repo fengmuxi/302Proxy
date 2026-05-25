@@ -1015,6 +1015,102 @@ td {
   color: var(--text-tertiary);
 }
 
+/* 分页组件 */
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px 8px 4px;
+  margin-top: -4px;
+}
+
+.pagination.is-hidden {
+  display: none;
+}
+
+.page-btn {
+  appearance: none;
+  border: 1px solid rgba(43, 53, 48, 0.14);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  transition: all 180ms ease;
+  white-space: nowrap;
+  min-width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.page-btn:hover:not(.disabled):not(.active) {
+  border-color: var(--accent);
+  background: rgba(18, 127, 105, 0.06);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(18, 127, 105, 0.12);
+}
+
+.page-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 6px 18px rgba(18, 127, 105, 0.24);
+  font-weight: 700;
+}
+
+.page-btn.disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.page-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  font-size: 14px;
+  color: var(--text-tertiary);
+  user-select: none;
+  letter-spacing: 2px;
+}
+
+.page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(43, 53, 48, 0.12);
+}
+
+.jump-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.page-jump input {
+  width: 52px;
+  text-align: center;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.jump-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  min-width: auto;
+}
+
 .check-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1383,5 +1479,26 @@ select {
   .table-actions-group + .table-actions-group {
     margin-left: 0;
     margin-top: 6px;
+  }
+
+  /* 小屏幕分页适配 */
+  .pagination {
+    gap: 4px;
+    padding: 12px 4px 0;
+  }
+
+  .page-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+    min-width: 34px;
+  }
+
+  .page-jump {
+    margin-left: 0;
+    margin-top: 8px;
+    border-left: none;
+    width: 100%;
+    justify-content: center;
+    padding-left: 0;
   }
 }
