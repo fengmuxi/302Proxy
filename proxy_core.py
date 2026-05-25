@@ -11,6 +11,8 @@ from urllib.parse import quote, urljoin, urlparse
 
 from config import Config, ProxyRule, normalize_request_host, split_request_hosts
 from geo_service import GeoLocation, GeoResolver
+from ip_result_cache import IpResultCache, IpCacheEntry
+from ip_ban_manager import IpBanManager
 
 
 logger = logging.getLogger("proxy")
@@ -48,6 +50,7 @@ class StreamingResponse:
     redirect_info: Optional[RedirectInfo]
     content_length: Optional[int] = None
     route_decision: Optional[RouteDecision] = None
+    cache_status: str = ""
 
 
 class RedirectHandler:
@@ -172,10 +175,14 @@ class RedirectHandler:
 
 
 class ProxyRequestHandler:
-    def __init__(self, config: Config, geo_resolver: Optional[GeoResolver] = None):
+    def __init__(self, config: Config, geo_resolver: Optional[GeoResolver] = None,
+                 ip_cache: Optional[IpResultCache] = None, ip_ban_manager=None):
         self.config = config
         self.geo_resolver = geo_resolver
+        self.ip_cache = ip_cache
+        self.ip_ban_manager = ip_ban_manager
         self._session: Optional[aiohttp.ClientSession] = None
+        self._last_cache_status = "BYPASS"
         self._refresh_redirect_handler()
 
     def _refresh_redirect_handler(self) -> None:
@@ -189,6 +196,15 @@ class ProxyRequestHandler:
     def update_config(self, config: Config) -> None:
         self.config = config
         self._refresh_redirect_handler()
+
+    def set_ip_cache(self, ip_cache: Optional[IpResultCache]) -> None:
+        self.ip_cache = ip_cache
+
+    def set_ip_ban_manager(self, ip_ban_manager) -> None:
+        self.ip_ban_manager = ip_ban_manager
+
+    def get_last_cache_status(self) -> str:
+        return getattr(self, '_last_cache_status', 'BYPASS')
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -619,10 +635,84 @@ class ProxyRequestHandler:
 
         rule = route_decision.rule
         target_url = route_decision.target_url
+        client_ip = route_decision.client_ip or client_host
+
+        if self.ip_ban_manager:
+            ban_entry = await self.ip_ban_manager.is_banned(client_ip)
+            if ban_entry:
+                logger.warning("IP已被封禁拒绝请求: %s 原因=%s", client_ip, ban_entry.reason)
+                async def banned_stream():
+                    yield '{"error": "IP已被封禁"}'.encode("utf-8")
+                return StreamingResponse(
+                    status=403,
+                    headers={"Content-Type": "application/json"},
+                    body_stream=banned_stream(),
+                    redirect_info=None,
+                    route_decision=route_decision,
+                    cache_status="BANNED",
+                )
+
         session = await self.get_session()
 
         request_headers = self.filter_headers(headers, is_request=True)
-        request_headers = self.add_forward_headers(request_headers, route_decision.client_ip or client_host, scheme)
+        request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+
+        if self.ip_cache:
+            cached = await self.ip_cache.get(client_ip, target_url)
+            if cached is not None:
+                if cached.result_type == "redirect":
+                    logger.info(
+                            "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
+                            client_ip, target_url, cached.redirect_url,
+                        )
+                    return StreamingResponse(
+                        status=cached.status_code,
+                        headers={"Location": cached.redirect_url},
+                        body_stream=self._empty_stream(),
+                        redirect_info=None,
+                        route_decision=route_decision,
+                        cache_status="HIT_REDIRECT",
+                    )
+                elif cached.result_type == "streaming" and cached.final_url:
+                    logger.info(
+                            "请求结果缓存命中(流式): IP=%s 目标=%s 最终URL=%s",
+                            client_ip, target_url, cached.final_url,
+                        )
+                    try:
+                        direct_timeout = aiohttp.ClientTimeout(
+                            total=rule.timeout,
+                            connect=rule.timeout,
+                            sock_read=self.config.streaming.stream_timeout,
+                        )
+                        async with session.get(
+                            cached.final_url,
+                            headers=request_headers,
+                            allow_redirects=False,
+                            timeout=direct_timeout,
+                        ) as direct_response:
+                            if direct_response.status in (200, 206):
+                                resp_headers = dict(direct_response.headers)
+                                filtered_headers = self.filter_headers(resp_headers, is_request=False)
+                                self._apply_route_headers(filtered_headers, route_decision)
+                                if "Accept-Ranges" not in filtered_headers:
+                                    filtered_headers["Accept-Ranges"] = "bytes"
+                                content_length = None
+                                if "Content-Length" in resp_headers:
+                                    try:
+                                        content_length = int(resp_headers["Content-Length"])
+                                    except ValueError:
+                                        content_length = None
+                                return StreamingResponse(
+                                    status=direct_response.status,
+                                    headers=filtered_headers,
+                                    body_stream=self.stream_response(direct_response, self.config.streaming.chunk_size),
+                                    redirect_info=None,
+                                    content_length=content_length,
+                                    route_decision=route_decision,
+                                    cache_status="HIT_STREAMING",
+                                )
+                    except Exception as exc:
+                        logger.warning("请求结果缓存直接请求失败，回退到正常流程: %s", exc)
 
         redirect_handler = RedirectHandler(
             max_redirects=rule.max_redirects,
@@ -646,6 +736,12 @@ class ProxyRequestHandler:
                 )
 
                 if response is None:
+                    if self.ip_cache and redirect_info and redirect_info.redirect_url:
+                        await self.ip_cache.put_redirect(
+                            client_ip, target_url,
+                            redirect_info.status_code or 302,
+                            redirect_info.redirect_url,
+                        )
                     async def error_stream():
                         yield '{"error": "重定向次数过多"}'.encode("utf-8")
 
@@ -655,6 +751,7 @@ class ProxyRequestHandler:
                         body_stream=error_stream(),
                         redirect_info=redirect_info,
                         route_decision=route_decision,
+                        cache_status="BYPASS",
                     )
 
                 response_headers = dict(response.headers)
@@ -671,6 +768,19 @@ class ProxyRequestHandler:
                 if "Accept-Ranges" not in filtered_headers:
                     filtered_headers["Accept-Ranges"] = "bytes"
 
+                final_url = str(response.url) if response.url else target_url
+                if self.ip_cache and response.status in (200, 206):
+                    await self.ip_cache.put_streaming(
+                        client_ip, target_url,
+                        response.status, final_url, filtered_headers,
+                    )
+                elif self.ip_cache and redirect_info and redirect_info.redirect_url:
+                    await self.ip_cache.put_redirect(
+                        client_ip, target_url,
+                        redirect_info.status_code or 302,
+                        redirect_info.redirect_url,
+                    )
+
                 return StreamingResponse(
                     status=response.status,
                     headers=filtered_headers,
@@ -678,6 +788,7 @@ class ProxyRequestHandler:
                     redirect_info=redirect_info,
                     content_length=content_length,
                     route_decision=route_decision,
+                    cache_status="BYPASS",
                 )
             except asyncio.TimeoutError as exc:
                 last_error = str(exc)
@@ -709,7 +820,13 @@ class ProxyRequestHandler:
             body_stream=error_stream(),
             redirect_info=None,
             route_decision=route_decision,
+            cache_status="BYPASS",
         )
+
+    @staticmethod
+    async def _empty_stream() -> AsyncGenerator[bytes, None]:
+        return
+        yield b""
 
     async def handle_request(
         self,
@@ -722,6 +839,7 @@ class ProxyRequestHandler:
         query_string: str = None,
         route_decision: Optional[RouteDecision] = None,
     ) -> Tuple[int, Dict[str, str], bytes, Optional[RedirectInfo], Optional[RouteDecision]]:
+        self._last_cache_status = "BYPASS"
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
         if not route_decision:
             error_body = '{"error": "未找到匹配的代理规则"}'.encode("utf-8")
@@ -729,10 +847,37 @@ class ProxyRequestHandler:
 
         rule = route_decision.rule
         target_url = route_decision.target_url
+        client_ip = route_decision.client_ip or client_host
+
+        if self.ip_ban_manager:
+            ban_entry = await self.ip_ban_manager.is_banned(client_ip)
+            if ban_entry:
+                logger.warning("IP已被封禁拒绝请求: %s 原因=%s", client_ip, ban_entry.reason)
+                self._last_cache_status = "BANNED"
+                error_body = '{"error": "IP已被封禁"}'.encode("utf-8")
+                return 403, {"Content-Type": "application/json"}, error_body, None, route_decision
+
         session = await self.get_session()
 
         request_headers = self.filter_headers(headers, is_request=True)
-        request_headers = self.add_forward_headers(request_headers, route_decision.client_ip or client_host, scheme)
+        request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+
+        if self.ip_cache:
+            cached = await self.ip_cache.get(client_ip, target_url)
+            if cached is not None and cached.result_type == "redirect" and cached.redirect_url:
+                logger.info(
+                        "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
+                        client_ip, target_url, cached.redirect_url,
+                    )
+                self._last_cache_status = "HIT_REDIRECT"
+                return (
+                    cached.status_code,
+                    {"Location": cached.redirect_url},
+                    b"",
+                    None,
+                    route_decision,
+                )
+
         redirect_handler = RedirectHandler(
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
@@ -754,6 +899,12 @@ class ProxyRequestHandler:
                 )
 
                 if response is None:
+                    if self.ip_cache and redirect_info and redirect_info.redirect_url:
+                        await self.ip_cache.put_redirect(
+                            client_ip, target_url,
+                            redirect_info.status_code or 302,
+                            redirect_info.redirect_url,
+                        )
                     error_body = '{"error": "重定向次数过多"}'.encode("utf-8")
                     return 502, {"Content-Type": "application/json"}, error_body, redirect_info, route_decision
 
@@ -762,6 +913,20 @@ class ProxyRequestHandler:
                 self._apply_route_headers(filtered_headers, route_decision)
                 response_body = await response.read()
                 response.close()
+
+                final_url = str(response.url) if response.url else target_url
+                if self.ip_cache and response.status in (200, 206):
+                    await self.ip_cache.put_streaming(
+                        client_ip, target_url,
+                        response.status, final_url, filtered_headers,
+                    )
+                elif self.ip_cache and redirect_info and redirect_info.redirect_url:
+                    await self.ip_cache.put_redirect(
+                        client_ip, target_url,
+                        redirect_info.status_code or 302,
+                        redirect_info.redirect_url,
+                    )
+
                 return response.status, filtered_headers, response_body, redirect_info, route_decision
             except asyncio.TimeoutError as exc:
                 last_error = str(exc)

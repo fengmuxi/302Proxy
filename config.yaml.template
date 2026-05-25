@@ -36,6 +36,11 @@ streaming:
   enable_range_support: true
   max_request_body_size: 0
 
+ip_result_cache:
+  enabled: true
+  ttl_seconds: 300
+  max_entries: 5000
+
 proxy_rules:
   - path_prefix: "/play"
     target_url: "http://127.0.0.1"

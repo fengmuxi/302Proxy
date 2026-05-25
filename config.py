@@ -156,6 +156,13 @@ class StreamingConfig:
 
 
 @dataclass
+class IpResultCacheConfig:
+    enabled: bool = True
+    ttl_seconds: int = 300
+    max_entries: int = 5000
+
+
+@dataclass
 class RemoteConfigSettings:
     enabled: bool = False
     url: str = ""
@@ -265,6 +272,7 @@ class Config:
     route_groups: List[RouteGroupConfig] = field(default_factory=list)
     remote_config: RemoteConfigSettings = field(default_factory=RemoteConfigSettings)
     geoip: GeoIPSettings = field(default_factory=GeoIPSettings)
+    ip_result_cache: IpResultCacheConfig = field(default_factory=IpResultCacheConfig)
     hop_by_hop_headers: List[str] = field(
         default_factory=lambda: [
             "Connection",
@@ -577,6 +585,14 @@ class Config:
                 ),
             )
 
+        ip_result_cache_data = data.get("ip_result_cache", {})
+        if isinstance(ip_result_cache_data, dict):
+            config.ip_result_cache = IpResultCacheConfig(
+                enabled=coerce_bool(ip_result_cache_data.get("enabled"), config.ip_result_cache.enabled),
+                ttl_seconds=max(0, int(ip_result_cache_data.get("ttl_seconds", config.ip_result_cache.ttl_seconds) or 0)),
+                max_entries=max(0, int(ip_result_cache_data.get("max_entries", config.ip_result_cache.max_entries) or 0)),
+            )
+
         return config
 
     def to_dict(self) -> Dict[str, Any]:
@@ -696,6 +712,11 @@ class Config:
                     "last_sync_message": self.geoip.offline.last_sync_message,
                     "last_success_at": self.geoip.offline.last_success_at,
                 },
+            },
+            "ip_result_cache": {
+                "enabled": self.ip_result_cache.enabled,
+                "ttl_seconds": self.ip_result_cache.ttl_seconds,
+                "max_entries": self.ip_result_cache.max_entries,
             },
         }
 

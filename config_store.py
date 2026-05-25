@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,7 @@ from config import (
     DEFAULT_DB_PATH,
     Config,
     GeoIPSettings,
+    IpResultCacheConfig,
     LoggingConfig,
     OnlineGeoIPSource,
     OfflineGeoIPSettings,
@@ -105,6 +107,9 @@ class ConfigStore:
                     streaming_buffer_size INTEGER NOT NULL,
                     streaming_enable_range_support INTEGER NOT NULL,
                     streaming_max_request_body_size INTEGER NOT NULL,
+                    ip_cache_enabled INTEGER NOT NULL,
+                    ip_cache_ttl_seconds INTEGER NOT NULL,
+                    ip_cache_max_entries INTEGER NOT NULL,
                     default_timeout INTEGER NOT NULL,
                     max_redirects INTEGER NOT NULL,
                     follow_redirects INTEGER NOT NULL,
@@ -248,6 +253,16 @@ class ConfigStore:
                     operation_duration_ms INTEGER NOT NULL DEFAULT 0,
                     result_status TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS banned_ips (
+                    ip TEXT PRIMARY KEY,
+                    reason TEXT NOT NULL DEFAULT '',
+                    banned_by TEXT NOT NULL DEFAULT 'admin',
+                    banned_at REAL NOT NULL DEFAULT 0,
+                    expire_at REAL NOT NULL DEFAULT 0,
+                    permanent INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
 
@@ -419,6 +434,24 @@ class ConfigStore:
                 ON route_logs(rule_request_host)
                 """
             )
+            self._ensure_column(
+                connection,
+                "system_settings",
+                "ip_cache_enabled",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                connection,
+                "system_settings",
+                "ip_cache_ttl_seconds",
+                "INTEGER NOT NULL DEFAULT 300",
+            )
+            self._ensure_column(
+                connection,
+                "system_settings",
+                "ip_cache_max_entries",
+                "INTEGER NOT NULL DEFAULT 5000",
+            )
 
     def _ensure_column(
         self,
@@ -476,11 +509,12 @@ class ConfigStore:
                     streaming_large_file_threshold, streaming_stream_timeout,
                     streaming_read_timeout, streaming_write_timeout, streaming_buffer_size,
                     streaming_enable_range_support, streaming_max_request_body_size,
+                    ip_cache_enabled, ip_cache_ttl_seconds, ip_cache_max_entries,
                     default_timeout, max_redirects,
                     follow_redirects, trust_forward_headers, database_path, updated_at
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -507,6 +541,9 @@ class ConfigStore:
                     config.streaming.buffer_size,
                     int(config.streaming.enable_range_support),
                     config.streaming.max_request_body_size,
+                    int(config.ip_result_cache.enabled),
+                    config.ip_result_cache.ttl_seconds,
+                    config.ip_result_cache.max_entries,
                     config.default_timeout,
                     config.max_redirects,
                     int(config.follow_redirects),
@@ -880,6 +917,11 @@ class ConfigStore:
                 enable_range_support=bool(system_row["streaming_enable_range_support"]),
                 max_request_body_size=system_row["streaming_max_request_body_size"],
             )
+            config.ip_result_cache = IpResultCacheConfig(
+                enabled=bool(system_row["ip_cache_enabled"]),
+                ttl_seconds=system_row["ip_cache_ttl_seconds"],
+                max_entries=system_row["ip_cache_max_entries"],
+            )
             config.default_timeout = system_row["default_timeout"]
             config.max_redirects = system_row["max_redirects"]
             config.follow_redirects = bool(system_row["follow_redirects"])
@@ -1022,6 +1064,7 @@ class ConfigStore:
                     "host": config.server.host,
                     "port": config.server.port,
                     "streaming_enabled": config.streaming.enabled,
+                    "ip_cache_enabled": config.ip_result_cache.enabled,
                 },
             },
             "route_groups": groups,
@@ -1293,6 +1336,116 @@ class ConfigStore:
             "retention_days": retention_days,
             "last_pruned_at": now_text,
         }
+
+    def list_banned_ips(self) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM banned_ips ORDER BY banned_at DESC").fetchall()
+        return [self._serialize_banned_ip(row) for row in rows]
+
+    def get_banned_ip(self, ip: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM banned_ips WHERE ip = ?", (ip,)).fetchone()
+        if not row:
+            return None
+        return self._serialize_banned_ip(row)
+
+    def add_banned_ip(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        ip = str(payload.get("ip", "")).strip()
+        if not ip:
+            raise ValueError("IP地址不能为空")
+        now = utc_now()
+        banned_at = float(payload.get("banned_at", 0) or time.time())
+        expire_at = float(payload.get("expire_at", 0) or 0)
+        permanent = int(bool(payload.get("permanent", True)))
+        reason = str(payload.get("reason", "")).strip()
+        banned_by = str(payload.get("banned_by", "admin")).strip()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ip, reason, banned_by, banned_at, expire_at, permanent, now),
+            )
+        return self.get_banned_ip(ip)
+
+    def remove_banned_ip(self, ip: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM banned_ips WHERE ip = ?", (ip,))
+        return cursor.rowcount > 0
+
+    def clear_all_banned_ips(self) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM banned_ips")
+        return cursor.rowcount
+
+    def import_banned_ips(self, bans: List[Dict[str, Any]]) -> int:
+        count = 0
+        now = utc_now()
+        with self._connect() as connection:
+            for b in bans:
+                ip = b.get("ip", "")
+                if not ip:
+                    continue
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ip,
+                        str(b.get("reason", "")).strip(),
+                        str(b.get("banned_by", "import")).strip(),
+                        float(b.get("banned_at", time.time())),
+                        float(b.get("expire_at", 0)),
+                        int(bool(b.get("permanent", True))),
+                        now,
+                    ),
+                )
+                count += 1
+        return count
+
+    def _serialize_banned_ip(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "ip": row["ip"],
+            "reason": row["reason"],
+            "banned_by": row["banned_by"],
+            "banned_at": row["banned_at"],
+            "expire_at": row["expire_at"],
+            "permanent": bool(row["permanent"]),
+            "created_at": row["created_at"],
+        }
+
+    def get_ip_cache_config(self) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM system_settings WHERE id = 1").fetchone()
+        if not row:
+            return {"enabled": False, "ttl_seconds": 300, "max_entries": 5000}
+        keys = row.keys()
+        enabled_val = row["ip_cache_enabled"] if "ip_cache_enabled" in keys else 0
+        ttl_val = row["ip_cache_ttl_seconds"] if "ip_cache_ttl_seconds" in keys else 300
+        max_val = row["ip_cache_max_entries"] if "ip_cache_max_entries" in keys else 5000
+        return {
+            "enabled": bool(enabled_val),
+            "ttl_seconds": int(ttl_val or 300),
+            "max_entries": int(max_val or 5000),
+        }
+
+    def update_ip_cache_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        ttl_seconds = max(0, int(payload.get("ttl_seconds", 300) or 300))
+        max_entries = max(0, int(payload.get("max_entries", 5000) or 5000))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE system_settings
+                SET ip_cache_enabled = ?, ip_cache_ttl_seconds = ?, ip_cache_max_entries = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (int(enabled), ttl_seconds, max_entries, now),
+            )
+        return self.get_ip_cache_config()
 
     def list_rules(self) -> List[Dict[str, Any]]:
         config = self.load_runtime_config()

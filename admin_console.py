@@ -23,12 +23,14 @@ class AdminConsole:
         offline_sync_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
         offline_rollback_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
         online_cache_clear_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
+        ban_manager_callback: Callable[[str, Dict], Awaitable[None]] | None = None,
     ):
         self.config_store = config_store
         self.reload_callback = reload_callback
         self.offline_sync_callback = offline_sync_callback
         self.offline_rollback_callback = offline_rollback_callback
         self.online_cache_clear_callback = online_cache_clear_callback
+        self.ban_manager_callback = ban_manager_callback
         self.static_dir = Path(__file__).resolve().parent / "static"
 
     def register(self, app: web.Application) -> None:
@@ -54,6 +56,12 @@ class AdminConsole:
         app.router.add_delete("/_admin/api/logs", self.delete_route_logs)
         app.router.add_get("/_admin/api/log-settings", self.get_route_log_settings)
         app.router.add_put("/_admin/api/log-settings", self.update_route_log_settings)
+        app.router.add_get("/_admin/api/ip-cache-settings", self.get_ip_cache_settings)
+        app.router.add_put("/_admin/api/ip-cache-settings", self.update_ip_cache_settings)
+        app.router.add_get("/_admin/api/banned-ips", self.list_banned_ips)
+        app.router.add_post("/_admin/api/banned-ips", self.add_banned_ip)
+        app.router.add_delete("/_admin/api/banned-ips/{ip:.+}", self.remove_banned_ip)
+        app.router.add_post("/_admin/api/banned-ips/clear", self.clear_banned_ips)
         app.router.add_get("/_admin/api/rules", self.list_rules)
         app.router.add_post("/_admin/api/rules", self.create_rule)
         app.router.add_get("/_admin/api/rules/{rule_id:\\d+}", self.get_rule)
@@ -268,6 +276,64 @@ class AdminConsole:
     async def update_route_log_settings(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
         return await self._run_protected(request, lambda: self.config_store.update_route_log_settings(payload))
+
+    async def get_ip_cache_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self._get_ip_cache_settings())
+
+    def _get_ip_cache_settings(self) -> Dict[str, Any]:
+        config = self.config_store.load_runtime_config()
+        return {
+            "enabled": config.ip_result_cache.enabled,
+            "ttl_seconds": config.ip_result_cache.ttl_seconds,
+            "max_entries": config.ip_result_cache.max_entries,
+        }
+
+    async def update_ip_cache_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_ip_cache_settings(payload))
+
+    def _update_ip_cache_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_ip_cache_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "请求结果缓存配置已更新", **result}
+
+    async def list_banned_ips(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: {"items": self.config_store.list_banned_ips()})
+
+    async def add_banned_ip(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        async def operation():
+            result = self.config_store.add_banned_ip(payload)
+            if self.ban_manager_callback:
+                await self.ban_manager_callback("ban", payload)
+            return result
+        return await self._run_protected(request, operation, status=201)
+
+    async def remove_banned_ip(self, request: web.Request) -> web.Response:
+        ip = request.match_info["ip"]
+        async def operation():
+            removed = self.config_store.remove_banned_ip(ip)
+            if not removed:
+                raise KeyError(f"IP {ip} 不在封禁列表中")
+            if self.ban_manager_callback:
+                await self.ban_manager_callback("unban", {"ip": ip})
+            return {"removed": True, "ip": ip}
+        return await self._run_protected(request, operation)
+
+    async def clear_banned_ips(self, request: web.Request) -> web.Response:
+        await self._read_json(request)
+        async def operation():
+            count = self.config_store.clear_all_banned_ips()
+            if self.ban_manager_callback:
+                await self.ban_manager_callback("clear", {})
+            return {"cleared_count": count}
+        return await self._run_protected(request, operation)
 
     async def list_rules(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: {"items": self.config_store.list_rules()})

@@ -37,6 +37,8 @@ from config_store import ConfigStore
 from geo_service import GeoResolver
 from offline_geoip_sync import OfflineGeoIPSyncService
 from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
+from ip_result_cache import IpResultCache
+from ip_ban_manager import IpBanManager
 
 logger = logging.getLogger('proxy')
 
@@ -62,7 +64,13 @@ class ProxyServer:
             config_store=self.config_store,
             geo_resolver=self.geo_resolver,
         )
-        self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver)
+        self.ip_result_cache = IpResultCache(
+            enabled=config.ip_result_cache.enabled,
+            ttl_seconds=config.ip_result_cache.ttl_seconds,
+            max_entries=config.ip_result_cache.max_entries,
+        )
+        self.ip_ban_manager = IpBanManager()
+        self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
         self.admin_console = AdminConsole(
@@ -71,6 +79,7 @@ class ProxyServer:
             offline_sync_callback=self.sync_offline_geoip_now,
             offline_rollback_callback=self.rollback_offline_geoip_now,
             online_cache_clear_callback=self.clear_online_geoip_cache,
+            ban_manager_callback=self._sync_ban_manager,
         )
         self.app = web.Application(client_max_size=config.streaming.max_request_body_size)
         self._setup_routes()
@@ -79,6 +88,13 @@ class ProxyServer:
     def _setup_routes(self):
         self.app.router.add_get('/_health', self.health_check)
         self.app.router.add_get('/_stats', self.get_stats)
+        self.app.router.add_get('/_ip-cache/stats', self.get_ip_cache_stats)
+        self.app.router.add_post('/_ip-cache/clear', self.clear_ip_cache)
+        self.app.router.add_get('/_ban/list', self.list_bans)
+        self.app.router.add_post('/_ban/add', self.ban_ip)
+        self.app.router.add_post('/_ban/remove', self.unban_ip)
+        self.app.router.add_post('/_ban/clear', self.clear_all_bans)
+        self.app.router.add_get('/_ban/stats', self.get_ban_stats)
         self.admin_console.register(self.app)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
@@ -106,6 +122,17 @@ class ProxyServer:
         self.config = self.config_store.load_runtime_config()
         self.geo_resolver.set_online_cache_ttl_seconds(self.config.geoip.online_cache_ttl_seconds, reset_existing=True)
         self.request_handler.update_config(self.config)
+        cache_cfg = self.config.ip_result_cache
+        if self.ip_result_cache.enabled != cache_cfg.enabled or \
+           self.ip_result_cache.ttl_seconds != cache_cfg.ttl_seconds or \
+           self.ip_result_cache.max_entries != cache_cfg.max_entries:
+            self.ip_result_cache = IpResultCache(
+                enabled=cache_cfg.enabled,
+                ttl_seconds=cache_cfg.ttl_seconds,
+                max_entries=cache_cfg.max_entries,
+            )
+            self.request_handler.set_ip_cache(self.ip_result_cache)
+            logger.info("请求结果缓存配置已更新: enabled=%s ttl=%ds max=%d", cache_cfg.enabled, cache_cfg.ttl_seconds, cache_cfg.max_entries)
 
     async def sync_offline_geoip_now(self) -> Dict[str, Any]:
         return await self.offline_geoip_sync_service.sync_now(force=True)
@@ -121,6 +148,23 @@ class ProxyServer:
             "cleared_count": result.get('cleared_count', 0),
             "ttl_seconds": summary_before.get("ttl_seconds", self.config.geoip.online_cache_ttl_seconds),
         }
+
+    async def _sync_ban_manager(self, action: str, payload: Dict[str, Any]) -> None:
+        if action == "ban":
+            ip = payload.get("ip", "")
+            reason = payload.get("reason", "")
+            banned_by = payload.get("banned_by", "admin")
+            duration_seconds = int(payload.get("duration_seconds", 0) or 0)
+            permanent = bool(payload.get("permanent", True))
+            await self.ip_ban_manager.ban_ip(
+                ip=ip, reason=reason, banned_by=banned_by,
+                duration_seconds=duration_seconds, permanent=permanent,
+            )
+        elif action == "unban":
+            ip = payload.get("ip", "")
+            await self.ip_ban_manager.unban_ip(ip)
+        elif action == "clear":
+            await self.ip_ban_manager.clear_all()
 
     def _request_duration_ms(self, request: web.Request) -> int:
         started_at = request.get("_route_log_started_at")
@@ -286,8 +330,8 @@ class ProxyServer:
                     query_string=query_string if query_string else None,
                     route_decision=route_decision,
                 )
-                
-                return await self._send_streaming_response(request, streaming_response)
+                actual_cache_status = streaming_response.cache_status or "BYPASS"
+                return await self._send_streaming_response(request, streaming_response, cache_status=actual_cache_status)
             else:
                 status, response_headers, response_body, redirect_info, route_decision = await self.request_handler.handle_request(
                     method=method,
@@ -309,7 +353,7 @@ class ProxyServer:
                     request,
                     route_decision=route_decision,
                     upstream_status=status,
-                    cache_status="BYPASS",
+                    cache_status=self.request_handler.get_last_cache_status(),
                     redirect_info=redirect_info,
                     transport_mode="standard",
                 )
@@ -342,7 +386,7 @@ class ProxyServer:
                 body=json.dumps({'error': '内部服务器错误'}).encode()
             )
     
-    async def _send_streaming_response(self, request: web.Request, streaming_response: StreamingResponse) -> web.StreamResponse:
+    async def _send_streaming_response(self, request: web.Request, streaming_response: StreamingResponse, cache_status: str = "BYPASS") -> web.StreamResponse:
         redirect_info = streaming_response.redirect_info
         response_headers = streaming_response.headers
         
@@ -397,7 +441,7 @@ class ProxyServer:
                 request,
                 route_decision=streaming_response.route_decision,
                 upstream_status=streaming_response.status,
-                cache_status="BYPASS",
+                cache_status=cache_status,
                 redirect_info=redirect_info,
                 transport_mode="streaming",
             )
@@ -425,6 +469,107 @@ class ProxyServer:
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats).encode()
+        )
+
+    async def get_ip_cache_stats(self, request: web.Request) -> web.Response:
+        stats = self.ip_result_cache.get_stats()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(stats, ensure_ascii=False).encode()
+        )
+
+    async def clear_ip_cache(self, request: web.Request) -> web.Response:
+        count = await self.ip_result_cache.clear()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"message": f"已清除 {count} 条请求结果缓存"}, ensure_ascii=False).encode()
+        )
+
+    async def list_bans(self, request: web.Request) -> web.Response:
+        bans = await self.ip_ban_manager.list_bans()
+        items = []
+        for entry in bans:
+            items.append({
+                "ip": entry.ip,
+                "reason": entry.reason,
+                "banned_by": entry.banned_by,
+                "banned_at": entry.banned_at,
+                "expire_at": entry.expire_at,
+                "permanent": entry.permanent,
+            })
+        stats = self.ip_ban_manager.get_stats()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"items": items, "stats": stats}, ensure_ascii=False).encode()
+        )
+
+    async def ban_ip(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        ip = str(payload.get("ip", "")).strip()
+        reason = str(payload.get("reason", "")).strip()
+        banned_by = str(payload.get("banned_by", "admin")).strip()
+        duration_seconds = int(payload.get("duration_seconds", 0) or 0)
+        permanent = bool(payload.get("permanent", True))
+        if not ip:
+            return web.Response(
+                status=400,
+                headers={'Content-Type': 'application/json'},
+                body=json.dumps({"error": "IP地址不能为空"}, ensure_ascii=False).encode()
+            )
+        entry = await self.ip_ban_manager.ban_ip(
+            ip=ip, reason=reason, banned_by=banned_by,
+            duration_seconds=duration_seconds, permanent=permanent,
+        )
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({
+                "message": f"IP {ip} 已封禁",
+                "ip": entry.ip,
+                "permanent": entry.permanent,
+                "expire_at": entry.expire_at,
+            }, ensure_ascii=False).encode()
+        )
+
+    async def unban_ip(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        ip = str(payload.get("ip", "")).strip()
+        if not ip:
+            return web.Response(
+                status=400,
+                headers={'Content-Type': 'application/json'},
+                body=json.dumps({"error": "IP地址不能为空"}, ensure_ascii=False).encode()
+            )
+        removed = await self.ip_ban_manager.unban_ip(ip)
+        if not removed:
+            return web.Response(
+                status=404,
+                headers={'Content-Type': 'application/json'},
+                body=json.dumps({"error": f"IP {ip} 不在封禁列表中"}, ensure_ascii=False).encode()
+            )
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"message": f"IP {ip} 已解封"}, ensure_ascii=False).encode()
+        )
+
+    async def clear_all_bans(self, request: web.Request) -> web.Response:
+        count = await self.ip_ban_manager.clear_all()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"message": f"已清除 {count} 条封禁记录"}, ensure_ascii=False).encode()
+        )
+
+    async def get_ban_stats(self, request: web.Request) -> web.Response:
+        stats = self.ip_ban_manager.get_stats()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(stats, ensure_ascii=False).encode()
         )
     
     async def on_startup(self, app: web.Application):
@@ -454,6 +599,13 @@ class ProxyServer:
         
         for rule in self.config.proxy_rules:
             logger.info(f"  {rule.path_prefix} -> {rule.target_url} (流式: {rule.enable_streaming})")
+
+        logger.info(
+            f"请求结果缓存: {'启用' if self.ip_result_cache.enabled else '禁用'}, "
+            f"TTL={self.ip_result_cache.ttl_seconds}秒, "
+            f"最大条目={self.ip_result_cache.max_entries}"
+        )
+        logger.info("IP封禁管理器已初始化")
     
     async def on_shutdown(self, app: web.Application):
         logger.info("正在关闭代理服务器...")

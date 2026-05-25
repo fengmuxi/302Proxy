@@ -71,6 +71,8 @@
       <button class="module-btn" data-module-target="logs" type="button">日志管理</button>
       <button class="module-btn" data-module-target="geoip-online" type="button">在线IP定位源</button>
       <button class="module-btn" data-module-target="geoip-offline" type="button">离线IP定位源</button>
+      <button class="module-btn" data-module-target="ip-cache-manager" type="button">请求结果缓存</button>
+      <button class="module-btn" data-module-target="ip-ban-manager" type="button">IP封禁管理</button>
       <button id="auth-logout-btn" class="module-btn auth-logout-btn" type="button" hidden>退出登录</button>
     </nav>
 
@@ -270,7 +272,7 @@
           </div>
           <div class="rules-layout logs-layout">
             <div class="stack-form">
-              <form id="route-log-filter-form" class="sub-card stack-form">
+              <form id="route-log-filter-form" class="sub-card stack-form" style="height: 532px;">
                 <div class="sub-card-head">
                   <h3>日志查询</h3>
                   <div class="table-actions">
@@ -329,9 +331,31 @@
                 <div class="sub-card-head">
                   <h3>日志列表</h3>
                   <div class="table-actions">
-                    <span class="hint" id="route-log-total-count">共 0 条</span>
-                    <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
-                    <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
+                    <!-- 统计信息组 -->
+                    <div class="table-actions-group">
+                      <span class="hint" id="route-log-total-count">共 0 条</span>
+                    </div>
+                    <!-- 刷新控制组 -->
+                    <div class="table-actions-group">
+                      <label class="auto-refresh-toggle" title="开启后按设定间隔自动刷新日志列表">
+                        <input id="log_auto_refresh_enabled" type="checkbox" />
+                        <span class="auto-refresh-label">自动刷新</span>
+                      </label>
+                      <select id="log_auto_refresh_interval" title="刷新间隔（秒）">
+                        <option value="3">3秒</option>
+                        <option value="5" selected>5秒</option>
+                        <option value="10">10秒</option>
+                        <option value="15">15秒</option>
+                        <option value="30">30秒</option>
+                        <option value="60">60秒</option>
+                      </select>
+                      <span class="auto-refresh-status" id="log_auto_refresh_status"></span>
+                    </div>
+                    <!-- 操作按钮组 -->
+                    <div class="table-actions-group">
+                      <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
+                      <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
+                    </div>
                   </div>
                 </div>
                 <div class="rule-list-wrap">
@@ -551,6 +575,123 @@
 
             <button type="submit" class="primary-btn">保存离线定位配置</button>
           </form>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="ip-ban-manager">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">IP Ban Manager</p>
+              <h2>IP封禁管理</h2>
+              <p class="hint">管理被封禁的IP地址，被封禁的IP请求将被拒绝（返回403）。支持从日志中快速封禁，也可手动添加。</p>
+            </div>
+          </div>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>新增封禁</h3>
+            </div>
+            <form id="ban-ip-form" class="stack-form">
+              <div class="two-col">
+                <label>
+                  <span>IP地址 <strong style="color:#c00">*</strong></span>
+                  <input id="ban_ip_address" type="text" placeholder="1.2.3.4" required />
+                </label>
+                <label>
+                  <span>封禁原因</span>
+                  <input id="ban_ip_reason" type="text" placeholder="可选，记录封禁原因便于后续排查" />
+                </label>
+                <label>
+                  <span>封禁时长</span>
+                  <select id="ban_ip_permanent">
+                    <option value="1" selected>永久封禁</option>
+                    <option value="0">临时封禁</option>
+                  </select>
+                </label>
+                <label>
+                  <span>临时封禁时长（秒）</span>
+                  <input id="ban_ip_duration" type="number" min="60" value="3600" placeholder="3600 = 1小时" />
+                </label>
+              </div>
+              <p class="hint">选择"临时封禁"时，IP将在指定秒数后自动解封。永久封禁需要手动解封。</p>
+              <button type="submit" class="primary-btn">添加封禁</button>
+            </form>
+          </div>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>封禁列表</h3>
+              <div class="table-actions">
+                <button id="clear-bans-btn" type="button" class="ghost-btn">清空所有封禁</button>
+              </div>
+            </div>
+            <div class="rule-list-wrap">
+              <table class="rules-table compact-table">
+                <thead>
+                  <tr>
+                    <th>IP地址</th>
+                    <th>原因</th>
+                    <th>操作者</th>
+                    <th>封禁时间</th>
+                    <th>到期时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="banned-ips-table-body">
+                  <tr><td colspan="6">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="ip-cache-manager">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Request Result Cache</p>
+              <h2>请求结果缓存管理</h2>
+              <p class="hint">同IP请求同链接时，在有效期内直接使用之前的处理结果（302重定向或流式转发），跳过重定向链跟踪，提升响应速度。</p>
+            </div>
+          </div>
+
+          <form id="ip-cache-settings-form" class="sub-card stack-form">
+            <div class="sub-card-head">
+              <h3>缓存配置</h3>
+            </div>
+            <label>
+              <span>启用缓存</span>
+              <select id="ip_cache_enabled">
+                <option value="1">启用</option>
+                <option value="0">禁用</option>
+              </select>
+            </label>
+            <label>
+              <span>缓存时间（秒）</span>
+              <input id="ip_cache_ttl_seconds" type="number" min="0" value="300" />
+            </label>
+            <p class="hint">同IP请求同链接时，在有效期内直接使用之前的处理结果，跳过重定向链跟踪。</p>
+            <label>
+              <span>最大条目数</span>
+              <input id="ip_cache_max_entries" type="number" min="100" max="50000" value="5000" />
+            </label>
+            <p class="hint">超过该数量时，最久未使用的缓存条目会被自动淘汰（LRU策略）。</p>
+            <button type="submit" class="primary-btn">保存缓存配置</button>
+          </form>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>缓存统计</h3>
+              <div class="table-actions">
+                <button id="clear-ip-cache-btn" type="button" class="ghost-btn">清空缓存</button>
+              </div>
+            </div>
+            <div id="ip-cache-stats" class="test-result-card is-empty">
+              <p class="test-result-placeholder">这里会显示缓存命中率和当前条目数。</p>
+            </div>
+          </div>
         </div>
       </section>
     </main>

@@ -16,6 +16,10 @@
   --radius-sm: 12px;
   --panel-scroll-max-height: clamp(420px, 68vh, 860px);
   --font-sans: "Aptos", "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  /* 文本颜色变量 */
+  --text-primary: var(--ink);
+  --text-secondary: var(--muted);
+  --text-tertiary: #8a928c;
 }
 
 * {
@@ -212,30 +216,43 @@ th {
 .module-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
   margin-top: 22px;
+  align-items: center;
 }
 
 .module-btn {
   appearance: none;
   border: 1px solid rgba(18, 127, 105, 0.14);
   border-radius: 999px;
-  padding: 12px 18px;
+  padding: 10px 16px;
   cursor: pointer;
   background: rgba(255, 252, 247, 0.78);
   color: var(--ink);
-  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+  font-size: 14px;
+  font-weight: 500;
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease, background 180ms ease, color 180ms ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .module-btn.is-active {
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
   color: #fff;
   border-color: transparent;
-  box-shadow: 0 16px 28px rgba(18, 127, 105, 0.18);
+  box-shadow: 0 16px 28px rgba(18, 127, 105, 0.24), 0 4px 12px rgba(18, 127, 105, 0.15);
+  transform: translateY(-2px);
+  font-weight: 600;
 }
 
-.module-btn:hover {
+.module-btn:hover:not(.is-active) {
   transform: translateY(-1px);
+  border-color: rgba(18, 127, 105, 0.3);
+  background: rgba(255, 252, 247, 0.92);
+}
+
+.module-btn:active:not(.is-active) {
+  transform: translateY(0);
 }
 
 .module-stack {
@@ -789,15 +806,36 @@ textarea {
 
 th,
 td {
-  padding: 14px 12px;
+  padding: 12px 10px;
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid rgba(40, 57, 48, 0.1);
+  transition: background-color 150ms ease;
 }
 
 td {
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 表格行hover效果 */
+.route-log-table tbody tr:hover {
+  background: rgba(18, 127, 105, 0.04);
+}
+
+.route-log-table tbody tr:hover td {
+  border-bottom-color: rgba(18, 127, 105, 0.15);
+}
+
+.rules-table tbody tr:hover {
+  background: rgba(18, 127, 105, 0.03);
+}
+
+/* 紧凑表格单元格内边距微调 */
+.compact-table th,
+.compact-table td {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .badge {
@@ -829,19 +867,152 @@ td {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
+}
+
+/* 日志列表标题栏分组 */
+.table-actions-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(40, 57, 48, 0.08);
+}
+
+.table-actions-group + .table-actions-group {
+  margin-left: 4px;
+}
+
+.table-actions .hint {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-right: 4px;
 }
 
 .table-btn {
   border: none;
   border-radius: 999px;
-  padding: 7px 12px;
+  padding: 6px 12px;
   cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
   background: rgba(31, 38, 35, 0.07);
+  color: var(--ink);
+  transition: all 160ms ease;
+  white-space: nowrap;
+}
+
+.table-btn:hover {
+  background: rgba(31, 38, 35, 0.12);
+  transform: translateY(-1px);
 }
 
 .table-btn.delete {
-  background: rgba(235, 92, 52, 0.12);
-  color: #9a3f23;
+  background: rgba(235, 92, 52, 0.1);
+  color: #c44a2b;
+  border: 1px solid rgba(235, 92, 52, 0.2);
+}
+
+.table-btn.delete:hover {
+  background: rgba(235, 92, 52, 0.18);
+  border-color: rgba(235, 92, 52, 0.35);
+  box-shadow: 0 4px 8px rgba(235, 92, 52, 0.15);
+}
+
+.table-btn.ban-btn {
+  background: linear-gradient(135deg, rgba(180, 50, 50, 0.12), rgba(200, 60, 60, 0.08));
+  color: #b33;
+  border: 1px solid rgba(180, 50, 50, 0.25);
+  font-weight: 600;
+  font-size: 11px;
+  padding: 5px 10px;
+}
+
+.table-btn.ban-btn:hover {
+  background: linear-gradient(135deg, rgba(180, 50, 50, 0.2), rgba(200, 60, 60, 0.14));
+  border-color: rgba(180, 50, 50, 0.4);
+  box-shadow: 0 4px 10px rgba(180, 50, 50, 0.18);
+  transform: translateY(-1px);
+}
+
+.cache-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cache-status-badge.cache-hit {
+  background: rgba(18, 127, 105, 0.14);
+  color: var(--accent-strong);
+}
+
+.cache-status-badge.cache-bypass {
+  background: rgba(43, 53, 48, 0.08);
+  color: #6d756f;
+}
+
+.cache-status-badge.cache-banned {
+  background: rgba(180, 50, 50, 0.14);
+  color: #b33;
+}
+
+.auto-refresh-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.auto-refresh-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.auto-refresh-toggle input[type="checkbox"]:checked + .auto-refresh-label {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.auto-refresh-label {
+  font-size: 12px;
+}
+
+#log_auto_refresh_interval {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(43, 53, 48, 0.18);
+  background: transparent;
+  color: var(--text-primary);
+  min-width: 0;
+  width: auto;
+}
+
+.auto-refresh-status {
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 40px;
+  text-align: center;
+}
+
+.auto-refresh-status.running {
+  color: var(--accent-strong);
+}
+
+.auto-refresh-status.stopped {
+  color: var(--text-tertiary);
 }
 
 .check-grid {
@@ -875,6 +1046,66 @@ td {
 
 .test-result-card.is-empty {
   color: var(--muted);
+}
+
+/* 新面板视觉统一 - 表单区域分组 */
+.form-section-group {
+  padding: 16px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(40, 57, 48, 0.06);
+  margin-bottom: 12px;
+}
+
+.form-section-group:last-child {
+  margin-bottom: 0;
+}
+
+/* 空状态提示优化 */
+.empty-state-enhanced {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.empty-state-enhanced::before {
+  content: "📋";
+  font-size: 36px;
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.empty-state-enhanced p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* IP封禁管理面板特殊样式 */
+#ip-ban-manager .sub-card {
+  transition: box-shadow 180ms ease, transform 180ms ease;
+}
+
+#ip-ban-manager .sub-card:hover {
+  box-shadow: 0 8px 24px rgba(53, 38, 22, 0.08);
+}
+
+/* 请求结果缓存面板特殊样式 */
+#ip-cache-manager .test-result-card {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 必填字段标记 */
+label span strong[style*="color"] {
+  color: #c00 !important;
+  font-weight: 700;
 }
 
 .test-result-head {
@@ -1029,5 +1260,128 @@ td {
   .prefix-card-toggle,
   .prefix-card-footer {
     flex-direction: column;
+  }
+}
+
+/* 滚动条美化（webkit） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(245, 242, 235, 0.6);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(93, 100, 95, 0.25);
+  border-radius: 5px;
+  transition: background 200ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(93, 100, 95, 0.4);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 卡片阴影层次感增强 */
+.card {
+  box-shadow:
+    0 4px 6px rgba(53, 38, 22, 0.04),
+    0 12px 24px rgba(53, 38, 22, 0.08),
+    0 24px 60px rgba(53, 38, 22, 0.12);
+  transition: box-shadow 220ms ease, transform 220ms ease;
+}
+
+.card:hover {
+  box-shadow:
+    0 4px 8px rgba(53, 38, 22, 0.06),
+    0 16px 32px rgba(53, 38, 22, 0.1),
+    0 28px 68px rgba(53, 38, 22, 0.14);
+  transform: translateY(-2px);
+}
+
+.sub-card {
+  box-shadow:
+    0 2px 4px rgba(53, 38, 22, 0.03),
+    0 8px 16px rgba(53, 38, 22, 0.06);
+  transition: all 180ms ease;
+}
+
+.sub-card:hover {
+  box-shadow:
+    0 3px 6px rgba(53, 38, 22, 0.04),
+    0 10px 20px rgba(53, 38, 22, 0.08);
+}
+
+/* 按钮过渡动画一致性 */
+button,
+.module-btn,
+.primary-btn,
+.ghost-btn,
+.table-btn,
+input[type="checkbox"],
+select {
+  transition-property: transform, box-shadow, border-color, background, color, opacity;
+  transition-duration: 180ms;
+  transition-timing-function: ease;
+}
+
+/* 响应式断点 - 适配8个导航项 */
+@media (max-width: 1200px) {
+  .module-nav {
+    gap: 6px;
+  }
+
+  .module-btn {
+    padding: 9px 14px;
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 980px) {
+  .module-nav {
+    gap: 6px;
+    justify-content: center;
+  }
+
+  .module-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+    flex: 1 1 auto;
+    min-width: 80px;
+    max-width: 140px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 720px) {
+  .module-nav {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .module-btn {
+    width: 100%;
+    max-width: none;
+    text-align: center;
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+
+  /* 小屏幕下table-actions分组垂直排列 */
+  .table-actions-group {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .table-actions-group + .table-actions-group {
+    margin-left: 0;
+    margin-top: 6px;
   }
 }

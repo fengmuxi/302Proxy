@@ -37,6 +37,13 @@ const RESULT_STATUS_LABELS = {
   no_route: "未匹配路由",
 };
 
+const CACHE_STATUS_LABELS = {
+  BYPASS: "未命中",
+  HIT_REDIRECT: "缓存命中(重定向)",
+  HIT_STREAMING: "缓存命中(流式)",
+  BANNED: "已封禁",
+};
+
 const MATCH_DETAIL_LABELS = {
   matched_by_ip_whitelist: "IP 白名单命中",
   ip_whitelist_not_matched: "IP 白名单未命中",
@@ -277,6 +284,20 @@ function formatMatchStrategy(value) {
 
 function formatResultStatus(value) {
   return formatTypeLabel(value, RESULT_STATUS_LABELS);
+}
+
+function formatCacheStatus(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return { text: "-", cls: "" };
+  if (CACHE_STATUS_LABELS[normalized]) {
+    const isHit = normalized.startsWith("HIT");
+    const isBanned = normalized === "BANNED";
+    return {
+      text: CACHE_STATUS_LABELS[normalized],
+      cls: isHit ? "cache-hit" : isBanned ? "cache-banned" : "cache-bypass",
+    };
+  }
+  return { text: normalized, cls: "" };
 }
 
 function formatMatchDetail(value) {
@@ -969,10 +990,11 @@ function renderRouteLogs(payload) {
     const configuredRegions = escapeHtml(log.configured_regions || "-");
     const targetUrl = escapeHtml(log.target_url || "-");
     const upstreamStatus = escapeHtml(String(log.upstream_status || 0));
-    const cacheStatus = escapeHtml(log.cache_status || "-");
+    const cacheStatusInfo = formatCacheStatus(log.cache_status);
     const resultStatus = escapeHtml(formatResultStatus(log.result_status));
     const durationText = escapeHtml(`${log.operation_duration_ms || 0} ms`);
     const createdAt = escapeHtml(formatDateTime(log.created_at));
+    const banIp = escapeHtml(log.client_ip || log.original_client_ip || "-");
 
     tr.innerHTML = `
       <td><input class="route-log-checkbox" data-id="${log.id}" type="checkbox" /></td>
@@ -1008,11 +1030,12 @@ function renderRouteLogs(payload) {
       <td class="route-log-result-cell">
         <strong class="route-log-target-url" title="${targetUrl}">${targetUrl}</strong>
         <div class="hint">状态: ${upstreamStatus}</div>
-        <div class="hint">缓存: ${cacheStatus}</div>
+        <div class="hint"><span class="cache-status-badge ${cacheStatusInfo.cls}">${cacheStatusInfo.text}</span></div>
         <div class="hint">结果: ${resultStatus}</div>
       </td>
       <td class="route-log-action-cell">
         <div class="table-actions">
+          <button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>
           <button class="table-btn delete" data-action="delete-route-log" data-id="${log.id}" type="button">删除</button>
         </div>
       </td>
@@ -1059,6 +1082,57 @@ async function loadRouteLogs() {
 
 async function refreshRouteLogModule() {
   await Promise.all([loadRouteLogSettings(), loadRouteLogs()]);
+}
+
+let _autoRefreshTimer = null;
+const AUTO_REFRESH_STORAGE_KEY = "log_auto_refresh";
+
+function getAutoRefreshConfig() {
+  try {
+    const raw = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return { enabled: false, interval: 5 };
+}
+
+function saveAutoRefreshConfig(cfg) {
+  localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg));
+}
+
+function updateAutoRefreshStatusUI() {
+  const el = document.getElementById("log_auto_refresh_status");
+  if (!el) return;
+  if (_autoRefreshTimer !== null) {
+    el.textContent = "●";
+    el.className = "auto-refresh-status running";
+  } else {
+    el.textContent = "";
+    el.className = "auto-refresh-status stopped";
+  }
+}
+
+function stopAutoRefresh() {
+  if (_autoRefreshTimer !== null) {
+    clearInterval(_autoRefreshTimer);
+    _autoRefreshTimer = null;
+  }
+  updateAutoRefreshStatusUI();
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  const enabled = getChecked("log_auto_refresh_enabled");
+  if (!enabled) return;
+  const interval = Math.max(1, parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5);
+  saveAutoRefreshConfig({ enabled: true, interval });
+  _autoRefreshTimer = setInterval(() => {
+    loadRouteLogs().catch((error) => {
+      showToast(error.message, true);
+      stopAutoRefresh();
+      setChecked("log_auto_refresh_enabled", false);
+    });
+  }, interval * 1000);
+  updateAutoRefreshStatusUI();
 }
 
 function renderRules(rules) {
@@ -1281,11 +1355,24 @@ async function persistGeoSettings(successMessage = "IP 定位配置已保存。"
 
 document.querySelectorAll(".module-btn").forEach((button) => {
   button.addEventListener("click", () => {
-    setActiveModule(button.dataset.moduleTarget);
-    if (button.dataset.moduleTarget === "logs") {
+    const target = button.dataset.moduleTarget;
+    setActiveModule(target);
+    if (target === "logs") {
       refreshRouteLogModule().catch((error) => {
         showToast(error.message, true);
       });
+      if (getChecked("log_auto_refresh_enabled")) {
+        startAutoRefresh();
+      }
+    } else {
+      stopAutoRefresh();
+    }
+    if (target === "ip-cache-manager") {
+      loadIpCacheSettings();
+      loadIpCacheStats();
+    }
+    if (target === "ip-ban-manager") {
+      loadBannedIpList();
     }
   });
 });
@@ -1455,6 +1542,53 @@ document.getElementById("route-log-settings-form").addEventListener("submit", as
   }
 });
 
+async function loadIpCacheSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/ip-cache-settings");
+    if (data) {
+      setValue("ip_cache_enabled", data.enabled ? "1" : "0");
+      setValue("ip_cache_ttl_seconds", String(data.ttl_seconds || 300));
+      setValue("ip_cache_max_entries", String(data.max_entries || 5000));
+    }
+  } catch (error) {}
+}
+
+async function loadIpCacheStats() {
+  try {
+    const stats = await apiFetch("/_ip-cache/stats");
+    const el = document.getElementById("ip-cache-stats");
+    if (!el || !stats) return;
+    el.className = "test-result-card";
+    el.innerHTML = `
+      <div class="test-result-row"><span>状态</span><span>${stats.enabled ? "已启用" : "已禁用"}</span></div>
+      <div class="test-result-row"><span>当前条目</span><span>${stats.current_entries}</span></div>
+      <div class="test-result-row"><span>命中次数</span><span>${stats.hits}</span></div>
+      <div class="test-result-row"><span>未命中次数</span><span>${stats.misses}</span></div>
+      <div class="test-result-row"><span>命中率</span><span>${stats.hit_rate}</span></div>
+      <div class="test-result-row"><span>TTL</span><span>${stats.ttl_seconds}秒</span></div>
+      <div class="test-result-row"><span>最大条目</span><span>${stats.max_entries}</span></div>
+    `;
+  } catch (error) {}
+}
+
+document.getElementById("ip-cache-settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await apiFetch("/_admin/api/ip-cache-settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: getValue("ip_cache_enabled") === "1",
+        ttl_seconds: Number(getValue("ip_cache_ttl_seconds") || 300),
+        max_entries: Number(getValue("ip_cache_max_entries") || 5000),
+      }),
+    });
+    await Promise.all([loadIpCacheSettings(), loadIpCacheStats()]);
+    showToast("请求结果缓存配置已保存。");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
 document.getElementById("route-log-select-all").addEventListener("change", (event) => {
   const checked = Boolean(event.target.checked);
   document.querySelectorAll(".route-log-checkbox").forEach((checkbox) => {
@@ -1504,21 +1638,34 @@ document.getElementById("route-log-delete-all-btn").addEventListener("click", as
 document.getElementById("route-logs-table-body").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
-  if (button.dataset.action !== "delete-route-log") return;
 
-  const logId = Number(button.dataset.id);
-  if (!window.confirm(`确认删除日志 #${logId} 吗？`)) {
-    return;
-  }
-  try {
-    await apiFetch("/_admin/api/logs", {
-      method: "DELETE",
-      body: JSON.stringify({ ids: [logId] }),
-    });
-    await refreshRouteLogModule();
-    showToast("日志已删除。");
-  } catch (error) {
-    showToast(error.message, true);
+  const action = button.dataset.action;
+  if (action === "delete-route-log") {
+    const logId = Number(button.dataset.id);
+    if (!window.confirm(`确认删除日志 #${logId} 吗？`)) {
+      return;
+    }
+    try {
+      await apiFetch("/_admin/api/logs", {
+        method: "DELETE",
+        body: JSON.stringify({ ids: [logId] }),
+      });
+      await refreshRouteLogModule();
+      showToast("日志已删除。");
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  } else if (action === "ban-ip-from-log") {
+    const ip = button.dataset.ip;
+    if (!ip || ip === "-") {
+      showToast("该日志没有可封禁的IP地址", true);
+      return;
+    }
+    try {
+      await banIpFromLog(ip);
+    } catch (error) {
+      showToast(error.message, true);
+    }
   }
 });
 
@@ -1852,6 +1999,145 @@ els.authLogoutBtn?.addEventListener("click", async () => {
   }
 });
 
+async function banIpFromLog(ip) {
+  const reason = prompt(`请输入封禁 IP ${ip} 的原因（可选）:`, "从日志手动封禁");
+  if (reason === null) return;
+  await apiFetch("/_admin/api/banned-ips", {
+    method: "POST",
+    body: JSON.stringify({
+      ip: ip,
+      reason: reason || "从日志手动封禁",
+      banned_by: "admin",
+      permanent: true,
+    }),
+  });
+  showToast(`IP ${ip} 已封禁`);
+  loadBannedIpList();
+}
+
+async function loadBannedIpList() {
+  try {
+    const data = await apiFetch("/_admin/api/banned-ips");
+    renderBannedIpList(data.items || []);
+  } catch (error) {}
+}
+
+function renderBannedIpList(items) {
+  const tbody = document.getElementById("banned-ips-table-body");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="6">暂无封禁IP记录。</td></tr>';
+    return;
+  }
+  items.forEach((item) => {
+    const tr = document.createElement("tr");
+    const expireText = item.permanent
+      ? "永久封禁"
+      : item.expire_at
+        ? new Date(item.expire_at * 1000).toLocaleString("zh-CN", { hour12: false })
+        : "-";
+    tr.innerHTML = `
+      <td><strong>${escapeHtml(item.ip)}</strong></td>
+      <td>${escapeHtml(item.reason || "-")}</td>
+      <td>${escapeHtml(item.banned_by || "admin")}</td>
+      <td>${escapeHtml(formatDateTime(new Date(item.banned_at * 1000).toISOString()))}</td>
+      <td>${expireText}</td>
+      <td>
+        <div class="table-actions">
+          <button class="table-btn delete" data-action="unban-ip" data-ip="${escapeHtml(item.ip)}" type="button">解封</button>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById("banned-ips-table-body")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.dataset.action !== "unban-ip") return;
+  const ip = button.dataset.ip;
+  if (!window.confirm(`确认解封 IP ${ip} 吗？`)) return;
+  try {
+    await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
+    showToast(`IP ${ip} 已解封`);
+    loadBannedIpList();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
+document.getElementById("ban-ip-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const ip = getValue("ban_ip_address").trim();
+  if (!ip) {
+    showToast("IP地址不能为空", true);
+    return;
+  }
+  const reason = getValue("ban_ip_reason").trim();
+  const permanent = getChecked("ban_ip_permanent");
+  const duration = getNonNegativeIntValue("ban_ip_duration", 0);
+  try {
+    await apiFetch("/_admin/api/banned-ips", {
+      method: "POST",
+      body: JSON.stringify({
+        ip: ip,
+        reason: reason || "",
+        banned_by: "admin",
+        permanent: permanent,
+        duration_seconds: permanent ? 0 : duration,
+      }),
+    });
+    setValue("ban_ip_address", "");
+    setValue("ban_ip_reason", "");
+    setChecked("ban_ip_permanent", true);
+    setValue("ban_ip_duration", "3600");
+    showToast(`IP ${ip} 已封禁`);
+    loadBannedIpList();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
+document.getElementById("clear-bans-btn")?.addEventListener("click", async () => {
+  if (!window.confirm("确认清空所有封禁记录吗？此操作不可恢复！")) return;
+  try {
+    await apiFetch("/_admin/api/banned-ips/clear", { method: "POST" });
+    showToast("所有封禁记录已清空");
+    loadBannedIpList();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
+document.getElementById("log_auto_refresh_enabled")?.addEventListener("change", () => {
+  if (getChecked("log_auto_refresh_enabled")) {
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
+    saveAutoRefreshConfig({ enabled: false, interval: parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5 });
+  }
+});
+
+document.getElementById("log_auto_refresh_interval")?.addEventListener("change", () => {
+  const interval = parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5;
+  saveAutoRefreshConfig({ enabled: getChecked("log_auto_refresh_enabled"), interval });
+  if (getChecked("log_auto_refresh_enabled")) {
+    startAutoRefresh();
+  }
+});
+
+document.getElementById("clear-ip-cache-btn")?.addEventListener("click", async () => {
+  if (!window.confirm("确认清空所有请求结果缓存吗？")) return;
+  try {
+    const data = await apiFetch("/_ip-cache/clear", { method: "POST" });
+    showToast(data.message || "缓存已清空");
+    loadIpCacheStats();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
 window.addEventListener("DOMContentLoaded", async () => {
   setActiveModule("overview");
   bindGeoNumericInputSafety();
@@ -1859,6 +2145,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   resetRouteGroupForm();
   resetGeoSourceForm();
   resetRuleForm();
+  const savedAutoRefresh = getAutoRefreshConfig();
+  setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
+  setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
+  if (savedAutoRefresh.enabled) {
+    startAutoRefresh();
+  }
+  updateAutoRefreshStatusUI();
   try {
     const auth = await loadAuthStatus();
     if (!auth.enabled || auth.authenticated) {
