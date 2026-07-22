@@ -240,8 +240,18 @@
                   <input id="rule_max_redirects" type="number" min="0" value="10" />
                 </label>
                 <label>
-                  <span>重试次数</span>
-                  <input id="rule_retry_times" type="number" min="0" value="3" />
+                <span>重试次数</span>
+                <input id="rule_retry_times" type="number" min="0" value="3" />
+              </label>
+              </div>
+              <div class="two-col">
+                <label>
+                  <span>路径正则模式</span>
+                  <input id="rule_path_rewrite_pattern" type="text" placeholder="留空表示不启用，例：^/api/(.+)$" />
+                </label>
+                <label>
+                  <span>路径替换模板</span>
+                  <input id="rule_path_rewrite_replacement" type="text" placeholder="支持 \\1、\\g&lt;name&gt; 反向引用，例：/v2/\1" />
                 </label>
               </div>
               <label>

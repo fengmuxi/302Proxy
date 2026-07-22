@@ -204,6 +204,21 @@ max_size: 10485760  # 兼容：纯字节数
 | follow_redirects | bool | 否 | 是否自动跟随重定向（规则级别） |
 | retry_times | int | 否 | 失败重试次数 |
 | enable_streaming | bool | 否 | 是否为该规则启用流式传输 |
+| path_rewrite_pattern | string | 否 | 路径正则改写模式，留空表示不启用；命中后会在 strip_prefix 之前对原始 path 执行 `re.sub` |
+| path_rewrite_replacement | string | 否 | 路径正则替换模板，支持 `\1`、`\g<name>` 反向引用；与 `path_rewrite_pattern` 配合使用 |
+
+##### 路径正则改写示例
+
+```yaml
+proxy_rules:
+  - path_prefix: "/api"
+    target_url: "https://backend.example.com"
+    path_rewrite_pattern: "^/api/v1/(.+)$"
+    path_rewrite_replacement: "/v2/\\1"
+```
+
+- 请求 `/api/v1/users` → 改写后 path 为 `/v2/users` → 转发到 `https://backend.example.com/v2/users`
+- 改写在 `strip_prefix` 之前执行，可与 `strip_prefix` 同时配置；若正则编译失败会跳过改写并记录告警日志。
 
 ## 使用示例
 

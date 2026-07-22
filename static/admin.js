@@ -1303,6 +1303,8 @@ function resetRuleForm() {
   setValue("rule_max_redirects", "10");
   setValue("rule_retry_times", "3");
   setValue("rule_notes", "");
+  setValue("rule_path_rewrite_pattern", "");
+  setValue("rule_path_rewrite_replacement", "");
   setChecked("rule_enabled", true);
   setChecked("rule_is_default", false);
   setChecked("rule_strip_prefix", false);
@@ -1324,6 +1326,8 @@ function fillRuleForm(rule) {
   setValue("rule_max_redirects", rule.max_redirects ?? 10);
   setValue("rule_retry_times", rule.retry_times ?? 3);
   setValue("rule_notes", rule.notes || "");
+  setValue("rule_path_rewrite_pattern", rule.path_rewrite_pattern || "");
+  setValue("rule_path_rewrite_replacement", rule.path_rewrite_replacement || "");
   setChecked("rule_enabled", rule.enabled);
   setChecked("rule_is_default", rule.is_default);
   setChecked("rule_strip_prefix", rule.strip_prefix);
@@ -1346,6 +1350,8 @@ function collectRuleForm() {
     max_redirects: Number(getValue("rule_max_redirects") || 10),
     retry_times: Number(getValue("rule_retry_times") || 3),
     notes: getValue("rule_notes"),
+    path_rewrite_pattern: getValue("rule_path_rewrite_pattern"),
+    path_rewrite_replacement: getValue("rule_path_rewrite_replacement"),
     enabled: getChecked("rule_enabled"),
     is_default: getChecked("rule_is_default"),
     strip_prefix: getChecked("rule_strip_prefix"),

@@ -286,6 +286,8 @@ class ConfigStore:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     priority INTEGER NOT NULL DEFAULT 0,
                     notes TEXT NOT NULL DEFAULT '',
+                    path_rewrite_pattern TEXT NOT NULL DEFAULT '',
+                    path_rewrite_replacement TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -377,6 +379,18 @@ class ConfigStore:
                 connection,
                 "forward_rules",
                 "ip_whitelist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "path_rewrite_pattern",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "path_rewrite_replacement",
                 "TEXT NOT NULL DEFAULT ''",
             )
             connection.execute(
@@ -704,8 +718,9 @@ class ConfigStore:
             INSERT INTO forward_rules (
                 source, external_id, name, request_host, path_prefix, target_url, strip_prefix, timeout,
                 max_redirects, follow_redirects, retry_times, enable_streaming, ip_whitelist, region_filters,
-                is_default, enabled, priority, notes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_default, enabled, priority, notes, path_rewrite_pattern, path_rewrite_replacement,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
@@ -726,6 +741,8 @@ class ConfigStore:
                 int(rule.enabled),
                 rule.priority,
                 rule.notes,
+                rule.path_rewrite_pattern,
+                rule.path_rewrite_replacement,
                 now,
                 now,
             ),
@@ -1631,7 +1648,7 @@ class ConfigStore:
                 SET source = ?, external_id = ?, name = ?, request_host = ?, path_prefix = ?, target_url = ?,
                     strip_prefix = ?, timeout = ?, max_redirects = ?, follow_redirects = ?, retry_times = ?,
                     enable_streaming = ?, ip_whitelist = ?, region_filters = ?, is_default = ?, enabled = ?,
-                    priority = ?, notes = ?, updated_at = ?
+                    priority = ?, notes = ?, path_rewrite_pattern = ?, path_rewrite_replacement = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -1653,6 +1670,8 @@ class ConfigStore:
                     int(rule.enabled),
                     rule.priority,
                     rule.notes,
+                    rule.path_rewrite_pattern,
+                    rule.path_rewrite_replacement,
                     now,
                     rule_id,
                 ),
@@ -2091,6 +2110,8 @@ class ConfigStore:
             "enabled": rule.enabled,
             "priority": rule.priority,
             "notes": rule.notes,
+            "path_rewrite_pattern": rule.path_rewrite_pattern,
+            "path_rewrite_replacement": rule.path_rewrite_replacement,
         }
 
     def serialize_route_group(
@@ -2174,6 +2195,8 @@ class ConfigStore:
             enabled=bool(row["enabled"]),
             priority=row["priority"],
             notes=row["notes"],
+            path_rewrite_pattern=row["path_rewrite_pattern"],
+            path_rewrite_replacement=row["path_rewrite_replacement"],
         )
 
     def _payload_to_rule(self, payload: Dict[str, Any]) -> ProxyRule:
@@ -2206,6 +2229,8 @@ class ConfigStore:
             priority=int(payload.get("priority", 0) or 0),
             notes=str(payload.get("notes", "")).strip(),
             source=str(payload.get("source", "manual")).strip() or "manual",
+            path_rewrite_pattern=str(payload.get("path_rewrite_pattern", "") or ""),
+            path_rewrite_replacement=str(payload.get("path_rewrite_replacement", "") or ""),
         )
 
     def _remote_item_to_rule(self, item: Dict[str, Any], remote: Dict[str, Any]) -> ProxyRule:
@@ -2242,6 +2267,8 @@ class ConfigStore:
             ).strip()
             or None,
             source="remote",
+            path_rewrite_pattern=str(deep_get(item, "path_rewrite_pattern", "") or ""),
+            path_rewrite_replacement=str(deep_get(item, "path_rewrite_replacement", "") or ""),
         )
 
     def _normalize_json_text(self, value: Any) -> str:

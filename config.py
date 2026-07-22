@@ -91,6 +91,8 @@ class ProxyRule:
     source: str = "manual"
     rule_id: Optional[int] = None
     external_id: Optional[str] = None
+    path_rewrite_pattern: str = ""
+    path_rewrite_replacement: str = ""
 
     def normalized_regions(self) -> List[str]:
         raw_regions = normalize_region_filter_value(self.region_filters)
@@ -388,6 +390,8 @@ class Config:
                     notes=str(rule_data.get("notes", "")),
                     source=str(rule_data.get("source", "manual")),
                     external_id=_string_or_none(rule_data.get("external_id")),
+                    path_rewrite_pattern=str(rule_data.get("path_rewrite_pattern", "") or ""),
+                    path_rewrite_replacement=str(rule_data.get("path_rewrite_replacement", "") or ""),
                 )
             )
 
@@ -656,6 +660,8 @@ class Config:
                     "source": rule.source,
                     "external_id": rule.external_id,
                     "notes": rule.notes,
+                    "path_rewrite_pattern": rule.path_rewrite_pattern,
+                    "path_rewrite_replacement": rule.path_rewrite_replacement,
                 }
                 for rule in self.proxy_rules
             ],
