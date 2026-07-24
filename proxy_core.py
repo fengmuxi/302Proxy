@@ -4,7 +4,6 @@ import aiohttp
 import asyncio
 import ipaddress
 import logging
-import re
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
@@ -317,29 +316,13 @@ class ProxyRequestHandler:
 
     def build_target_url(self, path: str, rule: ProxyRule, query_string: Optional[str] = None) -> str:
         parsed_target = urlparse(rule.target_url)
-        effective_path = path
-        if rule.path_rewrite_pattern:
-            try:
-                effective_path = re.sub(
-                    rule.path_rewrite_pattern,
-                    rule.path_rewrite_replacement,
-                    path,
-                )
-            except re.error as exc:
-                logger.warning(
-                    "规则 #%s 的 path_rewrite_pattern 正则编译失败，跳过路径改写: %s",
-                    rule.rule_id,
-                    exc,
-                )
-                effective_path = path
-
         if rule.strip_prefix:
-            remaining_path = effective_path[len(rule.path_prefix):]
+            remaining_path = path[len(rule.path_prefix):]
             if not remaining_path.startswith("/"):
                 remaining_path = "/" + remaining_path
             new_path = parsed_target.path + remaining_path
         else:
-            new_path = parsed_target.path + effective_path
+            new_path = parsed_target.path + path
 
         encoded_path = quote(new_path, safe="/")
         base_url = f"{parsed_target.scheme}://{parsed_target.netloc}{encoded_path}"

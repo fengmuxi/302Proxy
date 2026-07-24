@@ -66,8 +66,7 @@
 
     <nav class="module-nav" aria-label="配置菜单">
       <button class="module-btn is-active" data-module-target="overview" type="button">概览</button>
-      <button class="module-btn" data-module-target="route-groups" type="button">路径前缀</button>
-      <button class="module-btn" data-module-target="rules" type="button">转发规则</button>
+      <button class="module-btn" data-module-target="route-config" type="button">路由配置</button>
       <button class="module-btn" data-module-target="logs" type="button">日志管理</button>
       <button class="module-btn" data-module-target="geoip-online" type="button">在线IP定位源</button>
       <button class="module-btn" data-module-target="geoip-offline" type="button">离线IP定位源</button>
@@ -122,151 +121,21 @@
         </div>
       </section>
 
-      <section class="module-panel" data-module-panel="route-groups">
+      <section class="module-panel" data-module-panel="route-config">
         <div class="card">
           <div class="card-head">
             <div>
-              <p class="section-tag">Prefix Groups</p>
-              <h2>路径前缀与规则</h2>
+              <p class="section-tag">Route Configuration</p>
+              <h2>路由配置</h2>
+              <p class="hint">管理路径前缀和转发规则。点击路径前缀卡片上的按钮新增规则，点击顶部按钮新增前缀。</p>
+            </div>
+            <div class="table-actions">
+              <button id="add-prefix-btn" type="button" class="ghost-btn">新增前缀</button>
+              <button id="add-rule-btn" type="button" class="primary-btn">新增规则</button>
             </div>
           </div>
           <div class="route-groups-layout">
             <div id="route-group-cards" class="route-group-cards"></div>
-
-            <form id="route-group-form" class="rule-form">
-              <input id="route_group_old_path_prefix" type="hidden" />
-              <input id="route_group_old_request_host" type="hidden" />
-              <div class="form-head-inline">
-                <h3 id="route-group-form-title">新增路径前缀</h3>
-                <button id="route-group-reset-btn" type="button" class="ghost-btn">清空</button>
-              </div>
-              <p class="hint">
-                这里只维护路径前缀名称和备注。地区开关请在左侧对应前缀卡片的规则区里直接控制。
-                <br />
-                <br />
-                请求域名（可选）：用于指定该前缀只对指定域名生效，留空表示任意域名。
-                获取域名是优先顺序：X-Original-Host → X-Forwarded-Host（取最前）→ Forwarded 的 host= → X-Host → Host
-                反向代理记得添加相关头信息，否则会导致域名错误。
-                <br />
-                <br />
-                备注：用于说明该路径前缀的业务用途。
-              </p>
-              <label>
-                <span>路径前缀</span>
-                <input id="route_group_path_prefix" type="text" placeholder="/play" />
-              </label>
-              <label>
-                <span>请求域名（可选）</span>
-                <input id="route_group_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
-              </label>
-              <label>
-                <span>备注（可选）</span>
-                <textarea id="route_group_notes" rows="3" placeholder="用于说明该路径前缀的业务用途"></textarea>
-              </label>
-              <button type="submit" class="primary-btn">保存路径前缀</button>
-            </form>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="rules">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Forward Rules</p>
-              <h2>转发规则配置</h2>
-              <p class="hint">也可以在“路径前缀与规则”里直接点击某个前缀下的“新增规则”进入这里。</p>
-            </div>
-          </div>
-          <div class="rules-layout">
-            <div class="rule-list-wrap">
-              <table class="rules-table">
-                <thead>
-                  <tr>
-                    <th>名称</th>
-                    <th>路径前缀</th>
-                    <th>目标地址</th>
-                    <th>地区条件</th>
-                    <th>状态</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody id="rules-table-body"></tbody>
-              </table>
-            </div>
-
-            <form id="rule-form" class="rule-form">
-              <input id="rule_id" type="hidden" />
-              <div class="form-head-inline">
-                <h3 id="rule-form-title">新增规则</h3>
-                <button id="rule-reset-btn" type="button" class="ghost-btn">清空</button>
-              </div>
-              <div class="two-col">
-                <label>
-                  <span>规则名称</span>
-                  <input id="rule_name" type="text" placeholder="华东默认线路" />
-                </label>
-                <label>
-                  <span>路径前缀</span>
-                  <input id="rule_path_prefix" list="route-group-options" type="text" placeholder="/play" />
-                  <datalist id="route-group-options"></datalist>
-                </label>
-                <label>
-                  <span>请求域名（可选）</span>
-                  <input id="rule_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
-                </label>
-                <label>
-                  <span>目标地址</span>
-                  <input id="rule_target_url" type="url" placeholder="https://backend.example.com" />
-                </label>
-                <label>
-                  <span>IP 白名单</span>
-                  <input id="rule_ip_whitelist" type="text" placeholder="1.1.1.1,2.2.2.2,203.0.113.0/24" />
-                </label>
-                <label>
-                  <span>地区条件</span>
-                  <input id="rule_region_filters" type="text" placeholder="广东,深圳,华南" />
-                </label>
-                <label>
-                  <span>优先级</span>
-                  <input id="rule_priority" type="number" value="0" />
-                </label>
-                <label>
-                  <span>超时(秒)</span>
-                  <input id="rule_timeout" type="number" min="1" value="30" />
-                </label>
-                <label>
-                  <span>最大重定向</span>
-                  <input id="rule_max_redirects" type="number" min="0" value="10" />
-                </label>
-                <label>
-                <span>重试次数</span>
-                <input id="rule_retry_times" type="number" min="0" value="3" />
-              </label>
-              </div>
-              <div class="two-col">
-                <label>
-                  <span>路径正则模式</span>
-                  <input id="rule_path_rewrite_pattern" type="text" placeholder="留空表示不启用，例：^/api/(.+)$" />
-                </label>
-                <label>
-                  <span>路径替换模板</span>
-                  <input id="rule_path_rewrite_replacement" type="text" placeholder="支持 \\1、\\g&lt;name&gt; 反向引用，例：/v2/\1" />
-                </label>
-              </div>
-              <label>
-                <span>备注</span>
-                <textarea id="rule_notes" rows="2" placeholder="用于补充业务说明"></textarea>
-              </label>
-              <div class="check-grid">
-                <label class="toggle-row"><span>启用规则</span><input id="rule_enabled" type="checkbox" checked /></label>
-                <label class="toggle-row"><span>默认规则</span><input id="rule_is_default" type="checkbox" /></label>
-                <label class="toggle-row"><span>去掉前缀</span><input id="rule_strip_prefix" type="checkbox" /></label>
-                <label class="toggle-row"><span>自动跟随重定向</span><input id="rule_follow_redirects" type="checkbox" checked /></label>
-                <label class="toggle-row"><span>启用流式转发</span><input id="rule_enable_streaming" type="checkbox" checked /></label>
-              </div>
-              <button type="submit" class="primary-btn">保存规则</button>
-            </form>
           </div>
         </div>
       </section>
@@ -281,114 +150,60 @@
             </div>
           </div>
           <div class="rules-layout logs-layout">
-            <div class="stack-form">
-              <form id="route-log-filter-form" class="sub-card stack-form" style="height: 532px;">
-                <div class="sub-card-head">
-                  <h3>日志查询</h3>
-                  <div class="table-actions">
-                    <button id="route-log-search-btn" type="submit" class="primary-btn">查询日志</button>
-                    <button id="route-log-reset-btn" type="button" class="ghost-btn">重置条件</button>
-                  </div>
+            <form id="route-log-filter-form" class="sub-card stack-form" style="height: 532px;">
+              <div class="sub-card-head">
+                <h3>日志查询</h3>
+                <div class="table-actions">
+                  <button id="route-log-search-btn" type="submit" class="primary-btn">查询日志</button>
+                  <button id="route-log-reset-btn" type="button" class="ghost-btn">重置条件</button>
                 </div>
-                <div class="two-col">
-                  <label>
-                    <span>关键词</span>
-                    <input id="log_keyword" type="text" placeholder="路径、目标地址、地区、IP、原始IP" />
-                  </label>
-                  <label>
-                    <span>路径前缀</span>
-                    <input id="log_path_prefix" type="text" placeholder="/play" />
-                  </label>
-                  <label>
-                    <span>匹配策略</span>
-                    <select id="log_match_strategy">
-                      <option value="">全部</option>
-                      <option value="ip_whitelist_match">IP 白名单命中</option>
-                      <option value="region_match">地区匹配命中</option>
-                      <option value="default_route">默认规则转发</option>
-                      <option value="priority_fallback">优先级回退</option>
-                      <option value="no_route">未匹配到规则</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>结果状态</span>
-                    <select id="log_result_status">
-                      <option value="">全部</option>
-                      <option value="forwarded">转发成功</option>
-                      <option value="cache_hit">缓存命中</option>
-                      <option value="forwarded_client_error">上游返回 4xx</option>
-                      <option value="upstream_error">上游异常</option>
-                      <option value="proxy_error">代理内部错误</option>
-                      <option value="no_route">未匹配到规则</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>开始时间</span>
-                    <input id="log_date_from" type="datetime-local" />
-                  </label>
-                  <label>
-                    <span>结束时间</span>
-                    <input id="log_date_to" type="datetime-local" />
-                  </label>
-                  <label>
-                    <span>返回条数</span>
-                    <input id="log_limit" type="number" min="1" max="500" value="50" />
-                  </label>
-                </div>
-              </form>
-
-              <div class="sub-card">
-                <div class="sub-card-head">
-                  <h3>日志列表</h3>
-                  <div class="table-actions">
-                    <!-- 统计信息组 -->
-                    <div class="table-actions-group">
-                      <span class="hint" id="route-log-total-count">共 0 条</span>
-                    </div>
-                    <!-- 刷新控制组 -->
-                    <div class="table-actions-group">
-                      <label class="auto-refresh-toggle" title="开启后按设定间隔自动刷新日志列表">
-                        <input id="log_auto_refresh_enabled" type="checkbox" />
-                        <span class="auto-refresh-label">自动刷新</span>
-                      </label>
-                      <select id="log_auto_refresh_interval" title="刷新间隔（秒）">
-                        <option value="3">3秒</option>
-                        <option value="5" selected>5秒</option>
-                        <option value="10">10秒</option>
-                        <option value="15">15秒</option>
-                        <option value="30">30秒</option>
-                        <option value="60">60秒</option>
-                      </select>
-                      <span class="auto-refresh-status" id="log_auto_refresh_status"></span>
-                    </div>
-                    <!-- 操作按钮组 -->
-                    <div class="table-actions-group">
-                      <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
-                      <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="rule-list-wrap">
-                  <table class="route-log-table compact-table">
-                    <thead>
-                      <tr>
-                        <th><input id="route-log-select-all" type="checkbox" /></th>
-                        <th>时间</th>
-                        <th>请求</th>
-                        <th>前缀</th>
-                        <th>地区信息</th>
-                        <th>匹配情况</th>
-                        <th>转发结果</th>
-                        <th>操作</th>
-                      </tr>
-                    </thead>
-                    <tbody id="route-logs-table-body"></tbody>
-                  </table>
-                </div>
-
-                <div id="log-pagination" class="pagination"></div>
               </div>
-            </div>
+              <div class="two-col">
+                <label>
+                  <span>关键词</span>
+                  <input id="log_keyword" type="text" placeholder="路径、目标地址、地区、IP、原始IP" />
+                </label>
+                <label>
+                  <span>路径前缀</span>
+                  <input id="log_path_prefix" type="text" placeholder="/play" />
+                </label>
+                <label>
+                  <span>匹配策略</span>
+                  <select id="log_match_strategy">
+                    <option value="">全部</option>
+                    <option value="ip_whitelist_match">IP 白名单命中</option>
+                    <option value="region_match">地区匹配命中</option>
+                    <option value="default_route">默认规则转发</option>
+                    <option value="priority_fallback">优先级回退</option>
+                    <option value="no_route">未匹配到规则</option>
+                  </select>
+                </label>
+                <label>
+                  <span>结果状态</span>
+                  <select id="log_result_status">
+                    <option value="">全部</option>
+                    <option value="forwarded">转发成功</option>
+                    <option value="cache_hit">缓存命中</option>
+                    <option value="forwarded_client_error">上游返回 4xx</option>
+                    <option value="upstream_error">上游异常</option>
+                    <option value="proxy_error">代理内部错误</option>
+                    <option value="no_route">未匹配到规则</option>
+                  </select>
+                </label>
+                <label>
+                  <span>开始时间</span>
+                  <input id="log_date_from" type="datetime-local" />
+                </label>
+                <label>
+                  <span>结束时间</span>
+                  <input id="log_date_to" type="datetime-local" />
+                </label>
+                <label>
+                  <span>返回条数</span>
+                  <input id="log_limit" type="number" min="1" max="500" value="50" />
+                </label>
+              </div>
+            </form>
 
             <div class="stack-form">
               <form id="route-log-settings-form" class="sub-card stack-form">
@@ -406,6 +221,53 @@
               <div id="route-log-settings-status" class="test-result-card is-empty">
                 <p class="test-result-placeholder">这里会显示日志总数、最近清理时间和当前保留策略。</p>
               </div>
+            </div>
+
+            <div class="sub-card">
+              <div class="sub-card-head">
+                <h3>日志列表</h3>
+                <div class="table-actions">
+                  <!-- 统计信息组 -->
+                  <div class="table-actions-group">
+                    <span class="hint" id="route-log-total-count">共 0 条</span>
+                  </div>
+                  <!-- 刷新控制组 -->
+                  <div class="table-actions-group">
+                    <label class="auto-refresh-toggle" title="开启后按设定间隔自动刷新日志列表">
+                      <input id="log_auto_refresh_enabled" type="checkbox" />
+                      <span class="auto-refresh-label">自动刷新</span>
+                    </label>
+                    <select id="log_auto_refresh_interval" title="刷新间隔（秒）">
+                      <option value="3">3秒</option>
+                      <option value="5" selected>5秒</option>
+                      <option value="10">10秒</option>
+                      <option value="15">15秒</option>
+                      <option value="30">30秒</option>
+                      <option value="60">60秒</option>
+                    </select>
+                    <!-- <span class="auto-refresh-status" id="log_auto_refresh_status"></span> -->
+                  </div>
+                  <!-- 操作按钮组 -->
+                  <div class="table-actions-group">
+                    <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
+                    <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
+                  </div>
+                </div>
+              </div>
+              <div class="route-log-list-wrap">
+                <div class="route-log-list-header">
+                  <label class="route-log-select-all-label">
+                    <input id="route-log-select-all" type="checkbox" />
+                    <span>全选</span>
+                  </label>
+                  <div class="route-log-toolbar">
+                    <span class="hint">规则转发日志列表</span>
+                  </div>
+                </div>
+                <div id="route-logs-list-body" class="route-log-list-body"></div>
+              </div>
+
+              <div id="log-pagination" class="pagination"></div>
             </div>
           </div>
         </div>
@@ -710,6 +572,118 @@
   </div>
 
   <div id="toast" class="toast"></div>
+
+  <!-- 路径前缀弹框 -->
+  <div id="prefix-modal" class="modal-overlay" hidden>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="route-group-form-title">新增路径前缀</h3>
+        <button type="button" class="modal-close-btn" data-close-modal="prefix-modal" aria-label="关闭">×</button>
+      </div>
+      <form id="prefix-form" class="modal-body">
+        <input id="route_group_old_path_prefix" type="hidden" />
+        <input id="route_group_old_request_host" type="hidden" />
+        <label>
+          <span>路径前缀 <strong style="color:#c00">*</strong></span>
+          <input id="route_group_path_prefix" type="text" placeholder="/play" required />
+        </label>
+        <label>
+          <span>请求域名（可选）</span>
+          <input id="route_group_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
+        </label>
+        <label>
+          <span>备注</span>
+          <textarea id="route_group_notes" rows="3" placeholder="用于说明该路径前缀的业务用途"></textarea>
+        </label>
+      </form>
+      <div class="modal-footer">
+        <button type="button" class="ghost-btn" data-close-modal="prefix-modal">取消</button>
+        <button type="submit" form="prefix-form" class="primary-btn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 规则弹框 -->
+  <div id="rule-modal" class="modal-overlay" hidden>
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <h3 id="rule-form-title">新增规则</h3>
+        <button type="button" class="modal-close-btn" data-close-modal="rule-modal" aria-label="关闭">×</button>
+      </div>
+      <form id="rule-form" class="modal-body">
+        <input id="rule_id" type="hidden" />
+        <div class="two-col">
+          <label>
+            <span>规则名称 <strong style="color:#c00">*</strong></span>
+            <input id="rule_name" type="text" placeholder="华东默认线路" required />
+          </label>
+          <label>
+            <span>路径前缀 <strong style="color:#c00">*</strong></span>
+            <input id="rule_path_prefix" list="route-group-options" type="text" placeholder="/play" required />
+            <datalist id="route-group-options"></datalist>
+          </label>
+          <label>
+            <span>请求域名（可选）</span>
+            <input id="rule_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
+          </label>
+          <label>
+            <span>目标地址 <strong style="color:#c00">*</strong></span>
+            <input id="rule_target_url" type="url" placeholder="https://backend.example.com" required />
+          </label>
+          <label>
+            <span>IP 白名单</span>
+            <input id="rule_ip_whitelist" type="text" placeholder="1.1.1.1,2.2.2.2,203.0.113.0/24" />
+          </label>
+          <label>
+            <span>地区条件</span>
+            <input id="rule_region_filters" type="text" placeholder="广东,深圳,华南" />
+          </label>
+          <label>
+            <span>优先级</span>
+            <input id="rule_priority" type="number" value="0" />
+          </label>
+          <label>
+            <span>超时(秒)</span>
+            <input id="rule_timeout" type="number" min="1" value="30" />
+          </label>
+          <label>
+            <span>最大重定向</span>
+            <input id="rule_max_redirects" type="number" min="0" value="10" />
+          </label>
+          <label>
+            <span>重试次数</span>
+            <input id="rule_retry_times" type="number" min="0" value="3" />
+          </label>
+        </div>
+        <div class="two-col">
+          <label>
+            <span>路径正则模式</span>
+            <input id="rule_path_rewrite_pattern" type="text" placeholder="留空表示不启用，例：^/api/(.+)$" />
+          </label>
+          <label>
+            <span>路径替换模板</span>
+            <input id="rule_path_rewrite_replacement" type="text" placeholder="支持 \\1 反向引用，例：/v2/\\1" />
+          </label>
+        </div>
+        <label>
+          <span>备注</span>
+          <textarea id="rule_notes" rows="2" placeholder="用于补充业务说明"></textarea>
+        </label>
+        <div class="check-grid">
+          <label class="toggle-row"><span>启用规则</span><input id="rule_enabled" type="checkbox" checked /></label>
+          <label class="toggle-row"><span>默认规则</span><input id="rule_is_default" type="checkbox" /></label>
+          <label class="toggle-row"><span>去掉前缀</span><input id="rule_strip_prefix" type="checkbox" /></label>
+          <label class="toggle-row"><span>自动跟随重定向</span><input id="rule_follow_redirects" type="checkbox" checked /></label>
+          <label class="toggle-row"><span>启用流式转发</span><input id="rule_enable_streaming" type="checkbox" checked /></label>
+        </div>
+      </form>
+      <div class="modal-footer">
+        <button type="button" class="ghost-btn" data-close-modal="rule-modal">取消</button>
+        <button type="submit" form="rule-form" class="primary-btn">保存</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/_admin/static/admin.js" defer></script>
 </body>
 </html>

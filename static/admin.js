@@ -14,6 +14,29 @@ const state = {
   logTotalPages: 1,
 };
 
+function openModal(modalId) {
+  const modal = document.getElementById(modalId);
+  if (modal) {
+    modal.hidden = false;
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closeModal(modalId) {
+  const modal = document.getElementById(modalId);
+  if (modal) {
+    modal.hidden = true;
+    document.body.style.overflow = '';
+  }
+}
+
+function closeAllModals() {
+  document.querySelectorAll('.modal-overlay').forEach(modal => {
+    modal.hidden = true;
+  });
+  document.body.style.overflow = '';
+}
+
 const els = {
   authError: document.getElementById("auth-error"),
   authLogoutBtn: document.getElementById("auth-logout-btn"),
@@ -65,9 +88,11 @@ const MATCH_DETAIL_LABELS = {
 
 function showToast(message, isError = false) {
   els.toast.textContent = message;
-  els.toast.style.background = isError
-    ? "rgba(143, 43, 22, 0.94)"
-    : "rgba(24, 35, 30, 0.92)";
+  els.toast.classList.remove("error", "success");
+  els.toast.style.background = "";
+  if (isError) {
+    els.toast.classList.add("error");
+  }
   els.toast.classList.add("visible");
   window.clearTimeout(showToast._timer);
   showToast._timer = window.setTimeout(() => {
@@ -443,7 +468,12 @@ function renderRouteGroups(routeGroups) {
               <tr>
                 <th>规则</th>
                 <th>目标地址</th>
-                <th>地区条件</th>
+                <th>请求域名</th>
+                <th>白名单IP</th>
+                <th>地区过滤</th>
+                <th>优先级</th>
+                <th>超时(秒)</th>
+                <th>备注</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -453,24 +483,42 @@ function renderRouteGroups(routeGroups) {
                 .map((rule) => {
                   const statusBadges = [
                     rule.is_default ? '<span class="badge badge-default">默认</span>' : "",
-                    !rule.enabled ? '<span class="badge badge-disabled">禁用</span>' : "",
                   ].join("");
-                  const conditions = [];
-                  if (rule.ip_whitelist) {
-                    conditions.push(`IP: ${escapeHtml(rule.ip_whitelist)}`);
-                  }
-                  if (rule.region_filters) {
-                    conditions.push(`地区: ${escapeHtml(rule.region_filters)}`);
-                  }
+                  const requestHost = normalizeRequestHost(rule.request_host);
+                  const hostLabel = formatRequestHostLabel(requestHost);
+                  const ipWhitelist = rule.ip_whitelist || "";
+                  const regionFilters = rule.region_filters || "";
+                  const notesText = rule.notes || "";
                   return `
                     <tr>
                       <td>
                         <strong>${escapeHtml(rule.name || "(未命名规则)")}</strong>
                         <div>${statusBadges}</div>
                       </td>
-                      <td>${escapeHtml(rule.target_url)}</td>
-                      <td>${conditions.length ? conditions.join("<br>") : "默认"}</td>
-                      <td>${rule.enabled ? "启用" : "停用"}</td>
+                      <td class="cell-truncate" title="${escapeHtml(rule.target_url)}">${escapeHtml(rule.target_url)}</td>
+                      <td class="cell-truncate" title="${escapeHtml(hostLabel)}">${escapeHtml(hostLabel)}</td>
+                      <td class="cell-truncate" title="${escapeHtml(ipWhitelist)}">${ipWhitelist ? escapeHtml(ipWhitelist) : "-"}</td>
+                      <td class="cell-truncate" title="${escapeHtml(regionFilters)}">${regionFilters ? escapeHtml(regionFilters) : "默认"}</td>
+                      <td>${rule.priority ?? 0}</td>
+                      <td>${rule.timeout ?? 30}</td>
+                      <td class="cell-notes" title="${escapeHtml(notesText)}">${notesText ? escapeHtml(notesText) : "-"}</td>
+                      <td>
+                        <div class="rule-status-tags">
+                          <button class="toggle-status-btn ${rule.enabled ? "on" : "off"}" data-action="toggle-rule-from-group" data-id="${rule.id}" type="button" title="${rule.enabled ? "点击禁用" : "点击启用"}">
+                            <span class="toggle-status-dot"></span>
+                            <span class="toggle-status-text">${rule.enabled ? "启用" : "禁用"}</span>
+                          </button>
+                          <button class="toggle-tag ${rule.strip_prefix ? "on" : "off"}" data-action="toggle-rule-field" data-field="strip_prefix" data-id="${rule.id}" type="button" title="${rule.strip_prefix ? "点击关闭去前缀" : "点击开启去前缀"}">
+                            <span class="toggle-tag-dot"></span>去前缀
+                          </button>
+                          <button class="toggle-tag ${rule.follow_redirects !== false ? "on" : "off"}" data-action="toggle-rule-field" data-field="follow_redirects" data-id="${rule.id}" type="button" title="${rule.follow_redirects !== false ? "点击关闭跟随重定向" : "点击开启跟随重定向"}">
+                            <span class="toggle-tag-dot"></span>跟随重定向
+                          </button>
+                          <button class="toggle-tag ${rule.enable_streaming ? "on" : "off"}" data-action="toggle-rule-field" data-field="enable_streaming" data-id="${rule.id}" type="button" title="${rule.enable_streaming ? "点击关闭流式转发" : "点击开启流式转发"}">
+                            <span class="toggle-tag-dot"></span>流式转发
+                          </button>
+                        </div>
+                      </td>
                       <td>
                         <div class="table-actions">
                           <button class="table-btn" data-action="edit-rule-from-group" data-id="${rule.id}" type="button">编辑规则</button>
@@ -547,6 +595,63 @@ function fillRouteGroupForm(group) {
   setValue("route_group_notes", group.notes || "");
   const hostLabel = formatRequestHostLabel(normalizeRequestHost(group.request_host));
   document.getElementById("route-group-form-title").textContent = `编辑路径前缀 ${group.path_prefix} @ ${hostLabel}`;
+}
+
+function openPrefixEditor(pathPrefix, requestHost) {
+  const group = findRouteGroup(pathPrefix, requestHost);
+  if (!group) return;
+  fillRouteGroupForm(group);
+  document.getElementById("route-group-form-title").textContent = `编辑路径前缀 ${pathPrefix}`;
+  openModal("prefix-modal");
+}
+
+async function submitRouteGroup() {
+  const payload = collectRouteGroupForm();
+  try {
+    if (payload.old_path_prefix) {
+      await apiFetch("/_admin/api/route-groups", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      showToast("路径前缀已更新。");
+    } else {
+      await apiFetch("/_admin/api/route-groups", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      showToast("路径前缀已创建。");
+    }
+    resetRouteGroupForm();
+    await loadDashboard();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function submitRule() {
+  const payload = collectRuleForm();
+  const ruleId = payload.id;
+  delete payload.id;
+
+  try {
+    if (ruleId) {
+      await apiFetch(`/_admin/api/rules/${ruleId}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      showToast("规则已更新。");
+    } else {
+      await apiFetch("/_admin/api/rules", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      showToast("规则已创建。");
+    }
+    resetRuleForm();
+    await loadDashboard();
+  } catch (error) {
+    showToast(error.message, true);
+  }
 }
 
 function collectRouteGroupForm() {
@@ -972,18 +1077,17 @@ function renderRouteLogs(payload) {
   const rangeText = total > 0 ? `${startOffset}-${endOffset} / ${total}` : "0 / 0";
   setText("route-log-total-count", `共 ${total} 条（${rangeText}）`);
 
-  const tbody = document.getElementById("route-logs-table-body");
-  tbody.innerHTML = "";
+  const container = document.getElementById("route-logs-list-body");
+  container.innerHTML = "";
   setChecked("route-log-select-all", false);
 
   if (!state.routeLogs.length) {
-    tbody.innerHTML = '<tr><td colspan="8">当前没有匹配到规则转发日志。</td></tr>';
+    container.innerHTML = '<div class="route-log-empty">当前没有匹配到规则转发日志。</div>';
     renderPagination(1, 1);
     return;
   }
 
   state.routeLogs.forEach((log) => {
-    const tr = document.createElement("tr");
     const requestMethod = escapeHtml(log.request_method || "-");
     const requestPath = escapeHtml(log.request_path || "-");
     const requestQuery = escapeHtml(log.request_query_string || "");
@@ -1009,51 +1113,100 @@ function renderRouteLogs(payload) {
     const createdAt = escapeHtml(formatDateTime(log.created_at));
     const banIp = escapeHtml(log.client_ip || log.original_client_ip || "-");
 
-    tr.innerHTML = `
-      <td><input class="route-log-checkbox" data-id="${log.id}" type="checkbox" /></td>
-      <td class="route-log-time-cell">
-        <strong>${createdAt}</strong>
-        <div class="hint">${durationText}</div>
-      </td>
-      <td class="route-log-request-cell">
-        <strong>${requestMethod}</strong>
-        <div class="route-log-request-path" title="${requestPath}">${requestPath}</div>
-        ${requestQuery ? `<div class="hint route-log-query" title="${requestQuery}">${requestQuery}</div>` : ""}
-        <div class="hint">原始 IP: ${originalClientIp}</div>
-        <div class="hint">匹配 IP: ${clientIp}</div>
-      </td>
-      <td class="route-log-prefix-cell">
-        <strong>${pathPrefix}</strong>
-        <div class="hint">规则: ${ruleName}</div>
-        <div class="hint">请求域名: ${requestHost}</div>
-        <div class="hint">命中域名规则: ${ruleRequestHost}</div>
-      </td>
-      <td class="route-log-geo-cell">
-        <strong>${geoSummary}</strong>
-        <div class="hint">命中地区: ${matchedRegion}</div>
-        <div class="hint">定位源: ${geoSource}</div>
-      </td>
-      <td class="route-log-match-cell">
-        <strong>${matchStrategy}</strong>
-        <div>${matchDetail}</div>
-        <div class="hint">命中白名单: ${matchedWhitelist}</div>
-        <div class="hint">规则白名单: ${configuredWhitelist}</div>
-        <div class="hint">规则地区: ${configuredRegions}</div>
-      </td>
-      <td class="route-log-result-cell">
-        <strong class="route-log-target-url" title="${targetUrl}">${targetUrl}</strong>
-        <div class="hint">状态: ${upstreamStatus}</div>
-        <div class="hint"><span class="cache-status-badge ${cacheStatusInfo.cls}">${cacheStatusInfo.text}</span></div>
-        <div class="hint">结果: ${resultStatus}</div>
-      </td>
-      <td class="route-log-action-cell">
-        <div class="table-actions">
-          <button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>
-          <button class="table-btn delete" data-action="delete-route-log" data-id="${log.id}" type="button">删除</button>
+    const card = document.createElement("article");
+    card.className = "route-log-item";
+    card.innerHTML = `
+      <div class="route-log-item-main">
+        <div class="route-log-item-check">
+          <input class="route-log-checkbox" data-id="${log.id}" type="checkbox" />
         </div>
-      </td>
+        <div class="route-log-item-body">
+          <div class="route-log-item-header">
+            <div class="route-log-item-time">
+              <strong>${createdAt}</strong>
+              <span class="route-log-duration">${durationText}</span>
+            </div>
+            <div class="route-log-item-actions">
+              <button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>
+              <button class="table-btn delete" data-action="delete-route-log" data-id="${log.id}" type="button">删除</button>
+            </div>
+          </div>
+          <div class="route-log-item-fields">
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">请求</span>
+                <div class="route-log-field-value">
+                  <strong>${requestMethod}</strong>
+                  <span class="route-log-path" title="${requestPath}">${requestPath}</span>
+                  ${requestQuery ? `<span class="route-log-query hint" title="${requestQuery}">?${requestQuery}</span>` : ""}
+                </div>
+              </div>
+              <div class="route-log-field">
+                <span class="route-log-field-label">域名</span>
+                <div class="route-log-field-value"><span>${requestHost}</span></div>
+              </div>
+            </div>
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">前缀</span>
+                <div class="route-log-field-value"><strong>${pathPrefix}</strong></div>
+              </div>
+              <div class="route-log-field">
+                <span class="route-log-field-label">规则</span>
+                <div class="route-log-field-value"><span>${ruleName}</span></div>
+              </div>
+              <div class="route-log-field">
+                <span class="route-log-field-label">命中域名规则</span>
+                <div class="route-log-field-value"><span>${ruleRequestHost}</span></div>
+              </div>
+            </div>
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">地区</span>
+                <div class="route-log-field-value">
+                  <strong>${geoSummary}</strong>
+                  <span class="hint">命中: ${matchedRegion}</span>
+                  <span class="hint">源: ${geoSource}</span>
+                </div>
+              </div>
+            </div>
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">匹配</span>
+                <div class="route-log-field-value">
+                  <strong>${matchStrategy}</strong>
+                  <span class="hint">${matchDetail}</span>
+                  <span class="hint">命中白名单: ${matchedWhitelist}</span>
+                  <span class="hint">规则白名单: ${configuredWhitelist}</span>
+                  <span class="hint">规则地区: ${configuredRegions}</span>
+                </div>
+              </div>
+            </div>
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">转发结果</span>
+                <div class="route-log-field-value">
+                  <strong class="route-log-target-url" title="${targetUrl}">${targetUrl}</strong>
+                  <span class="hint">上游状态: ${upstreamStatus}</span>
+                  <span class="cache-status-badge ${cacheStatusInfo.cls}">${cacheStatusInfo.text}</span>
+                  <span class="hint">结果: ${resultStatus}</span>
+                </div>
+              </div>
+            </div>
+            <div class="route-log-field-group">
+              <div class="route-log-field">
+                <span class="route-log-field-label">IP</span>
+                <div class="route-log-field-value">
+                  <span>原始: ${originalClientIp}</span>
+                  <span>匹配: ${clientIp}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     `;
-    tbody.appendChild(tr);
+    container.appendChild(card);
   });
   renderPagination(state.logCurrentPage, state.logTotalPages);
 }
@@ -1245,6 +1398,7 @@ function startAutoRefresh() {
 function renderRules(rules) {
   state.rules = rules;
   const tbody = document.getElementById("rules-table-body");
+  if (!tbody) return;
   tbody.innerHTML = "";
 
   if (!rules.length) {
@@ -1257,7 +1411,6 @@ function renderRules(rules) {
     const requestHost = normalizeRequestHost(rule.request_host);
     const statusBadges = [
       rule.is_default ? '<span class="badge badge-default">默认</span>' : "",
-      !rule.enabled ? '<span class="badge badge-disabled">禁用</span>' : "",
     ].join("");
     const conditions = [];
     if (rule.ip_whitelist) {
@@ -1266,19 +1419,25 @@ function renderRules(rules) {
     if (rule.region_filters) {
       conditions.push(`地区: ${escapeHtml(rule.region_filters)}`);
     }
+    const conditionsText = conditions.length ? conditions.join("\n") : "默认";
 
     tr.innerHTML = `
       <td>
         <strong>${escapeHtml(rule.name || "(未命名规则)")}</strong>
         <div>${statusBadges}</div>
       </td>
-      <td>
+      <td title="${escapeHtml(rule.path_prefix + (requestHost ? "\n域名: " + formatRequestHostLabel(requestHost) : ""))}">
         <div>${escapeHtml(rule.path_prefix)}</div>
         <div class="hint">域名: ${escapeHtml(formatRequestHostLabel(requestHost))}</div>
       </td>
-      <td>${escapeHtml(rule.target_url)}</td>
-      <td>${conditions.length ? conditions.join("<br>") : "默认"}</td>
-      <td>${rule.enabled ? "启用" : "停用"}</td>
+      <td title="${escapeHtml(rule.target_url)}">${escapeHtml(rule.target_url)}</td>
+      <td title="${escapeHtml(conditionsText)}">${conditions.length ? conditions.join("<br>") : "默认"}</td>
+      <td>
+        <button class="toggle-status-btn ${rule.enabled ? "on" : "off"}" data-action="toggle-rule" data-id="${rule.id}" type="button" title="${rule.enabled ? "点击禁用" : "点击启用"}">
+          <span class="toggle-status-dot"></span>
+          <span class="toggle-status-text">${rule.enabled ? "启用" : "禁用"}</span>
+        </button>
+      </td>
       <td>
         <div class="table-actions">
           <button class="table-btn" data-action="edit-rule" data-id="${rule.id}" type="button">编辑</button>
@@ -1364,21 +1523,18 @@ function prepareRuleForGroup(pathPrefix, requestHost = "") {
   resetRuleForm();
   setValue("rule_path_prefix", pathPrefix);
   setValue("rule_request_host", normalizeRequestHost(requestHost));
-  setActiveModule("rules");
-  scrollToElement("rule-form");
+  document.getElementById("rule-form-title").textContent = "新增规则";
+  openModal("rule-modal");
   focusField("rule_name");
 }
 
 function openRuleEditor(ruleId) {
-  const rule = state.rules.find((item) => item.id === Number(ruleId));
-  if (!rule) {
-    showToast(`未找到规则 #${ruleId}`, true);
-    return;
-  }
+  const id = Number(ruleId);
+  const rule = state.rules.find(r => r.id === id);
+  if (!rule) return;
   fillRuleForm(rule);
-  setActiveModule("rules");
-  scrollToElement("rule-form");
-  focusField("rule_name");
+  document.getElementById("rule-form-title").textContent = `编辑规则 #${rule.id}`;
+  openModal("rule-modal");
 }
 
 async function removeRule(ruleId) {
@@ -1390,6 +1546,39 @@ async function removeRule(ruleId) {
     resetRuleForm();
     await loadDashboard();
     showToast("规则已删除。");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function toggleRule(ruleId, enabled) {
+  try {
+    await apiFetch(`/_admin/api/rules/${ruleId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+    await loadDashboard();
+    showToast(enabled ? "规则已启用。" : "规则已禁用。");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+const RULE_FIELD_LABELS = {
+  strip_prefix: "去前缀",
+  follow_redirects: "跟随重定向",
+  enable_streaming: "流式转发",
+};
+
+async function toggleRuleField(ruleId, field, nextValue) {
+  const label = RULE_FIELD_LABELS[field] || field;
+  try {
+    await apiFetch(`/_admin/api/rules/${ruleId}`, {
+      method: "PUT",
+      body: JSON.stringify({ [field]: nextValue }),
+    });
+    await loadDashboard();
+    showToast(`${label}已${nextValue ? "开启" : "关闭"}。`);
   } catch (error) {
     showToast(error.message, true);
   }
@@ -1490,31 +1679,6 @@ document.querySelectorAll(".module-btn").forEach((button) => {
   });
 });
 
-document.getElementById("route-group-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const payload = collectRouteGroupForm();
-
-  try {
-    if (payload.old_path_prefix) {
-      await apiFetch("/_admin/api/route-groups", {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      showToast("路径前缀已更新。");
-    } else {
-      await apiFetch("/_admin/api/route-groups", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      showToast("路径前缀已创建。");
-    }
-    resetRouteGroupForm();
-    await loadDashboard();
-  } catch (error) {
-    showToast(error.message, true);
-  }
-});
-
 document.getElementById("geo-online-cache-clear-btn").addEventListener("click", async () => {
   const button = document.getElementById("geo-online-cache-clear-btn");
   const originalText = button.textContent;
@@ -1534,10 +1698,6 @@ document.getElementById("geo-online-cache-clear-btn").addEventListener("click", 
   }
 });
 
-document.getElementById("route-group-reset-btn").addEventListener("click", () => {
-  resetRouteGroupForm();
-});
-
 document.getElementById("route-group-cards").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -1554,10 +1714,7 @@ document.getElementById("route-group-cards").addEventListener("click", async (ev
   }
 
   if (action === "edit-group") {
-    if (!group) return;
-    fillRouteGroupForm(group);
-    scrollToElement("route-group-form");
-    focusField("route_group_path_prefix");
+    openPrefixEditor(pathPrefix, requestHost);
     return;
   }
 
@@ -1585,6 +1742,19 @@ document.getElementById("route-group-cards").addEventListener("click", async (ev
 
   if (action === "edit-rule-from-group") {
     openRuleEditor(ruleId);
+    return;
+  }
+
+  if (action === "toggle-rule-from-group") {
+    const enabled = button.classList.contains("off");
+    await toggleRule(ruleId, enabled);
+    return;
+  }
+
+  if (action === "toggle-rule-field") {
+    const field = button.dataset.field;
+    const nextValue = button.classList.contains("off");
+    await toggleRuleField(ruleId, field, nextValue);
     return;
   }
 
@@ -1750,7 +1920,7 @@ document.getElementById("route-log-delete-all-btn").addEventListener("click", as
   }
 });
 
-document.getElementById("route-logs-table-body").addEventListener("click", async (event) => {
+document.getElementById("route-logs-list-body").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
 
@@ -2010,54 +2180,6 @@ document.getElementById("geo-sources-table-body").addEventListener("click", asyn
   });
 });
 
-document.getElementById("rule-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const payload = collectRuleForm();
-  const ruleId = payload.id;
-  delete payload.id;
-
-  try {
-    if (ruleId) {
-      await apiFetch(`/_admin/api/rules/${ruleId}`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      showToast("规则已更新。");
-    } else {
-      await apiFetch("/_admin/api/rules", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      showToast("规则已创建。");
-    }
-    resetRuleForm();
-    await loadDashboard();
-  } catch (error) {
-    showToast(error.message, true);
-  }
-});
-
-document.getElementById("rule-reset-btn").addEventListener("click", () => {
-  resetRuleForm();
-});
-
-document.getElementById("rules-table-body").addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-action]");
-  if (!button) return;
-
-  const ruleId = Number(button.dataset.id);
-  const action = button.dataset.action;
-
-  if (action === "edit-rule") {
-    openRuleEditor(ruleId);
-    return;
-  }
-
-  if (action === "delete-rule") {
-    await removeRule(ruleId);
-  }
-});
-
 async function loadAuthStatus() {
   const auth = await apiFetch("/_admin/api/auth/status");
   applyAuthState(auth || {});
@@ -2264,6 +2386,51 @@ window.addEventListener("DOMContentLoaded", async () => {
   setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
   setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
   updateAutoRefreshStatusUI();
+
+  // 打开新增前缀弹框
+  document.getElementById("add-prefix-btn").addEventListener("click", () => {
+    resetRouteGroupForm();
+    document.getElementById("route-group-form-title").textContent = "新增路径前缀";
+    openModal("prefix-modal");
+  });
+
+  // 打开新增规则弹框
+  document.getElementById("add-rule-btn").addEventListener("click", () => {
+    resetRuleForm();
+    document.getElementById("rule-form-title").textContent = "新增规则";
+    openModal("rule-modal");
+  });
+
+  // 关闭弹框按钮
+  document.querySelectorAll("[data-close-modal]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      closeModal(btn.dataset.closeModal);
+    });
+  });
+
+  // 点击弹框背景关闭
+  document.querySelectorAll(".modal-overlay").forEach(modal => {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) {
+        closeModal(modal.id);
+      }
+    });
+  });
+
+  // 路径前缀表单提交（改为弹框内的表单）
+  document.getElementById("prefix-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitRouteGroup();
+    closeModal("prefix-modal");
+  });
+
+  // 规则表单提交（改为弹框内的表单）
+  document.getElementById("rule-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await submitRule();
+    closeModal("rule-modal");
+  });
+
   try {
     const auth = await loadAuthStatus();
     if (!auth.enabled || auth.authenticated) {

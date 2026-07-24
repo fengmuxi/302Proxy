@@ -44,6 +44,8 @@ ip_result_cache:
 proxy_rules:
   - path_prefix: "/play"
     target_url: "http://127.0.0.1"
+    path_rewrite_pattern: "^/play"
+    path_rewrite_replacement: ""
     strip_prefix: false
     timeout: 30
     max_redirects: 10
