@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import ipaddress
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
@@ -16,6 +17,80 @@ from ip_ban_manager import IpBanManager
 
 
 logger = logging.getLogger("proxy")
+
+
+# ===== 500 错误页面渲染（隐藏内部异常细节）=====
+_500_HTML_CACHE: Optional[str] = None
+
+
+def _load_500_template() -> Optional[str]:
+    """加载 static/500.html 模板，带模块级缓存"""
+    global _500_HTML_CACHE
+    if _500_HTML_CACHE is not None:
+        return _500_HTML_CACHE
+    try:
+        from pathlib import Path
+        template_path = Path(__file__).parent / "static" / "500.html"
+        if template_path.exists():
+            _500_HTML_CACHE = template_path.read_text(encoding="utf-8")
+            return _500_HTML_CACHE
+    except Exception as e:
+        logger.error("读取 500 页面失败: %s", e)
+    return None
+
+
+def _build_500_html(reason: str = "") -> str:
+    """构建 500 错误页面 HTML，注入通用原因（不暴露内部异常）"""
+    import html as html_module
+    template = _load_500_template()
+    if template:
+        if reason:
+            safe_reason = html_module.escape(reason)
+            template = template.replace(
+                'id="error-reason-container" hidden>',
+                'id="error-reason-container">'
+            )
+            template = template.replace(
+                '<div class="error-reason-text" id="error-reason-text">-</div>',
+                f'<div class="error-reason-text" id="error-reason-text">{safe_reason}</div>'
+            )
+        return template
+    # 回退到内置 HTML
+    safe_reason = html_module.escape(reason) if reason else "服务异常"
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>500 - 服务异常</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b; }}
+    .container {{ text-align: center; padding: 2rem; max-width: 480px; }}
+    .code {{ font-size: 4rem; font-weight: 700; color: #d97706; }}
+    .title {{ font-size: 1.5rem; margin: 1rem 0; }}
+    .reason {{ background: #fef3c7; padding: 1rem; border-radius: 8px; margin: 1rem 0;
+               text-align: left; font-size: 0.875rem; }}
+    a {{ color: #2563eb; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="code">500</div>
+    <h1 class="title">服务异常</h1>
+    <p>代理服务在处理请求时遇到问题。</p>
+    <div class="reason"><strong>类型：</strong>{safe_reason}</div>
+    <p><a href="/">返回首页</a></p>
+  </div>
+</body>
+</html>"""
+
+
+def _build_500_bytes(reason: str = "") -> bytes:
+    """构建 500 错误页面字节"""
+    return _build_500_html(reason).encode("utf-8")
 
 
 @dataclass
@@ -40,6 +115,9 @@ class RouteDecision:
     matched_region: Optional[str] = None
     matched_ip_whitelist: Optional[str] = None
     match_detail: str = ""
+    # 黑白名单拒绝标记：命中黑名单或不在白名单时为 True，由 handle_proxy 返回 403
+    blocked: bool = False
+    block_reason: str = ""
 
 
 @dataclass
@@ -316,13 +394,22 @@ class ProxyRequestHandler:
 
     def build_target_url(self, path: str, rule: ProxyRule, query_string: Optional[str] = None) -> str:
         parsed_target = urlparse(rule.target_url)
+        # 正则改写在 strip_prefix 之前执行，命中的 path 先被 re.sub 改写
+        effective_path = path
+        if rule.path_rewrite_pattern:
+            try:
+                effective_path = re.sub(rule.path_rewrite_pattern, rule.path_rewrite_replacement or "", path)
+            except re.error:
+                logger.warning("规则 %s 的正则改写模式无效: %s", rule.rule_id, rule.path_rewrite_pattern)
+                effective_path = path
+
         if rule.strip_prefix:
-            remaining_path = path[len(rule.path_prefix):]
+            remaining_path = effective_path[len(rule.path_prefix):]
             if not remaining_path.startswith("/"):
                 remaining_path = "/" + remaining_path
             new_path = parsed_target.path + remaining_path
         else:
-            new_path = parsed_target.path + path
+            new_path = parsed_target.path + effective_path
 
         encoded_path = quote(new_path, safe="/")
         base_url = f"{parsed_target.scheme}://{parsed_target.netloc}{encoded_path}"
@@ -455,6 +542,120 @@ class ProxyRequestHandler:
                 continue
         return None
 
+    def _match_ip_in_entries(self, entries: List[str], client_ip: str) -> Optional[str]:
+        """通用IP匹配：检查 client_ip 是否在 entries 列表中（支持单IP和CIDR网段）。命中返回条目字符串。"""
+        if not entries:
+            return None
+        try:
+            parsed_client_ip = ipaddress.ip_address(client_ip)
+        except ValueError:
+            return None
+        for entry in entries:
+            try:
+                if "/" in entry:
+                    network = ipaddress.ip_network(entry, strict=False)
+                    if parsed_client_ip in network:
+                        return entry
+                else:
+                    if parsed_client_ip == ipaddress.ip_address(entry):
+                        return entry
+            except ValueError:
+                continue
+        return None
+
+    def _match_region_in_whitelist(self, regions: List[str], geo_location: Optional[GeoLocation]) -> bool:
+        """检查 geo_location 是否在地区白名单内。True=在白名单内（允许），False=不在（拒绝）。
+        白名单为空视为不限制（返回True）；配了白名单但 geo_location 为 None 时保守拒绝。"""
+        if not regions:
+            return True
+        if not geo_location:
+            return False
+        haystacks = [
+            self._normalize_location(geo_location.country),
+            self._normalize_location(geo_location.region),
+            self._normalize_location(geo_location.city),
+            self._normalize_location(geo_location.full_text),
+            self._normalize_location(geo_location.summary),
+        ]
+        haystacks = [value for value in haystacks if value]
+        for region_name in regions:
+            if any(region_name in haystack for haystack in haystacks):
+                return True
+        return False
+
+    def _evaluate_access_control(
+        self,
+        access_ip_whitelist: List[str],
+        ip_blacklist: List[str],
+        region_whitelist: List[str],
+        region_blacklist: List[str],
+        *,
+        client_ip: str,
+        geo_location: Optional[GeoLocation],
+        scope_label: str,
+    ) -> Optional[Tuple[str, str, str]]:
+        """通用访问控制检查：按 IP白 → IP黑 → 地区白 → 地区黑 顺序判断。
+
+        返回 None 表示放行；返回 (match_strategy, match_detail, block_reason) 表示拦截。
+        """
+        # 1. IP 白名单：有配置且 client_ip 不在白名单内 → 拦截
+        if access_ip_whitelist:
+            hit = self._match_ip_in_entries(access_ip_whitelist, client_ip)
+            if not hit:
+                logger.warning(
+                    "%s IP白名单拦截: IP=%s 不在白名单内",
+                    scope_label, client_ip,
+                )
+                return (
+                    "blocked_by_access_ip_whitelist",
+                    "access_ip_whitelist_not_matched",
+                    f"{scope_label} IP白名单拒绝: IP={client_ip} 不在白名单内",
+                )
+
+        # 2. IP 黑名单：有配置且 client_ip 命中 → 拦截
+        if ip_blacklist:
+            hit_entry = self._match_ip_in_entries(ip_blacklist, client_ip)
+            if hit_entry:
+                logger.warning(
+                    "%s IP黑名单拦截: IP=%s 命中=%s",
+                    scope_label, client_ip, hit_entry,
+                )
+                return (
+                    "blocked_by_ip_blacklist",
+                    f"ip_blacklist_hit:{hit_entry}",
+                    f"{scope_label} IP黑名单命中: {hit_entry}",
+                )
+
+        # 3. 地区白名单：有配置且 geo_location 不在白名单内 → 拦截
+        if region_whitelist:
+            if not self._match_region_in_whitelist(region_whitelist, geo_location):
+                logger.warning(
+                    "%s 地区白名单拦截: IP=%s 地区=%s",
+                    scope_label, client_ip,
+                    geo_location.summary if geo_location else "未知",
+                )
+                return (
+                    "blocked_by_region_whitelist",
+                    "region_whitelist_blocked",
+                    f"{scope_label} 地区白名单拒绝: 地区={geo_location.summary if geo_location else '未知'}",
+                )
+
+        # 4. 地区黑名单：有配置且 geo_location 在黑名单内 → 拦截
+        if region_blacklist:
+            if self._match_region_in_whitelist(region_blacklist, geo_location):
+                logger.warning(
+                    "%s 地区黑名单拦截: IP=%s 地区=%s",
+                    scope_label, client_ip,
+                    geo_location.summary if geo_location else "未知",
+                )
+                return (
+                    "blocked_by_region_blacklist",
+                    "region_blacklist_hit",
+                    f"{scope_label} 地区黑名单命中: 地区={geo_location.summary if geo_location else '未知'}",
+                )
+
+        return None
+
     def _apply_route_headers(self, headers: Dict[str, str], route_decision: RouteDecision) -> None:
         headers["X-Proxy-Rule-Id"] = str(route_decision.rule.rule_id or "")
         headers["X-Proxy-Rule-Source"] = route_decision.rule.source
@@ -498,6 +699,64 @@ class ProxyRequestHandler:
         if route_group is None:
             route_group = self.config.get_route_group(candidates[0].path_prefix, "")
         region_matching_enabled = bool(route_group.region_matching_enabled) if route_group else False
+
+        # ===== 路由前缀级别访问控制（前缀4项检查：IP白名单 → IP黑名单 → 地区白名单 → 地区黑名单）=====
+        if route_group and (
+            route_group.normalized_access_ip_whitelist()
+            or route_group.normalized_ip_blacklist()
+            or route_group.normalized_region_whitelist()
+            or route_group.normalized_region_blacklist()
+        ):
+            # 配置了任何地区类规则时需要解析 geo_location
+            if (
+                route_group.normalized_region_whitelist()
+                or route_group.normalized_region_blacklist()
+            ) and geo_location is None and self.geo_resolver:
+                geo_location = await self.geo_resolver.resolve(client_ip, self.config.geoip)
+
+            group_block = self._evaluate_access_control(
+                route_group.normalized_access_ip_whitelist(),
+                route_group.normalized_ip_blacklist(),
+                route_group.normalized_region_whitelist(),
+                route_group.normalized_region_blacklist(),
+                client_ip=client_ip,
+                geo_location=geo_location,
+                scope_label=f"路由前缀 {candidates[0].path_prefix}",
+            )
+            if group_block is not None:
+                strategy, detail, reason = group_block
+                selected_rule = candidates[0]
+                target_url = self.build_target_url(path, selected_rule, query_string)
+                logger.warning(
+                    "路由前缀访问控制拦截: IP=%s 路径=%s 前缀=%s 策略=%s 原因=%s",
+                    client_ip, path, candidates[0].path_prefix, strategy, reason,
+                )
+                return RouteDecision(
+                    rule=selected_rule,
+                    target_url=target_url,
+                    client_ip=client_ip,
+                    geo_location=geo_location,
+                    match_strategy=strategy,
+                    region_matching_enabled=region_matching_enabled,
+                    request_host=request_host,
+                    rule_request_host=normalize_request_host(selected_rule.request_host),
+                    match_detail=detail,
+                    blocked=True,
+                    block_reason=reason,
+                )
+
+        # 判断是否需要解析 geo_location：地区匹配开启 或 路由前缀/任意候选规则配了地区白/黑名单
+        group_has_region_whitelist = bool(route_group and route_group.normalized_region_whitelist())
+        group_has_region_blacklist = bool(route_group and route_group.normalized_region_blacklist())
+        any_rule_has_region_whitelist = any(rule.normalized_region_whitelist() for rule in candidates)
+        any_rule_has_region_blacklist = any(rule.normalized_region_blacklist() for rule in candidates)
+        need_geo_resolution = (
+            region_matching_enabled
+            or group_has_region_whitelist
+            or group_has_region_blacklist
+            or any_rule_has_region_whitelist
+            or any_rule_has_region_blacklist
+        )
 
         whitelist_candidates = [rule for rule in candidates if rule.normalized_ip_whitelist()]
         regional_candidates = [rule for rule in candidates if rule.normalized_regions() and not rule.is_default]
@@ -555,6 +814,50 @@ class ProxyRequestHandler:
             selected_rule = candidates[0]
             if not match_detail:
                 match_detail = "fallback_to_highest_priority_rule"
+
+        # ===== 规则级别访问控制（规则4项检查：IP白名单 → IP黑名单 → 地区白名单 → 地区黑名单）=====
+        if (
+            selected_rule.normalized_access_ip_whitelist()
+            or selected_rule.normalized_ip_blacklist()
+            or selected_rule.normalized_region_whitelist()
+            or selected_rule.normalized_region_blacklist()
+        ):
+            # 配置了任何地区类规则时需要解析 geo_location
+            if (
+                selected_rule.normalized_region_whitelist()
+                or selected_rule.normalized_region_blacklist()
+            ) and geo_location is None and self.geo_resolver:
+                geo_location = await self.geo_resolver.resolve(client_ip, self.config.geoip)
+
+            rule_block = self._evaluate_access_control(
+                selected_rule.normalized_access_ip_whitelist(),
+                selected_rule.normalized_ip_blacklist(),
+                selected_rule.normalized_region_whitelist(),
+                selected_rule.normalized_region_blacklist(),
+                client_ip=client_ip,
+                geo_location=geo_location,
+                scope_label=f"规则#{selected_rule.rule_id}",
+            )
+            if rule_block is not None:
+                strategy, detail, reason = rule_block
+                logger.warning(
+                    "规则访问控制拦截: IP=%s 路径=%s 规则ID=%s 策略=%s 原因=%s",
+                    client_ip, path, selected_rule.rule_id, strategy, reason,
+                )
+                target_url = self.build_target_url(path, selected_rule, query_string)
+                return RouteDecision(
+                    rule=selected_rule,
+                    target_url=target_url,
+                    client_ip=client_ip,
+                    geo_location=geo_location,
+                    match_strategy=strategy,
+                    region_matching_enabled=region_matching_enabled,
+                    request_host=request_host,
+                    rule_request_host=normalize_request_host(selected_rule.request_host),
+                    match_detail=detail,
+                    blocked=True,
+                    block_reason=reason,
+                )
 
         target_url = self.build_target_url(path, selected_rule, query_string)
         geo_source_for_log = geo_location.source if geo_location else "-"
@@ -636,21 +939,6 @@ class ProxyRequestHandler:
         rule = route_decision.rule
         target_url = route_decision.target_url
         client_ip = route_decision.client_ip or client_host
-
-        if self.ip_ban_manager:
-            ban_entry = await self.ip_ban_manager.is_banned(client_ip)
-            if ban_entry:
-                logger.warning("IP已被封禁拒绝请求: %s 原因=%s", client_ip, ban_entry.reason)
-                async def banned_stream():
-                    yield '{"error": "IP已被封禁"}'.encode("utf-8")
-                return StreamingResponse(
-                    status=403,
-                    headers={"Content-Type": "application/json"},
-                    body_stream=banned_stream(),
-                    redirect_info=None,
-                    route_decision=route_decision,
-                    cache_status="BANNED",
-                )
 
         session = await self.get_session()
 
@@ -743,11 +1031,11 @@ class ProxyRequestHandler:
                             redirect_info.redirect_url,
                         )
                     async def error_stream():
-                        yield '{"error": "重定向次数过多"}'.encode("utf-8")
+                        yield _build_500_bytes("重定向次数超限")
 
                     return StreamingResponse(
-                        status=502,
-                        headers={"Content-Type": "application/json"},
+                        status=500,
+                        headers={"Content-Type": "text/html; charset=utf-8"},
                         body_stream=error_stream(),
                         redirect_info=redirect_info,
                         route_decision=route_decision,
@@ -812,11 +1100,11 @@ class ProxyRequestHandler:
             await asyncio.sleep(1)
 
         async def error_stream():
-            yield f'{{"error": "{rule.retry_times} 次重试后失败: {last_error_type}: {last_error}"}}'.encode("utf-8")
+            yield _build_500_bytes("上游重试耗尽")
 
         return StreamingResponse(
-            status=502,
-            headers={"Content-Type": "application/json"},
+            status=500,
+            headers={"Content-Type": "text/html; charset=utf-8"},
             body_stream=error_stream(),
             redirect_info=None,
             route_decision=route_decision,
@@ -848,14 +1136,6 @@ class ProxyRequestHandler:
         rule = route_decision.rule
         target_url = route_decision.target_url
         client_ip = route_decision.client_ip or client_host
-
-        if self.ip_ban_manager:
-            ban_entry = await self.ip_ban_manager.is_banned(client_ip)
-            if ban_entry:
-                logger.warning("IP已被封禁拒绝请求: %s 原因=%s", client_ip, ban_entry.reason)
-                self._last_cache_status = "BANNED"
-                error_body = '{"error": "IP已被封禁"}'.encode("utf-8")
-                return 403, {"Content-Type": "application/json"}, error_body, None, route_decision
 
         session = await self.get_session()
 
@@ -905,8 +1185,8 @@ class ProxyRequestHandler:
                             redirect_info.status_code or 302,
                             redirect_info.redirect_url,
                         )
-                    error_body = '{"error": "重定向次数过多"}'.encode("utf-8")
-                    return 502, {"Content-Type": "application/json"}, error_body, redirect_info, route_decision
+                    error_body = _build_500_bytes("重定向次数超限")
+                    return 500, {"Content-Type": "text/html; charset=utf-8"}, error_body, redirect_info, route_decision
 
                 response_headers = dict(response.headers)
                 filtered_headers = self.filter_headers(response_headers, is_request=False)
@@ -949,8 +1229,8 @@ class ProxyRequestHandler:
             )
             await asyncio.sleep(1)
 
-        error_body = f'{{"error": "{rule.retry_times} 次重试后失败: {last_error_type}: {last_error}"}}'.encode("utf-8")
-        return 502, {"Content-Type": "application/json"}, error_body, None, route_decision
+        error_body = _build_500_bytes("上游重试耗尽")
+        return 500, {"Content-Type": "text/html; charset=utf-8"}, error_body, None, route_decision
 
 
 class ProxyStats:

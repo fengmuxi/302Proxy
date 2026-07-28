@@ -93,6 +93,12 @@ class ProxyRule:
     external_id: Optional[str] = None
     path_rewrite_pattern: str = ""
     path_rewrite_replacement: str = ""
+    # 访问控制层（拒绝性）：命中黑名单或在白名单外将被拒绝（403）
+    # 注意：access_ip_whitelist 与 ip_whitelist（路由匹配）语义不同
+    access_ip_whitelist: str = ""
+    ip_blacklist: str = ""
+    region_whitelist: str = ""
+    region_blacklist: str = ""
 
     def normalized_regions(self) -> List[str]:
         raw_regions = normalize_region_filter_value(self.region_filters)
@@ -106,6 +112,32 @@ class ProxyRule:
     def normalized_ip_whitelist(self) -> List[str]:
         raw_ips = normalize_region_filter_value(self.ip_whitelist)
         return [part.strip() for part in IP_SPLIT_PATTERN.split(raw_ips) if part.strip()]
+
+    def normalized_access_ip_whitelist(self) -> List[str]:
+        raw_ips = normalize_region_filter_value(self.access_ip_whitelist)
+        return [part.strip() for part in IP_SPLIT_PATTERN.split(raw_ips) if part.strip()]
+
+    def normalized_region_whitelist(self) -> List[str]:
+        raw_regions = normalize_region_filter_value(self.region_whitelist)
+        regions: List[str] = []
+        for part in REGION_SPLIT_PATTERN.split(raw_regions):
+            normalized = normalize_location_text(part)
+            if normalized:
+                regions.append(normalized)
+        return regions
+
+    def normalized_ip_blacklist(self) -> List[str]:
+        raw_ips = normalize_region_filter_value(self.ip_blacklist)
+        return [part.strip() for part in IP_SPLIT_PATTERN.split(raw_ips) if part.strip()]
+
+    def normalized_region_blacklist(self) -> List[str]:
+        raw_regions = normalize_region_filter_value(self.region_blacklist)
+        regions: List[str] = []
+        for part in REGION_SPLIT_PATTERN.split(raw_regions):
+            normalized = normalize_location_text(part)
+            if normalized:
+                regions.append(normalized)
+        return regions
 
 
 @dataclass
@@ -255,6 +287,37 @@ class RouteGroupConfig:
     request_host: str = ""
     region_matching_enabled: bool = False
     notes: str = ""
+    # 访问控制层（拒绝性）：作用于该前缀下所有规则
+    access_ip_whitelist: str = ""
+    ip_blacklist: str = ""
+    region_whitelist: str = ""
+    region_blacklist: str = ""
+
+    def normalized_access_ip_whitelist(self) -> List[str]:
+        raw_ips = normalize_region_filter_value(self.access_ip_whitelist)
+        return [part.strip() for part in IP_SPLIT_PATTERN.split(raw_ips) if part.strip()]
+
+    def normalized_region_whitelist(self) -> List[str]:
+        raw_regions = normalize_region_filter_value(self.region_whitelist)
+        regions: List[str] = []
+        for part in REGION_SPLIT_PATTERN.split(raw_regions):
+            normalized = normalize_location_text(part)
+            if normalized:
+                regions.append(normalized)
+        return regions
+
+    def normalized_ip_blacklist(self) -> List[str]:
+        raw_ips = normalize_region_filter_value(self.ip_blacklist)
+        return [part.strip() for part in IP_SPLIT_PATTERN.split(raw_ips) if part.strip()]
+
+    def normalized_region_blacklist(self) -> List[str]:
+        raw_regions = normalize_region_filter_value(self.region_blacklist)
+        regions: List[str] = []
+        for part in REGION_SPLIT_PATTERN.split(raw_regions):
+            normalized = normalize_location_text(part)
+            if normalized:
+                regions.append(normalized)
+        return regions
 
 
 @dataclass
@@ -392,6 +455,10 @@ class Config:
                     external_id=_string_or_none(rule_data.get("external_id")),
                     path_rewrite_pattern=str(rule_data.get("path_rewrite_pattern", "") or ""),
                     path_rewrite_replacement=str(rule_data.get("path_rewrite_replacement", "") or ""),
+                    access_ip_whitelist=normalize_region_filter_value(rule_data.get("access_ip_whitelist", "")),
+                    ip_blacklist=normalize_region_filter_value(rule_data.get("ip_blacklist", "")),
+                    region_whitelist=normalize_region_filter_value(rule_data.get("region_whitelist", "")),
+                    region_blacklist=normalize_region_filter_value(rule_data.get("region_blacklist", "")),
                 )
             )
 

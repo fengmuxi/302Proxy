@@ -73,6 +73,7 @@ class ProxyServer:
         self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
+        self._ban_cleanup_task: Optional[asyncio.Task] = None
         self.admin_console = AdminConsole(
             config_store=self.config_store,
             reload_callback=self.reload_runtime_config,
@@ -156,13 +157,19 @@ class ProxyServer:
             banned_by = payload.get("banned_by", "admin")
             duration_seconds = int(payload.get("duration_seconds", 0) or 0)
             permanent = bool(payload.get("permanent", True))
+            path_prefix = str(payload.get("path_prefix", "") or "").strip()
             await self.ip_ban_manager.ban_ip(
                 ip=ip, reason=reason, banned_by=banned_by,
                 duration_seconds=duration_seconds, permanent=permanent,
+                path_prefix=path_prefix,
             )
         elif action == "unban":
             ip = payload.get("ip", "")
             await self.ip_ban_manager.unban_ip(ip)
+        elif action == "extend":
+            ip = payload.get("ip", "")
+            duration_seconds = float(payload.get("duration_seconds", 0) or 0)
+            await self.ip_ban_manager.extend_ban(ip, duration_seconds)
         elif action == "clear":
             await self.ip_ban_manager.clear_all()
 
@@ -171,6 +178,158 @@ class ProxyServer:
         if started_at is None:
             return 0
         return max(0, int((time.perf_counter() - float(started_at)) * 1000))
+
+    async def _render_403_page(self, reason: str) -> web.Response:
+        """渲染 403 错误页面"""
+        from pathlib import Path
+        
+        # 读取 403.html 模板
+        static_dir = Path(__file__).parent / "static"
+        error_page_path = static_dir / "403.html"
+        
+        html_content = ""
+        try:
+            if error_page_path.exists():
+                html_content = error_page_path.read_text(encoding="utf-8")
+                # 在页面中注入原因（通过修改 hidden 属性）
+                html_content = html_content.replace(
+                    'id="error-reason-container" hidden>',
+                    'id="error-reason-container">'
+                )
+                html_content = html_content.replace(
+                    '<div class="error-reason-text" id="error-reason-text">-</div>',
+                    f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                )
+            else:
+                # 回退到简单的 HTML
+                html_content = self._fallback_403_html(reason)
+        except Exception as e:
+            logger.error("读取 403 页面失败: %s", e)
+            html_content = self._fallback_403_html(reason)
+        
+        return web.Response(
+            text=html_content,
+            status=403,
+            content_type="text/html",
+            charset="utf-8",
+        )
+    
+    def _fallback_403_html(self, reason: str) -> str:
+        """生成回退的 403 HTML"""
+        import html
+        safe_reason = html.escape(reason)
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>403 - 访问受限</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b; }}
+    .container {{ text-align: center; padding: 2rem; max-width: 480px; }}
+    .code {{ font-size: 4rem; font-weight: 700; color: #dc2626; }}
+    .title {{ font-size: 1.5rem; margin: 1rem 0; }}
+    .reason {{ background: #fee2e2; padding: 1rem; border-radius: 8px; margin: 1rem 0;
+               text-align: left; font-size: 0.875rem; }}
+    a {{ color: #2563eb; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="code">403</div>
+    <h1 class="title">访问受限</h1>
+    <p>您没有权限访问此资源。</p>
+    <div class="reason"><strong>原因：</strong>{safe_reason}</div>
+    <p><a href="/">返回首页</a></p>
+  </div>
+</body>
+</html>"""
+
+    async def _render_500_page(self, reason: str = "") -> web.Response:
+        """渲染 500 错误页面，隐藏内部异常细节，仅展示通用原因分类"""
+        from pathlib import Path
+
+        static_dir = Path(__file__).parent / "static"
+        error_page_path = static_dir / "500.html"
+
+        html_content = ""
+        try:
+            if error_page_path.exists():
+                html_content = error_page_path.read_text(encoding="utf-8")
+                if reason:
+                    html_content = html_content.replace(
+                        'id="error-reason-container" hidden>',
+                        'id="error-reason-container">'
+                    )
+                    html_content = html_content.replace(
+                        '<div class="error-reason-text" id="error-reason-text">-</div>',
+                        f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                    )
+            else:
+                html_content = self._fallback_500_html(reason)
+        except Exception as e:
+            logger.error("读取 500 页面失败: %s", e)
+            html_content = self._fallback_500_html(reason)
+
+        return web.Response(
+            text=html_content,
+            status=500,
+            content_type="text/html",
+            charset="utf-8",
+        )
+
+    def _fallback_500_html(self, reason: str = "") -> str:
+        """生成回退的 500 HTML"""
+        import html
+        safe_reason = html.escape(reason) if reason else "服务异常"
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>500 - 服务异常</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b; }}
+    .container {{ text-align: center; padding: 2rem; max-width: 480px; }}
+    .code {{ font-size: 4rem; font-weight: 700; color: #d97706; }}
+    .title {{ font-size: 1.5rem; margin: 1rem 0; }}
+    .reason {{ background: #fef3c7; padding: 1rem; border-radius: 8px; margin: 1rem 0;
+               text-align: left; font-size: 0.875rem; }}
+    a {{ color: #2563eb; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="code">500</div>
+    <h1 class="title">服务异常</h1>
+    <p>代理服务在处理请求时遇到问题。</p>
+    <div class="reason"><strong>类型：</strong>{safe_reason}</div>
+    <p><a href="/">返回首页</a></p>
+  </div>
+</body>
+</html>"""
+
+    @staticmethod
+    def _classify_proxy_error(error: Exception) -> str:
+        """将内部异常分类为用户可见的通用原因，避免暴露实现细节"""
+        error_type = type(error).__name__
+        error_msg = str(error).lower()
+
+        if "timeout" in error_type.lower() or "timeout" in error_msg:
+            return "请求超时"
+        if "redirect" in error_msg or "redirect" in error_type.lower():
+            return "重定向次数超限"
+        if "connection" in error_type.lower() or "connection" in error_msg:
+            return "上游连接异常"
+        if "client" in error_type.lower() or "client" in error_msg:
+            return "上游请求异常"
+        return "代理服务异常"
 
     def _infer_route_log_result_status(self, *, route_decision, upstream_status: int, cache_status: str, error_message: str = "") -> str:
         if error_message:
@@ -311,6 +470,50 @@ class ProxyServer:
                 client_host,
                 query_string if query_string else None,
             )
+            # 黑白名单拦截检查：命中黑名单或不在白名单内时跳转到 403 页面
+            if route_decision and route_decision.blocked:
+                block_reason = route_decision.block_reason or "请求被访问控制规则拦截"
+                logger.warning(
+                    "黑白名单拦截: IP=%s 路径=%s 策略=%s 原因=%s",
+                    route_decision.client_ip, path_decoded,
+                    route_decision.match_strategy, block_reason,
+                )
+                self._record_route_log(
+                    request,
+                    route_decision=route_decision,
+                    upstream_status=403,
+                    cache_status="BLOCKED",
+                    transport_mode="none",
+                    error_message=block_reason,
+                )
+                # 返回 403 页面
+                return await self._render_403_page(block_reason)
+
+            # IP 封禁检查：被封禁的 IP 直接返回 403 页面
+            if route_decision:
+                ban_entry = await self.ip_ban_manager.is_banned(
+                    route_decision.client_ip, path_decoded
+                )
+                if ban_entry:
+                    ban_reason = f"IP已被封禁: {route_decision.client_ip}"
+                    if ban_entry.reason:
+                        ban_reason += f" 原因: {ban_entry.reason}"
+                    scope = ban_entry.path_prefix or "全局"
+                    logger.warning(
+                        "IP封禁拦截: IP=%s 路径=%s 作用域=%s 原因=%s",
+                        route_decision.client_ip, path_decoded, scope,
+                        ban_entry.reason or "未指定",
+                    )
+                    self._record_route_log(
+                        request,
+                        route_decision=route_decision,
+                        upstream_status=403,
+                        cache_status="BANNED",
+                        transport_mode="none",
+                        error_message=ban_reason,
+                    )
+                    return await self._render_403_page(ban_reason)
+
             target_url = route_decision.target_url if route_decision else None
             use_streaming_mode = bool(
                 route_decision and route_decision.rule.enable_streaming and self.config.streaming.enabled
@@ -380,11 +583,8 @@ class ProxyServer:
                 transport_mode="streaming" if request.get("_route_log_started_at") and route_decision and route_decision.rule.enable_streaming else "standard",
                 error_message=str(e),
             )
-            return web.Response(
-                status=500,
-                headers={'Content-Type': 'application/json'},
-                body=json.dumps({'error': '内部服务器错误'}).encode()
-            )
+            # 返回 500 错误页面，仅展示通用原因分类，不暴露内部异常细节
+            return await self._render_500_page(self._classify_proxy_error(e))
     
     async def _send_streaming_response(self, request: web.Request, streaming_response: StreamingResponse, cache_status: str = "BYPASS") -> web.StreamResponse:
         redirect_info = streaming_response.redirect_info
@@ -605,10 +805,57 @@ class ProxyServer:
             f"TTL={self.ip_result_cache.ttl_seconds}秒, "
             f"最大条目={self.ip_result_cache.max_entries}"
         )
+        await self._load_bans_from_db()
+        self._start_ban_cleanup_task()
         logger.info("IP封禁管理器已初始化")
+
+    async def _load_bans_from_db(self) -> None:
+        """启动时从数据库加载封禁记录到内存，并清理已过期记录。"""
+        try:
+            expired_count = self.config_store.cleanup_expired_bans()
+            if expired_count > 0:
+                logger.info(f"启动时清理过期IP封禁记录: {expired_count} 条")
+            bans = self.config_store.list_banned_ips()
+            if not bans:
+                logger.info("IP封禁列表为空，无需加载")
+                return
+            imported = await self.ip_ban_manager.import_bans(bans)
+            logger.info(f"已从数据库加载 {imported} 条IP封禁记录到内存")
+        except Exception as exc:
+            logger.warning(f"加载IP封禁记录失败: {exc}")
+
+    def _start_ban_cleanup_task(self) -> None:
+        """启动定时任务，定期清理内存和数据库中过期的临时封禁。"""
+        if self._ban_cleanup_task is None or self._ban_cleanup_task.done():
+            self._ban_cleanup_task = asyncio.create_task(
+                self._ban_cleanup_loop(), name="ip-ban-cleanup"
+            )
+
+    async def _ban_cleanup_loop(self) -> None:
+        """每60秒清理一次过期的临时封禁记录（内存 + 数据库）。"""
+        while True:
+            try:
+                await asyncio.sleep(60)
+                in_memory = await self.ip_ban_manager.cleanup_expired()
+                in_db = self.config_store.cleanup_expired_bans()
+                if in_memory > 0 or in_db > 0:
+                    logger.info(
+                        f"清理过期IP封禁: 内存 {in_memory} 条, 数据库 {in_db} 条"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"清理过期IP封禁任务异常: {exc}")
     
     async def on_shutdown(self, app: web.Application):
         logger.info("正在关闭代理服务器...")
+        if self._ban_cleanup_task is not None:
+            self._ban_cleanup_task.cancel()
+            try:
+                await self._ban_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._ban_cleanup_task = None
         await self.request_handler.close()
         await self.offline_geoip_sync_service.stop()
         await self.geo_resolver.close()

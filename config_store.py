@@ -129,6 +129,10 @@ class ConfigStore:
                     path_prefix TEXT NOT NULL,
                     region_matching_enabled INTEGER NOT NULL DEFAULT 0,
                     notes TEXT NOT NULL DEFAULT '',
+                    access_ip_whitelist TEXT NOT NULL DEFAULT '',
+                    ip_blacklist TEXT NOT NULL DEFAULT '',
+                    region_whitelist TEXT NOT NULL DEFAULT '',
+                    region_blacklist TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (request_host, path_prefix)
                 );
@@ -263,6 +267,7 @@ class ConfigStore:
                     banned_at REAL NOT NULL DEFAULT 0,
                     expire_at REAL NOT NULL DEFAULT 0,
                     permanent INTEGER NOT NULL DEFAULT 1,
+                    path_prefix TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
 
@@ -286,6 +291,12 @@ class ConfigStore:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     priority INTEGER NOT NULL DEFAULT 0,
                     notes TEXT NOT NULL DEFAULT '',
+                    path_rewrite_pattern TEXT NOT NULL DEFAULT '',
+                    path_rewrite_replacement TEXT NOT NULL DEFAULT '',
+                    access_ip_whitelist TEXT NOT NULL DEFAULT '',
+                    ip_blacklist TEXT NOT NULL DEFAULT '',
+                    region_whitelist TEXT NOT NULL DEFAULT '',
+                    region_blacklist TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -307,6 +318,18 @@ class ConfigStore:
                 """
             )
             self._migrate_route_groups_table(connection)
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "path_rewrite_pattern",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "path_rewrite_replacement",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._ensure_column(
                 connection,
                 "geoip_online_sources",
@@ -451,6 +474,62 @@ class ConfigStore:
                 "system_settings",
                 "ip_cache_max_entries",
                 "INTEGER NOT NULL DEFAULT 5000",
+            )
+            self._ensure_column(
+                connection,
+                "banned_ips",
+                "path_prefix",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            # 路由前缀的访问控制（IP白/黑名单、地区白/黑名单）
+            self._ensure_column(
+                connection,
+                "route_groups",
+                "access_ip_whitelist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_groups",
+                "ip_blacklist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_groups",
+                "region_whitelist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_groups",
+                "region_blacklist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            # 转发规则的访问控制（IP白/黑名单、地区白/黑名单）
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "access_ip_whitelist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "ip_blacklist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "region_whitelist",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "forward_rules",
+                "region_blacklist",
+                "TEXT NOT NULL DEFAULT ''",
             )
 
     def _ensure_column(
@@ -704,8 +783,9 @@ class ConfigStore:
             INSERT INTO forward_rules (
                 source, external_id, name, request_host, path_prefix, target_url, strip_prefix, timeout,
                 max_redirects, follow_redirects, retry_times, enable_streaming, ip_whitelist, region_filters,
-                is_default, enabled, priority, notes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_default, enabled, priority, notes, path_rewrite_pattern, path_rewrite_replacement,
+                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
@@ -726,6 +806,12 @@ class ConfigStore:
                 int(rule.enabled),
                 rule.priority,
                 rule.notes,
+                rule.path_rewrite_pattern or "",
+                rule.path_rewrite_replacement or "",
+                normalize_region_filter_value(rule.access_ip_whitelist),
+                normalize_region_filter_value(rule.ip_blacklist),
+                normalize_region_filter_value(rule.region_whitelist),
+                normalize_region_filter_value(rule.region_blacklist),
                 now,
                 now,
             ),
@@ -828,6 +914,10 @@ class ConfigStore:
         request_host: str = "",
         region_matching_enabled: Optional[bool] = None,
         notes: Optional[str] = None,
+        access_ip_whitelist: Optional[str] = None,
+        ip_blacklist: Optional[str] = None,
+        region_whitelist: Optional[str] = None,
+        region_blacklist: Optional[str] = None,
     ) -> None:
         normalized_host = normalize_request_host(request_host)
         normalized_enabled = None if region_matching_enabled is None else coerce_bool(region_matching_enabled, False)
@@ -840,12 +930,18 @@ class ConfigStore:
             connection.execute(
                 """
                 UPDATE route_groups
-                SET region_matching_enabled = ?, notes = ?, updated_at = ?
+                SET region_matching_enabled = ?, notes = ?,
+                    access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                    updated_at = ?
                 WHERE request_host = ? AND path_prefix = ?
                 """,
                 (
                     int(normalized_enabled if normalized_enabled is not None else bool(existing["region_matching_enabled"])),
                     notes if notes is not None else existing["notes"],
+                    normalize_region_filter_value(access_ip_whitelist) if access_ip_whitelist is not None else existing["access_ip_whitelist"],
+                    normalize_region_filter_value(ip_blacklist) if ip_blacklist is not None else existing["ip_blacklist"],
+                    normalize_region_filter_value(region_whitelist) if region_whitelist is not None else existing["region_whitelist"],
+                    normalize_region_filter_value(region_blacklist) if region_blacklist is not None else existing["region_blacklist"],
                     now,
                     normalized_host,
                     path_prefix,
@@ -855,14 +951,19 @@ class ConfigStore:
 
         connection.execute(
             """
-            INSERT INTO route_groups (request_host, path_prefix, region_matching_enabled, notes, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO route_groups (request_host, path_prefix, region_matching_enabled, notes,
+                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_host,
                 path_prefix,
                 int(normalized_enabled) if normalized_enabled is not None else 0,
                 notes or "",
+                normalize_region_filter_value(access_ip_whitelist or ""),
+                normalize_region_filter_value(ip_blacklist or ""),
+                normalize_region_filter_value(region_whitelist or ""),
+                normalize_region_filter_value(region_blacklist or ""),
                 now,
             ),
         )
@@ -970,6 +1071,10 @@ class ConfigStore:
                 request_host=normalize_request_host(row["request_host"]),
                 region_matching_enabled=bool(row["region_matching_enabled"]),
                 notes=row["notes"],
+                access_ip_whitelist=row["access_ip_whitelist"] if "access_ip_whitelist" in row.keys() else "",
+                ip_blacklist=row["ip_blacklist"] if "ip_blacklist" in row.keys() else "",
+                region_whitelist=row["region_whitelist"] if "region_whitelist" in row.keys() else "",
+                region_blacklist=row["region_blacklist"] if "region_blacklist" in row.keys() else "",
             )
             for row in group_rows
         ]
@@ -1393,17 +1498,31 @@ class ConfigStore:
             raise ValueError("IP地址不能为空")
         now = utc_now()
         banned_at = float(payload.get("banned_at", 0) or time.time())
-        expire_at = float(payload.get("expire_at", 0) or 0)
-        permanent = int(bool(payload.get("permanent", True)))
+        permanent = bool(payload.get("permanent", True))
         reason = str(payload.get("reason", "")).strip()
         banned_by = str(payload.get("banned_by", "admin")).strip()
+        path_prefix = str(payload.get("path_prefix", "") or "").strip()
+
+        # 优先使用前端传入的 expire_at；否则根据 duration_seconds 计算
+        expire_at = float(payload.get("expire_at", 0) or 0)
+        if not permanent:
+            duration_seconds = int(payload.get("duration_seconds", 0) or 0)
+            if duration_seconds > 0:
+                expire_at = time.time() + duration_seconds
+            elif expire_at <= 0:
+                # 临时封禁但未指定时长，按永久处理避免无限期封禁
+                permanent = True
+                expire_at = 0.0
+        else:
+            expire_at = 0.0
+
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, path_prefix, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (ip, reason, banned_by, banned_at, expire_at, permanent, now),
+                (ip, reason, banned_by, banned_at, expire_at, int(permanent), path_prefix, now),
             )
         return self.get_banned_ip(ip)
 
@@ -1412,9 +1531,46 @@ class ConfigStore:
             cursor = connection.execute("DELETE FROM banned_ips WHERE ip = ?", (ip,))
         return cursor.rowcount > 0
 
+    def extend_banned_ip(self, ip: str, duration_hours: float) -> Dict[str, Any]:
+        """延长临时封禁时长。若已过期则从当前时间起算；未过期则在原 expire_at 基础上累加。
+        永久封禁调用此方法将转为临时封禁。"""
+        duration_seconds = float(duration_hours) * 3600.0
+        if duration_seconds <= 0:
+            raise ValueError("延长时长必须大于0")
+        now_ts = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT expire_at, permanent FROM banned_ips WHERE ip = ?", (ip,)
+            ).fetchone()
+            if not row:
+                raise KeyError(f"IP {ip} 不在封禁列表中")
+            current_expire = float(row["expire_at"] or 0)
+            current_permanent = bool(row["permanent"])
+            # 永久封禁或已过期：从当前时间起算
+            if current_permanent or current_expire <= 0 or current_expire < now_ts:
+                new_expire = now_ts + duration_seconds
+            else:
+                # 未过期：在原到期时间基础上累加
+                new_expire = current_expire + duration_seconds
+            connection.execute(
+                "UPDATE banned_ips SET expire_at = ?, permanent = 0 WHERE ip = ?",
+                (new_expire, ip),
+            )
+        return self.get_banned_ip(ip)
+
     def clear_all_banned_ips(self) -> int:
         with self._connect() as connection:
             cursor = connection.execute("DELETE FROM banned_ips")
+        return cursor.rowcount
+
+    def cleanup_expired_bans(self) -> int:
+        """删除数据库中已过期的临时封禁记录（非永久且 expire_at > 0 且小于当前时间）。"""
+        now_ts = time.time()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM banned_ips WHERE permanent = 0 AND expire_at > 0 AND expire_at < ?",
+                (now_ts,),
+            )
         return cursor.rowcount
 
     def import_banned_ips(self, bans: List[Dict[str, Any]]) -> int:
@@ -1427,8 +1583,8 @@ class ConfigStore:
                     continue
                 connection.execute(
                     """
-                    INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO banned_ips (ip, reason, banned_by, banned_at, expire_at, permanent, path_prefix, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ip,
@@ -1437,6 +1593,7 @@ class ConfigStore:
                         float(b.get("banned_at", time.time())),
                         float(b.get("expire_at", 0)),
                         int(bool(b.get("permanent", True))),
+                        str(b.get("path_prefix", "") or "").strip(),
                         now,
                     ),
                 )
@@ -1451,6 +1608,7 @@ class ConfigStore:
             "banned_at": row["banned_at"],
             "expire_at": row["expire_at"],
             "permanent": bool(row["permanent"]),
+            "path_prefix": row["path_prefix"] if "path_prefix" in row.keys() else "",
             "created_at": row["created_at"],
         }
 
@@ -1515,6 +1673,10 @@ class ConfigStore:
                 request_host=request_host,
                 region_matching_enabled=coerce_bool(payload.get("region_matching_enabled"), False),
                 notes=str(payload.get("notes", "")).strip(),
+                access_ip_whitelist=str(payload.get("access_ip_whitelist", "") or "").strip(),
+                ip_blacklist=str(payload.get("ip_blacklist", "") or "").strip(),
+                region_whitelist=str(payload.get("region_whitelist", "") or "").strip(),
+                region_blacklist=str(payload.get("region_blacklist", "") or "").strip(),
             )
         return self.get_route_group(path_prefix, request_host)
 
@@ -1561,7 +1723,9 @@ class ConfigStore:
                 connection.execute(
                     """
                     UPDATE route_groups
-                    SET request_host = ?, path_prefix = ?, region_matching_enabled = ?, notes = ?, updated_at = ?
+                    SET request_host = ?, path_prefix = ?, region_matching_enabled = ?, notes = ?,
+                        access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                        updated_at = ?
                     WHERE request_host = ? AND path_prefix = ?
                     """,
                     (
@@ -1569,6 +1733,10 @@ class ConfigStore:
                         new_path_prefix,
                         int(coerce_bool(payload.get("region_matching_enabled"), bool(existing["region_matching_enabled"]))),
                         str(payload.get("notes", existing["notes"])).strip(),
+                        normalize_region_filter_value(str(payload.get("access_ip_whitelist", existing["access_ip_whitelist"] if "access_ip_whitelist" in existing.keys() else "") or "")),
+                        normalize_region_filter_value(str(payload.get("ip_blacklist", existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else "") or "")),
+                        normalize_region_filter_value(str(payload.get("region_whitelist", existing["region_whitelist"] if "region_whitelist" in existing.keys() else "") or "")),
+                        normalize_region_filter_value(str(payload.get("region_blacklist", existing["region_blacklist"] if "region_blacklist" in existing.keys() else "") or "")),
                         now,
                         old_request_host,
                         old_path_prefix,
@@ -1592,6 +1760,10 @@ class ConfigStore:
                         bool(existing["region_matching_enabled"]),
                     ),
                     notes=str(payload.get("notes", existing["notes"])).strip(),
+                    access_ip_whitelist=str(payload.get("access_ip_whitelist", existing["access_ip_whitelist"] if "access_ip_whitelist" in existing.keys() else "") or ""),
+                    ip_blacklist=str(payload.get("ip_blacklist", existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else "") or ""),
+                    region_whitelist=str(payload.get("region_whitelist", existing["region_whitelist"] if "region_whitelist" in existing.keys() else "") or ""),
+                    region_blacklist=str(payload.get("region_blacklist", existing["region_blacklist"] if "region_blacklist" in existing.keys() else "") or ""),
                 )
 
         return self.get_route_group(new_path_prefix, new_request_host)
@@ -1636,6 +1808,10 @@ class ConfigStore:
                 request_host=rule.request_host,
                 region_matching_enabled=payload.get("region_matching_enabled"),
                 notes=payload.get("group_notes"),
+                access_ip_whitelist=payload.get("group_access_ip_whitelist"),
+                ip_blacklist=payload.get("group_ip_blacklist"),
+                region_whitelist=payload.get("group_region_whitelist"),
+                region_blacklist=payload.get("group_region_blacklist"),
             )
             if rule.is_default:
                 self._clear_existing_default_in_group(
@@ -1668,7 +1844,9 @@ class ConfigStore:
                 SET source = ?, external_id = ?, name = ?, request_host = ?, path_prefix = ?, target_url = ?,
                     strip_prefix = ?, timeout = ?, max_redirects = ?, follow_redirects = ?, retry_times = ?,
                     enable_streaming = ?, ip_whitelist = ?, region_filters = ?, is_default = ?, enabled = ?,
-                    priority = ?, notes = ?, updated_at = ?
+                    priority = ?, notes = ?, path_rewrite_pattern = ?, path_rewrite_replacement = ?,
+                    access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -1690,6 +1868,12 @@ class ConfigStore:
                     int(rule.enabled),
                     rule.priority,
                     rule.notes,
+                    rule.path_rewrite_pattern or "",
+                    rule.path_rewrite_replacement or "",
+                    normalize_region_filter_value(rule.access_ip_whitelist),
+                    normalize_region_filter_value(rule.ip_blacklist),
+                    normalize_region_filter_value(rule.region_whitelist),
+                    normalize_region_filter_value(rule.region_blacklist),
                     now,
                     rule_id,
                 ),
@@ -1700,6 +1884,10 @@ class ConfigStore:
                 request_host=rule.request_host,
                 region_matching_enabled=payload.get("region_matching_enabled"),
                 notes=payload.get("group_notes"),
+                access_ip_whitelist=payload.get("group_access_ip_whitelist"),
+                ip_blacklist=payload.get("group_ip_blacklist"),
+                region_whitelist=payload.get("group_region_whitelist"),
+                region_blacklist=payload.get("group_region_blacklist"),
             )
             if rule.is_default:
                 self._clear_existing_default_in_group(
@@ -2132,6 +2320,12 @@ class ConfigStore:
             "enabled": rule.enabled,
             "priority": rule.priority,
             "notes": rule.notes,
+            "path_rewrite_pattern": rule.path_rewrite_pattern,
+            "path_rewrite_replacement": rule.path_rewrite_replacement,
+            "access_ip_whitelist": rule.access_ip_whitelist,
+            "ip_blacklist": rule.ip_blacklist,
+            "region_whitelist": rule.region_whitelist,
+            "region_blacklist": rule.region_blacklist,
         }
 
     def serialize_route_group(
@@ -2152,6 +2346,10 @@ class ConfigStore:
             "path_prefix": group.path_prefix,
             "region_matching_enabled": group.region_matching_enabled,
             "notes": group.notes,
+            "access_ip_whitelist": group.access_ip_whitelist,
+            "ip_blacklist": group.ip_blacklist,
+            "region_whitelist": group.region_whitelist,
+            "region_blacklist": group.region_blacklist,
             "rule_count": len(group_rules),
             "enabled_rule_count": sum(1 for rule in group_rules if rule["enabled"]),
             "default_rule_count": sum(1 for rule in group_rules if rule["is_default"]),
@@ -2215,6 +2413,12 @@ class ConfigStore:
             enabled=bool(row["enabled"]),
             priority=row["priority"],
             notes=row["notes"],
+            path_rewrite_pattern=row["path_rewrite_pattern"] if "path_rewrite_pattern" in row.keys() else "",
+            path_rewrite_replacement=row["path_rewrite_replacement"] if "path_rewrite_replacement" in row.keys() else "",
+            access_ip_whitelist=row["access_ip_whitelist"] if "access_ip_whitelist" in row.keys() else "",
+            ip_blacklist=row["ip_blacklist"] if "ip_blacklist" in row.keys() else "",
+            region_whitelist=row["region_whitelist"] if "region_whitelist" in row.keys() else "",
+            region_blacklist=row["region_blacklist"] if "region_blacklist" in row.keys() else "",
         )
 
     def _payload_to_rule(self, payload: Dict[str, Any]) -> ProxyRule:
@@ -2247,6 +2451,12 @@ class ConfigStore:
             priority=int(payload.get("priority", 0) or 0),
             notes=str(payload.get("notes", "")).strip(),
             source=str(payload.get("source", "manual")).strip() or "manual",
+            path_rewrite_pattern=str(payload.get("path_rewrite_pattern", "") or "").strip(),
+            path_rewrite_replacement=str(payload.get("path_rewrite_replacement", "") or "").strip(),
+            access_ip_whitelist=normalize_region_filter_value(payload.get("access_ip_whitelist", "")),
+            ip_blacklist=normalize_region_filter_value(payload.get("ip_blacklist", "")),
+            region_whitelist=normalize_region_filter_value(payload.get("region_whitelist", "")),
+            region_blacklist=normalize_region_filter_value(payload.get("region_blacklist", "")),
         )
 
     def _remote_item_to_rule(self, item: Dict[str, Any], remote: Dict[str, Any]) -> ProxyRule:

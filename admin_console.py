@@ -62,6 +62,7 @@ class AdminConsole:
         app.router.add_post("/_admin/api/banned-ips", self.add_banned_ip)
         app.router.add_delete("/_admin/api/banned-ips/{ip:.+}", self.remove_banned_ip)
         app.router.add_post("/_admin/api/banned-ips/clear", self.clear_banned_ips)
+        app.router.add_post("/_admin/api/banned-ips/{ip:.+}/extend", self.extend_banned_ip)
         app.router.add_get("/_admin/api/rules", self.list_rules)
         app.router.add_post("/_admin/api/rules", self.create_rule)
         app.router.add_get("/_admin/api/rules/{rule_id:\\d+}", self.get_rule)
@@ -325,6 +326,22 @@ class AdminConsole:
             if self.ban_manager_callback:
                 await self.ban_manager_callback("unban", {"ip": ip})
             return {"removed": True, "ip": ip}
+        return await self._run_protected(request, operation)
+
+    async def extend_banned_ip(self, request: web.Request) -> web.Response:
+        ip = request.match_info["ip"]
+        payload = await self._read_json(request)
+        async def operation():
+            duration_hours = float(payload.get("duration_hours", 0) or 0)
+            if duration_hours <= 0:
+                raise ValueError("延长时长必须大于0")
+            result = self.config_store.extend_banned_ip(ip, duration_hours)
+            if self.ban_manager_callback:
+                await self.ban_manager_callback("extend", {
+                    "ip": ip,
+                    "duration_seconds": duration_hours * 3600.0,
+                })
+            return result
         return await self._run_protected(request, operation)
 
     async def clear_banned_ips(self, request: web.Request) -> web.Response:

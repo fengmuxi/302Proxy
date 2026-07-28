@@ -9,9 +9,15 @@ const state = {
   geoSources: [],
   routeLogs: [],
   routeLogSettings: null,
+  bannedIps: [],
   activeModule: "overview",
   logCurrentPage: 1,
   logTotalPages: 1,
+  logPageSize: 50,
+  banCurrentPage: 1,
+  banTotalPages: 1,
+  banPageSize: 20,
+  routeFilter: { keyword: "", status: "", isDefault: "" },
 };
 
 function openModal(modalId) {
@@ -227,6 +233,21 @@ function formatDateTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatRemainTime(seconds) {
+  const sec = Math.max(0, Math.floor(seconds));
+  if (sec === 0) return "已到期";
+  const days = Math.floor(sec / 86400);
+  const hours = Math.floor((sec % 86400) / 3600);
+  const minutes = Math.floor((sec % 3600) / 60);
+  const secs = sec % 60;
+  const parts = [];
+  if (days > 0) parts.push(`${days}天`);
+  if (hours > 0) parts.push(`${hours}小时`);
+  if (minutes > 0) parts.push(`${minutes}分`);
+  if (secs > 0 && days === 0 && hours === 0) parts.push(`${secs}秒`);
+  return parts.join("") || "不足1秒";
+}
+
 function formatBytes(value) {
   const bytes = Number(value || 0);
   if (!bytes) return "0 B";
@@ -401,6 +422,50 @@ function renderSummary(summary) {
   setText("metric-region-groups", summary.region_enabled_group_count ?? 0);
 }
 
+function animateCounter(el, target, duration = 600) {
+  if (!el) return;
+  const finalValue = Number.isFinite(target) ? Math.max(0, Math.floor(target)) : 0;
+  const startTime = performance.now();
+  const startValue = 0;
+  const range = finalValue - startValue;
+  if (range === 0) {
+    el.textContent = String(finalValue);
+    return;
+  }
+  function tick(now) {
+    const elapsed = now - startTime;
+    const progress = Math.min(1, elapsed / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const current = Math.round(startValue + range * eased);
+    el.textContent = String(current);
+    if (progress < 1) {
+      window.requestAnimationFrame(tick);
+    } else {
+      el.textContent = String(finalValue);
+    }
+  }
+  window.requestAnimationFrame(tick);
+}
+
+function renderDashboardMetrics(animate = true) {
+  const metrics = {
+    routes: state.routeGroups.length,
+    rules: state.rules.length,
+    bans: state.bannedIps.length,
+    sources: state.geoSources.length,
+  };
+  document.querySelectorAll("[data-metric]").forEach((el) => {
+    const key = el.dataset.metric;
+    if (Object.prototype.hasOwnProperty.call(metrics, key)) {
+      if (animate) {
+        animateCounter(el, metrics[key]);
+      } else {
+        el.textContent = String(metrics[key]);
+      }
+    }
+  });
+}
+
 function getRulesForGroup(pathPrefix, requestHost = "") {
   const normalizedHost = normalizeRequestHost(requestHost);
   return state.rules
@@ -432,12 +497,64 @@ function renderRouteGroupOptions() {
   });
 }
 
+function matchRouteFilter(keyword, status, isDefault, group, rules) {
+  const kw = String(keyword || "").trim().toLowerCase();
+  if (kw) {
+    const groupHost = normalizeRequestHost(group.request_host);
+    const hostLabel = formatRequestHostLabel(groupHost).toLowerCase();
+    const groupNotes = String(group.notes || "").toLowerCase();
+    const prefixMatch = String(group.path_prefix || "").toLowerCase().includes(kw);
+    const hostMatch = hostLabel.includes(kw);
+    const groupNotesMatch = groupNotes.includes(kw);
+    const ruleMatch = rules.some((rule) => {
+      return [
+        rule.name, rule.target_url, rule.ip_whitelist, rule.region_filters, rule.notes,
+        rule.request_host,
+      ].some((field) => String(field || "").toLowerCase().includes(kw));
+    });
+    if (!(prefixMatch || hostMatch || groupNotesMatch || ruleMatch)) {
+      return false;
+    }
+  }
+
+  if (status === "enabled" && !rules.some((r) => r.enabled)) return false;
+  if (status === "disabled" && !rules.some((r) => !r.enabled)) return false;
+
+  if (isDefault === "yes" && !rules.some((r) => r.is_default)) return false;
+  if (isDefault === "no" && !rules.some((r) => !r.is_default)) return false;
+
+  return true;
+}
+
 function renderRouteGroups(routeGroups) {
   state.routeGroups = routeGroups;
   renderRouteGroupOptions();
 
   const container = document.getElementById("route-group-cards");
   container.innerHTML = "";
+
+  const { keyword, status, isDefault } = state.routeFilter;
+  const filteredGroups = routeGroups.map((group) => {
+    const normalizedGroupHost = normalizeRequestHost(group.request_host);
+    const groupRules = getRulesForGroup(group.path_prefix, normalizedGroupHost);
+    return { group, groupRules };
+  }).filter(({ group, groupRules }) => matchRouteFilter(keyword, status, isDefault, group, groupRules));
+
+  const summaryEl = document.getElementById("route-filter-summary");
+  if (summaryEl) {
+    const totalGroups = routeGroups.length;
+    const totalRules = routeGroups.reduce((acc, g) => {
+      const normalizedGroupHost = normalizeRequestHost(g.request_host);
+      return acc + getRulesForGroup(g.path_prefix, normalizedGroupHost).length;
+    }, 0);
+    const filteredRules = filteredGroups.reduce((acc, item) => acc + item.groupRules.length, 0);
+    const hasFilter = Boolean(keyword || status || isDefault);
+    if (hasFilter) {
+      summaryEl.textContent = `共 ${totalGroups} 个前缀 / ${totalRules} 条规则，当前匹配 ${filteredGroups.length} 个前缀 / ${filteredRules} 条规则`;
+    } else {
+      summaryEl.textContent = `共 ${totalGroups} 个前缀 / ${totalRules} 条规则`;
+    }
+  }
 
   if (!routeGroups.length) {
     container.innerHTML = `
@@ -448,10 +565,18 @@ function renderRouteGroups(routeGroups) {
     return;
   }
 
-  routeGroups.forEach((group) => {
+  if (!filteredGroups.length) {
+    container.innerHTML = `
+      <div class="empty-group-state">
+        <p>没有匹配当前查询条件的前缀或规则。</p>
+      </div>
+    `;
+    return;
+  }
+
+  filteredGroups.forEach(({ group, groupRules }) => {
     const normalizedGroupHost = normalizeRequestHost(group.request_host);
     const hostLabel = formatRequestHostLabel(normalizedGroupHost);
-    const groupRules = getRulesForGroup(group.path_prefix, normalizedGroupHost);
     const statChips = `
       <div class="prefix-card-stats">
         <span class="stat-chip">规则 ${group.rule_count ?? groupRules.length}</span>
@@ -474,6 +599,7 @@ function renderRouteGroups(routeGroups) {
                 <th>优先级</th>
                 <th>超时(秒)</th>
                 <th>备注</th>
+                <th>正则匹配</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -489,6 +615,15 @@ function renderRouteGroups(routeGroups) {
                   const ipWhitelist = rule.ip_whitelist || "";
                   const regionFilters = rule.region_filters || "";
                   const notesText = rule.notes || "";
+                  const rewritePattern = rule.path_rewrite_pattern || "";
+                  const rewriteReplacement = rule.path_rewrite_replacement || "";
+                  const hasRewrite = Boolean(rewritePattern);
+                  const rewriteTitle = hasRewrite
+                    ? `模式: ${rewritePattern}\n替换: ${rewriteReplacement || "(空)"}`
+                    : "";
+                  const rewriteCell = hasRewrite
+                    ? `<div class="rewrite-cell"><code class="rewrite-pattern" title="${escapeHtml(rewritePattern)}">${escapeHtml(rewritePattern)}</code><code class="rewrite-replacement" title="${escapeHtml(rewriteReplacement)}">→ ${escapeHtml(rewriteReplacement || "(空)")}</code></div>`
+                    : `<span class="text-muted">-</span>`;
                   return `
                     <tr>
                       <td>
@@ -502,6 +637,7 @@ function renderRouteGroups(routeGroups) {
                       <td>${rule.priority ?? 0}</td>
                       <td>${rule.timeout ?? 30}</td>
                       <td class="cell-notes" title="${escapeHtml(notesText)}">${notesText ? escapeHtml(notesText) : "-"}</td>
+                      <td class="cell-rewrite" title="${escapeHtml(rewriteTitle)}">${rewriteCell}</td>
                       <td>
                         <div class="rule-status-tags">
                           <button class="toggle-status-btn ${rule.enabled ? "on" : "off"}" data-action="toggle-rule-from-group" data-id="${rule.id}" type="button" title="${rule.enabled ? "点击禁用" : "点击启用"}">
@@ -541,12 +677,28 @@ function renderRouteGroups(routeGroups) {
 
     const card = document.createElement("article");
     card.className = "prefix-card";
+    // 路由前缀级别的访问控制徽标
+    const groupAccessChips = [];
+    if (group.access_ip_whitelist) {
+      groupAccessChips.push(`<span class="access-chip access-chip-ip-whitelist" title="访问控制 IP白名单: ${escapeHtml(group.access_ip_whitelist)}">IP白: ${escapeHtml(group.access_ip_whitelist)}</span>`);
+    }
+    if (group.ip_blacklist) {
+      groupAccessChips.push(`<span class="access-chip access-chip-ip-blacklist" title="访问控制 IP黑名单: ${escapeHtml(group.ip_blacklist)}">IP黑: ${escapeHtml(group.ip_blacklist)}</span>`);
+    }
+    if (group.region_whitelist) {
+      groupAccessChips.push(`<span class="access-chip access-chip-region-whitelist" title="访问控制 地区白名单: ${escapeHtml(group.region_whitelist)}">地区白: ${escapeHtml(group.region_whitelist)}</span>`);
+    }
+    if (group.region_blacklist) {
+      groupAccessChips.push(`<span class="access-chip access-chip-region-blacklist" title="访问控制 地区黑名单: ${escapeHtml(group.region_blacklist)}">地区黑: ${escapeHtml(group.region_blacklist)}</span>`);
+    }
+    const groupAccessHtml = groupAccessChips.length ? `<p class="hint">${groupAccessChips.join(" ")}</p>` : "";
     card.innerHTML = `
       <div class="prefix-card-head">
         <div class="prefix-card-title">
           <h3>${escapeHtml(group.path_prefix)}</h3>
           <p class="hint">域名: <code>${escapeHtml(hostLabel)}</code></p>
           <p class="hint">${escapeHtml(group.notes || "未填写备注")}</p>
+          ${groupAccessHtml}
           ${statChips}
         </div>
         <div class="table-actions">
@@ -583,6 +735,10 @@ function resetRouteGroupForm() {
   setValue("route_group_old_request_host", "");
   setValue("route_group_path_prefix", "");
   setValue("route_group_request_host", "");
+  setValue("route_group_access_ip_whitelist", "");
+  setValue("route_group_ip_blacklist", "");
+  setValue("route_group_region_whitelist", "");
+  setValue("route_group_region_blacklist", "");
   setValue("route_group_notes", "");
   document.getElementById("route-group-form-title").textContent = "新增路径前缀";
 }
@@ -592,6 +748,10 @@ function fillRouteGroupForm(group) {
   setValue("route_group_old_request_host", normalizeRequestHost(group.request_host));
   setValue("route_group_path_prefix", group.path_prefix);
   setValue("route_group_request_host", normalizeRequestHost(group.request_host));
+  setValue("route_group_access_ip_whitelist", group.access_ip_whitelist || "");
+  setValue("route_group_ip_blacklist", group.ip_blacklist || "");
+  setValue("route_group_region_whitelist", group.region_whitelist || "");
+  setValue("route_group_region_blacklist", group.region_blacklist || "");
   setValue("route_group_notes", group.notes || "");
   const hostLabel = formatRequestHostLabel(normalizeRequestHost(group.request_host));
   document.getElementById("route-group-form-title").textContent = `编辑路径前缀 ${group.path_prefix} @ ${hostLabel}`;
@@ -660,6 +820,10 @@ function collectRouteGroupForm() {
     old_request_host: normalizeRequestHost(getValue("route_group_old_request_host")),
     path_prefix: getValue("route_group_path_prefix"),
     request_host: normalizeRequestHost(getValue("route_group_request_host")),
+    access_ip_whitelist: getValue("route_group_access_ip_whitelist"),
+    ip_blacklist: getValue("route_group_ip_blacklist"),
+    region_whitelist: getValue("route_group_region_whitelist"),
+    region_blacklist: getValue("route_group_region_blacklist"),
     notes: getValue("route_group_notes"),
   };
 }
@@ -746,9 +910,15 @@ function renderGeoSources() {
       <td>${escapeHtml(source.url)}</td>
       <td>${source.weight}</td>
       <td>${escapeHtml(source.method)} / ${escapeHtml(source.request_location)}</td>
-      <td>${source.enabled ? "启用" : "停用"}</td>
+      <td>
+        <button class="toggle-status-btn ${source.enabled ? "on" : "off"}" data-action="toggle-geo-source" data-index="${index}" type="button" title="${source.enabled ? "点击禁用" : "点击启用"}">
+          <span class="toggle-status-dot"></span>
+          <span class="toggle-status-text">${source.enabled ? "启用" : "停用"}</span>
+        </button>
+      </td>
       <td>
         <div class="table-actions">
+          <button class="table-btn" data-action="test-geo-source" data-index="${index}" type="button">测试</button>
           <button class="table-btn" data-action="edit-geo-source" data-index="${index}" type="button">编辑</button>
           <button class="table-btn delete" data-action="delete-geo-source" data-index="${index}" type="button">删除</button>
         </div>
@@ -1112,6 +1282,10 @@ function renderRouteLogs(payload) {
     const durationText = escapeHtml(`${log.operation_duration_ms || 0} ms`);
     const createdAt = escapeHtml(formatDateTime(log.created_at));
     const banIp = escapeHtml(log.client_ip || log.original_client_ip || "-");
+    const ipBanned = banIp !== "-" && state.bannedIps.some((b) => b.ip === banIp);
+    const banButtonHtml = ipBanned
+      ? `<button class="table-btn unban-btn" data-action="unban-ip-from-log" data-ip="${banIp}" type="button" title="解禁IP: ${banIp}">解禁IP</button>`
+      : `<button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>`;
 
     const card = document.createElement("article");
     card.className = "route-log-item";
@@ -1127,7 +1301,7 @@ function renderRouteLogs(payload) {
               <span class="route-log-duration">${durationText}</span>
             </div>
             <div class="route-log-item-actions">
-              <button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>
+              ${banButtonHtml}
               <button class="table-btn delete" data-action="delete-route-log" data-id="${log.id}" type="button">删除</button>
             </div>
           </div>
@@ -1188,7 +1362,7 @@ function renderRouteLogs(payload) {
                 <div class="route-log-field-value">
                   <strong class="route-log-target-url" title="${targetUrl}">${targetUrl}</strong>
                   <span class="hint">上游状态: ${upstreamStatus}</span>
-                  <span class="cache-status-badge ${cacheStatusInfo.cls}">${cacheStatusInfo.text}</span>
+                  <span class="cache-status-badge ${cacheStatusInfo.cls}">缓存命中：${cacheStatusInfo.text}</span>
                   <span class="hint">结果: ${resultStatus}</span>
                 </div>
               </div>
@@ -1211,25 +1385,28 @@ function renderRouteLogs(payload) {
   renderPagination(state.logCurrentPage, state.logTotalPages);
 }
 
-function renderPagination(currentPage, totalPages) {
-  const container = document.getElementById("log-pagination");
+function renderPagination(currentPage, totalPages, containerId, onPageChange) {
+  const _containerId = containerId || "log-pagination";
+  const _onPageChange = onPageChange || goToPage;
+  const container = document.getElementById(_containerId);
   if (!container) return;
   container.innerHTML = "";
   if (!container.offsetParent) return;
   container.classList.remove("is-hidden");
 
+  const effectiveTotal = Math.max(1, totalPages);
   const maxVisible = 7;
   let pages = [];
-  if (totalPages <= maxVisible + 2) {
-    for (let i = 1; i <= totalPages; i++) pages.push(i);
+  if (effectiveTotal <= maxVisible + 2) {
+    for (let i = 1; i <= effectiveTotal; i++) pages.push(i);
   } else {
     pages.push(1);
     let start = Math.max(2, currentPage - 2);
-    let end = Math.min(totalPages - 1, currentPage + 2);
+    let end = Math.min(effectiveTotal - 1, currentPage + 2);
     if (start > 2) pages.push("...");
     for (let i = start; i <= end; i++) pages.push(i);
-    if (end < totalPages - 1) pages.push("...");
-    pages.push(totalPages);
+    if (end < effectiveTotal - 1) pages.push("...");
+    pages.push(effectiveTotal);
   }
 
   const frag = document.createDocumentFragment();
@@ -1239,7 +1416,7 @@ function renderPagination(currentPage, totalPages) {
   prevBtn.className = `page-btn ${currentPage <= 1 ? "disabled" : ""}`;
   prevBtn.textContent = "‹ 上一页";
   prevBtn.disabled = currentPage <= 1;
-  prevBtn.addEventListener("click", () => goToPage(currentPage - 1, totalPages));
+  prevBtn.addEventListener("click", () => _onPageChange(currentPage - 1, effectiveTotal));
   frag.appendChild(prevBtn);
 
   pages.forEach((p) => {
@@ -1253,43 +1430,44 @@ function renderPagination(currentPage, totalPages) {
       btn.type = "button";
       btn.className = `page-btn ${p === currentPage ? "active" : ""}`;
       btn.textContent = p;
-      btn.addEventListener("click", () => goToPage(p, totalPages));
+      btn.addEventListener("click", () => _onPageChange(p, effectiveTotal));
       frag.appendChild(btn);
     }
   });
 
   const nextBtn = document.createElement("button");
   nextBtn.type = "button";
-  nextBtn.className = `page-btn ${currentPage >= totalPages ? "disabled" : ""}`;
+  nextBtn.className = `page-btn ${currentPage >= effectiveTotal ? "disabled" : ""}`;
   nextBtn.textContent = "下一页 ›";
-  nextBtn.disabled = currentPage >= totalPages;
-  nextBtn.addEventListener("click", () => goToPage(currentPage + 1, totalPages));
+  nextBtn.disabled = currentPage >= effectiveTotal;
+  nextBtn.addEventListener("click", () => _onPageChange(currentPage + 1, effectiveTotal));
   frag.appendChild(nextBtn);
 
+  const jumpInputId = `${_containerId}-jump-input`;
   const jumpWrap = document.createElement("div");
   jumpWrap.className = "page-jump";
   jumpWrap.innerHTML = `
     <span class="jump-label">跳至</span>
-    <input id="log-page-jump-input" type="number" min="1" max="${totalPages}" value="${currentPage}" />
-    <span class="jump-label">/ ${totalPages} 页</span>
+    <input id="${jumpInputId}" type="number" min="1" max="${effectiveTotal}" value="${currentPage}" />
+    <span class="jump-label">/ ${effectiveTotal} 页</span>
     <button type="button" class="page-btn jump-btn">跳转</button>
   `;
   frag.appendChild(jumpWrap);
 
   container.appendChild(frag);
 
-  container.querySelector("#log-page-jump-input")?.addEventListener("keydown", (e) => {
+  container.querySelector(`#${jumpInputId}`)?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
       const val = parseInt(e.target.value, 10);
-      if (val >= 1 && val <= totalPages) goToPage(val, totalPages);
+      if (val >= 1 && val <= effectiveTotal) _onPageChange(val, effectiveTotal);
     }
   });
 
   container.querySelector(".jump-btn")?.addEventListener("click", () => {
-    const input = container.querySelector("#log-page-jump-input");
+    const input = container.querySelector(`#${jumpInputId}`);
     const val = parseInt(input?.value, 10);
-    if (val >= 1 && val <= totalPages) goToPage(val, totalPages);
+    if (val >= 1 && val <= effectiveTotal) _onPageChange(val, effectiveTotal);
   });
 }
 
@@ -1308,7 +1486,7 @@ function collectRouteLogFilters() {
     result_status: getValue("log_result_status"),
     date_from: toIsoDateTime(getValue("log_date_from")),
     date_to: toIsoDateTime(getValue("log_date_to")),
-    limit: Number(getValue("log_limit") || 50),
+    limit: state.logPageSize,
     page: state.logCurrentPage,
   };
 }
@@ -1332,7 +1510,11 @@ async function loadRouteLogSettings() {
 async function loadRouteLogs() {
   const filters = collectRouteLogFilters();
   const query = buildRouteLogQuery(filters);
-  const payload = await apiFetch(`/_admin/api/logs${query ? `?${query}` : ""}`);
+  const [payload, bansData] = await Promise.all([
+    apiFetch(`/_admin/api/logs${query ? `?${query}` : ""}`),
+    apiFetch("/_admin/api/banned-ips").catch(() => ({ items: [] })),
+  ]);
+  state.bannedIps = bansData.items || [];
   renderRouteLogs(payload || { items: [], total: 0 });
 }
 
@@ -1414,10 +1596,22 @@ function renderRules(rules) {
     ].join("");
     const conditions = [];
     if (rule.ip_whitelist) {
-      conditions.push(`IP: ${escapeHtml(rule.ip_whitelist)}`);
+      conditions.push(`IP白(路由): ${escapeHtml(rule.ip_whitelist)}`);
     }
     if (rule.region_filters) {
-      conditions.push(`地区: ${escapeHtml(rule.region_filters)}`);
+      conditions.push(`地区条件: ${escapeHtml(rule.region_filters)}`);
+    }
+    if (rule.access_ip_whitelist) {
+      conditions.push(`IP白(访问): ${escapeHtml(rule.access_ip_whitelist)}`);
+    }
+    if (rule.ip_blacklist) {
+      conditions.push(`IP黑: ${escapeHtml(rule.ip_blacklist)}`);
+    }
+    if (rule.region_whitelist) {
+      conditions.push(`地区白: ${escapeHtml(rule.region_whitelist)}`);
+    }
+    if (rule.region_blacklist) {
+      conditions.push(`地区黑: ${escapeHtml(rule.region_blacklist)}`);
     }
     const conditionsText = conditions.length ? conditions.join("\n") : "默认";
 
@@ -1457,6 +1651,10 @@ function resetRuleForm() {
   setValue("rule_target_url", "");
   setValue("rule_ip_whitelist", "");
   setValue("rule_region_filters", "");
+  setValue("rule_access_ip_whitelist", "");
+  setValue("rule_ip_blacklist", "");
+  setValue("rule_region_whitelist", "");
+  setValue("rule_region_blacklist", "");
   setValue("rule_priority", "0");
   setValue("rule_timeout", "30");
   setValue("rule_max_redirects", "10");
@@ -1480,6 +1678,10 @@ function fillRuleForm(rule) {
   setValue("rule_target_url", rule.target_url || "");
   setValue("rule_ip_whitelist", rule.ip_whitelist || "");
   setValue("rule_region_filters", rule.region_filters || "");
+  setValue("rule_access_ip_whitelist", rule.access_ip_whitelist || "");
+  setValue("rule_ip_blacklist", rule.ip_blacklist || "");
+  setValue("rule_region_whitelist", rule.region_whitelist || "");
+  setValue("rule_region_blacklist", rule.region_blacklist || "");
   setValue("rule_priority", rule.priority ?? 0);
   setValue("rule_timeout", rule.timeout ?? 30);
   setValue("rule_max_redirects", rule.max_redirects ?? 10);
@@ -1504,6 +1706,10 @@ function collectRuleForm() {
     target_url: getValue("rule_target_url"),
     ip_whitelist: getValue("rule_ip_whitelist"),
     region_filters: getValue("rule_region_filters"),
+    access_ip_whitelist: getValue("rule_access_ip_whitelist"),
+    ip_blacklist: getValue("rule_ip_blacklist"),
+    region_whitelist: getValue("rule_region_whitelist"),
+    region_blacklist: getValue("rule_region_blacklist"),
     priority: Number(getValue("rule_priority") || 0),
     timeout: Number(getValue("rule_timeout") || 30),
     max_redirects: Number(getValue("rule_max_redirects") || 10),
@@ -1604,11 +1810,16 @@ async function updateGroupRegionSwitch(pathPrefix, requestHost, enabled) {
 }
 
 async function loadDashboard() {
-  const data = await apiFetch("/_admin/api/bootstrap");
+  const [data, bansData] = await Promise.all([
+    apiFetch("/_admin/api/bootstrap"),
+    apiFetch("/_admin/api/banned-ips").catch(() => ({ items: [] })),
+  ]);
+  state.bannedIps = bansData.items || [];
   renderSummary(data.summary || {});
   renderRules(data.rules || []);
   renderRouteGroups(data.route_groups || []);
   fillGeoConfig(data.geoip || {});
+  renderDashboardMetrics();
 }
 
 function buildGeoSettingsPayload() {
@@ -1655,28 +1866,61 @@ async function persistGeoSettings(successMessage = "IP 定位配置已保存。"
   showToast(successMessage);
 }
 
+function activateModule(target) {
+  if (!target) return;
+  setActiveModule(target);
+  if (target === "logs") {
+    refreshRouteLogModule().catch((error) => {
+      showToast(error.message, true);
+    });
+    if (getChecked("log_auto_refresh_enabled")) {
+      startAutoRefresh();
+    }
+  } else {
+    stopAutoRefresh();
+  }
+  // 切换模块时同步停止封禁列表自动刷新（仅当目标不是封禁管理时）
+  if (target !== "ip-ban-manager") {
+    stopBanAutoRefresh();
+  }
+  if (target === "ip-cache-manager") {
+    loadIpCacheSettings();
+    loadIpCacheStats();
+  }
+  if (target === "ip-ban-manager") {
+    loadBannedIpList();
+    if (getChecked("ban_auto_refresh_enabled")) {
+      startBanAutoRefresh();
+    }
+  }
+  if (target === "overview") {
+    renderDashboardMetrics(false);
+  }
+}
+
 document.querySelectorAll(".module-btn").forEach((button) => {
   button.addEventListener("click", () => {
-    const target = button.dataset.moduleTarget;
-    setActiveModule(target);
-    if (target === "logs") {
-      refreshRouteLogModule().catch((error) => {
-        showToast(error.message, true);
-      });
-      if (getChecked("log_auto_refresh_enabled")) {
-        startAutoRefresh();
-      }
-    } else {
-      stopAutoRefresh();
-    }
-    if (target === "ip-cache-manager") {
-      loadIpCacheSettings();
-      loadIpCacheStats();
-    }
-    if (target === "ip-ban-manager") {
-      loadBannedIpList();
-    }
+    activateModule(button.dataset.moduleTarget);
   });
+});
+
+document.querySelectorAll(".dash-module-card").forEach((card) => {
+  card.addEventListener("click", () => {
+    activateModule(card.dataset.moduleTarget);
+  });
+});
+
+const statCardModuleMap = {
+  "dash-stat-routes": "route-config",
+  "dash-stat-rules": "route-config",
+  "dash-stat-bans": "ip-ban-manager",
+  "dash-stat-sources": "geoip-online",
+};
+Object.entries(statCardModuleMap).forEach(([id, target]) => {
+  const card = document.getElementById(id);
+  if (card) {
+    card.addEventListener("click", () => activateModule(target));
+  }
 });
 
 document.getElementById("geo-online-cache-clear-btn").addEventListener("click", async () => {
@@ -1951,6 +2195,20 @@ document.getElementById("route-logs-list-body").addEventListener("click", async 
     } catch (error) {
       showToast(error.message, true);
     }
+  } else if (action === "unban-ip-from-log") {
+    const ip = button.dataset.ip;
+    if (!ip || ip === "-") {
+      showToast("该日志没有可解禁的IP地址", true);
+      return;
+    }
+    if (!window.confirm(`确认解禁 IP ${ip} 吗？`)) return;
+    try {
+      await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      showToast(`IP ${ip} 已解禁`);
+      await loadRouteLogs();
+    } catch (error) {
+      showToast(error.message, true);
+    }
   }
 });
 
@@ -1980,6 +2238,7 @@ document.getElementById("geo-source-save-btn").addEventListener("click", async (
 
   try {
     await persistGeoSettings(isEdit ? "在线源已更新。" : "在线源已新增。");
+    closeModal("geo-source-modal");
     resetGeoSourceForm();
   } catch (error) {
     state.geoSources = previousSources;
@@ -1991,14 +2250,36 @@ document.getElementById("geo-source-save-btn").addEventListener("click", async (
   }
 });
 
-document.getElementById("geo-source-reset-btn").addEventListener("click", () => {
-  resetGeoSourceForm();
+function fillGeoSourceTestSelect(selectedIndex) {
+  const select = document.getElementById("geo_source_test_select");
+  if (!select) return;
+  select.innerHTML = '<option value="">请选择在线源</option>';
+  state.geoSources.forEach((source, index) => {
+    const opt = document.createElement("option");
+    opt.value = String(index);
+    opt.textContent = source.name || `source-${index + 1}`;
+    select.appendChild(opt);
+  });
+  if (selectedIndex !== undefined && selectedIndex !== null) {
+    select.value = String(selectedIndex);
+  }
+}
+
+document.getElementById("geo-source-test-btn").addEventListener("click", () => {
+  resetGeoSourceTestResult();
+  setValue("geo_source_test_ip", "");
+  fillGeoSourceTestSelect();
+  openModal("geo-source-test-modal");
 });
 
-document.getElementById("geo-source-test-btn").addEventListener("click", async () => {
+document.getElementById("geo-source-test-select")?.addEventListener("change", () => {
+  resetGeoSourceTestResult();
+});
+
+document.getElementById("geo-source-test-run-btn").addEventListener("click", async () => {
   const ip = getValue("geo_source_test_ip").trim();
-  const source = collectGeoSourceForm();
-  const button = document.getElementById("geo-source-test-btn");
+  const selectedIndex = getValue("geo_source_test_select");
+  const button = document.getElementById("geo-source-test-run-btn");
   const originalText = button.textContent;
 
   if (!ip) {
@@ -2006,8 +2287,13 @@ document.getElementById("geo-source-test-btn").addEventListener("click", async (
     return;
   }
 
-  if (!source.url) {
-    showToast("请先填写当前在线源的接口地址", true);
+  let source = null;
+  if (selectedIndex !== "") {
+    source = state.geoSources[Number(selectedIndex)] || null;
+  }
+
+  if (!source || !source.url) {
+    showToast("请先选择一个有效的在线源", true);
     return;
   }
 
@@ -2091,9 +2377,15 @@ document.getElementById("geo-offline-rollback-btn").addEventListener("click", as
   }
 });
 
-document.getElementById("geo-offline-test-btn").addEventListener("click", async () => {
+document.getElementById("geo-offline-test-btn").addEventListener("click", () => {
+  resetOfflineGeoTestResult();
+  setValue("geo_offline_test_ip", "");
+  openModal("geo-offline-test-modal");
+});
+
+document.getElementById("geo-offline-test-run-btn").addEventListener("click", async () => {
   const ip = getValue("geo_offline_test_ip").trim();
-  const button = document.getElementById("geo-offline-test-btn");
+  const button = document.getElementById("geo-offline-test-run-btn");
   const originalText = button.textContent;
 
   if (!ip) {
@@ -2143,9 +2435,29 @@ document.getElementById("geo-sources-table-body").addEventListener("click", asyn
 
   if (action === "edit-geo-source") {
     fillGeoSourceForm(source, index);
-    setActiveModule("geoip-online");
-    scrollToElement("geoip-online-form");
-    focusField("geo_source_name");
+    openModal("geo-source-modal");
+    return;
+  }
+
+  if (action === "toggle-geo-source") {
+    const previousSources = state.geoSources.map((item) => ({ ...item }));
+    source.enabled = !source.enabled;
+    renderGeoSources();
+    try {
+      await persistGeoSettings(source.enabled ? "在线源已启用。" : "在线源已禁用。");
+    } catch (error) {
+      state.geoSources = previousSources;
+      renderGeoSources();
+      showToast(error.message, true);
+    }
+    return;
+  }
+
+  if (action === "test-geo-source") {
+    resetGeoSourceTestResult();
+    setValue("geo_source_test_ip", "");
+    fillGeoSourceTestSelect(index);
+    openModal("geo-source-test-modal");
     return;
   }
 
@@ -2227,6 +2539,7 @@ document.getElementById("auth-login-form").addEventListener("submit", async (eve
 });
 
 els.authLogoutBtn?.addEventListener("click", async () => {
+  if (!window.confirm("确认退出登录吗？")) return;
   try {
     await performLogout();
     setAuthError("已退出登录。");
@@ -2237,26 +2550,81 @@ els.authLogoutBtn?.addEventListener("click", async () => {
 });
 
 async function banIpFromLog(ip) {
-  const reason = prompt(`请输入封禁 IP ${ip} 的原因（可选）:`, "从日志手动封禁");
-  if (reason === null) return;
-  await apiFetch("/_admin/api/banned-ips", {
-    method: "POST",
-    body: JSON.stringify({
-      ip: ip,
-      reason: reason || "从日志手动封禁",
-      banned_by: "admin",
-      permanent: true,
-    }),
+  // 从日志点击封禁IP：打开封禁弹窗，预填IP和原因
+  openBanModal({
+    ip: ip,
+    reason: "从日志手动封禁",
+    mode: "from-log",
   });
-  showToast(`IP ${ip} 已封禁`);
-  loadBannedIpList();
 }
 
 async function loadBannedIpList() {
   try {
     const data = await apiFetch("/_admin/api/banned-ips");
-    renderBannedIpList(data.items || []);
+    state.bannedIps = data.items || [];
+    renderBannedIpListPage();
   } catch (error) {}
+}
+
+function renderBannedIpListPage() {
+  const allItems = state.bannedIps;
+  const totalCount = allItems.length;
+  const pageSize = state.banPageSize;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  if (state.banCurrentPage > totalPages) state.banCurrentPage = totalPages;
+  const currentPage = state.banCurrentPage;
+  const startIdx = (currentPage - 1) * pageSize;
+  const pageItems = allItems.slice(startIdx, startIdx + pageSize);
+
+  setText("ban-total-count", `共 ${totalCount} 条`);
+  renderBannedIpList(pageItems);
+  renderPagination(currentPage, totalPages, "ban-pagination", goToBanPage);
+}
+
+function goToBanPage(page, totalPages) {
+  state.banCurrentPage = Math.max(1, Math.min(totalPages, page));
+  renderBannedIpListPage();
+}
+
+let _banAutoRefreshTimer = null;
+const BAN_AUTO_REFRESH_STORAGE_KEY = "ban_auto_refresh";
+
+function getBanAutoRefreshConfig() {
+  try {
+    const raw = localStorage.getItem(BAN_AUTO_REFRESH_STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return { enabled: false, interval: 5 };
+}
+
+function saveBanAutoRefreshConfig(cfg) {
+  localStorage.setItem(BAN_AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg));
+}
+
+function stopBanAutoRefresh() {
+  if (_banAutoRefreshTimer !== null) {
+    clearInterval(_banAutoRefreshTimer);
+    _banAutoRefreshTimer = null;
+  }
+}
+
+function startBanAutoRefresh() {
+  stopBanAutoRefresh();
+  const enabled = getChecked("ban_auto_refresh_enabled");
+  if (!enabled) return;
+  const interval = Math.max(1, parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5);
+  saveBanAutoRefreshConfig({ enabled: true, interval });
+  _banAutoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "ip-ban-manager") {
+      stopBanAutoRefresh();
+      return;
+    }
+    loadBannedIpList().catch((error) => {
+      showToast(error.message, true);
+      stopBanAutoRefresh();
+      setChecked("ban_auto_refresh_enabled", false);
+    });
+  }, interval * 1000);
 }
 
 function renderBannedIpList(items) {
@@ -2264,24 +2632,56 @@ function renderBannedIpList(items) {
   if (!tbody) return;
   tbody.innerHTML = "";
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="6">暂无封禁IP记录。</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">暂无封禁IP记录。</td></tr>';
     return;
   }
+  const nowSec = Math.floor(Date.now() / 1000);
   items.forEach((item) => {
     const tr = document.createElement("tr");
-    const expireText = item.permanent
-      ? "永久封禁"
-      : item.expire_at
-        ? new Date(item.expire_at * 1000).toLocaleString("zh-CN", { hour12: false })
-        : "-";
+
+    let expireText;
+    let statusBadge;
+    let isExpired = false;
+    if (item.permanent) {
+      expireText = "永久";
+      statusBadge = '<span class="ban-status ban-status-permanent">永久封禁</span>';
+    } else if (item.expire_at && item.expire_at > 0) {
+      isExpired = item.expire_at <= nowSec;
+      const expireDate = new Date(item.expire_at * 1000);
+      const remainSec = item.expire_at - nowSec;
+      const formatted = expireDate.toLocaleString("zh-CN", { hour12: false });
+      if (isExpired) {
+        expireText = `${formatted}（已过期）`;
+        statusBadge = '<span class="ban-status ban-status-expired">已过期</span>';
+      } else {
+        expireText = `${formatted}（剩 ${formatRemainTime(remainSec)}）`;
+        statusBadge = '<span class="ban-status ban-status-temporary">临时封禁</span>';
+      }
+    } else {
+      expireText = "-";
+      statusBadge = '<span class="ban-status ban-status-unknown">未知</span>';
+    }
+
+    // 路径前缀展示：空=全局，否则显示具体前缀
+    const pathPrefixText = item.path_prefix
+      ? escapeHtml(item.path_prefix)
+      : '<span class="ban-scope-global">全局</span>';
+
+    // 永久封禁不显示延长按钮（永久无到期概念，延长会转为临时）
+    const extendBtn = item.permanent
+      ? ''
+      : `<button class="table-btn" data-action="extend-ban-ip" data-ip="${escapeHtml(item.ip)}" data-expire="${item.expire_at || 0}" type="button">延长</button>`;
+
     tr.innerHTML = `
       <td><strong>${escapeHtml(item.ip)}</strong></td>
+      <td>${pathPrefixText}</td>
       <td>${escapeHtml(item.reason || "-")}</td>
       <td>${escapeHtml(item.banned_by || "admin")}</td>
       <td>${escapeHtml(formatDateTime(new Date(item.banned_at * 1000).toISOString()))}</td>
       <td>${expireText}</td>
       <td>
         <div class="table-actions">
+          ${extendBtn}
           <button class="table-btn delete" data-action="unban-ip" data-ip="${escapeHtml(item.ip)}" type="button">解封</button>
         </div>
       </td>
@@ -2290,19 +2690,34 @@ function renderBannedIpList(items) {
   });
 }
 
-document.getElementById("banned-ips-table-body")?.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-action]");
-  if (!button || button.dataset.action !== "unban-ip") return;
-  const ip = button.dataset.ip;
-  if (!window.confirm(`确认解封 IP ${ip} 吗？`)) return;
-  try {
-    await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
-    showToast(`IP ${ip} 已解封`);
-    loadBannedIpList();
-  } catch (error) {
-    showToast(error.message, true);
-  }
-});
+// ============ 封禁IP弹窗 ============
+function openBanModal(options = {}) {
+  // options: {ip, reason, mode, pathPrefix}
+  const mode = options.mode || "add";
+  const titleEl = document.getElementById("ban-ip-modal-title");
+  titleEl.textContent = mode === "from-log" ? "从日志封禁IP" : "封禁IP";
+  setValue("ban_ip_mode", mode);
+  setValue("ban_ip_address", options.ip || "");
+  setValue("ban_ip_path_prefix", options.pathPrefix || "");
+  setValue("ban_ip_reason", options.reason || "");
+  // 默认永久封禁
+  const permanentSelect = document.getElementById("ban_ip_permanent");
+  if (permanentSelect) permanentSelect.value = "1";
+  setValue("ban_ip_duration", "1");
+  toggleBanDurationLabel();
+  openModal("ban-ip-modal");
+}
+
+function toggleBanDurationLabel() {
+  const selectEl = document.getElementById("ban_ip_permanent");
+  const isPermanent = selectEl ? selectEl.value === "1" : true;
+  const durationLabel = document.getElementById("ban_ip_duration_label");
+  const durationInput = document.getElementById("ban_ip_duration");
+  if (durationLabel) durationLabel.style.display = isPermanent ? "none" : "";
+  if (durationInput) durationInput.required = !isPermanent;
+}
+
+document.getElementById("ban_ip_permanent")?.addEventListener("change", toggleBanDurationLabel);
 
 document.getElementById("ban-ip-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2311,9 +2726,17 @@ document.getElementById("ban-ip-form")?.addEventListener("submit", async (event)
     showToast("IP地址不能为空", true);
     return;
   }
+  const pathPrefix = getValue("ban_ip_path_prefix").trim();
   const reason = getValue("ban_ip_reason").trim();
-  const permanent = getChecked("ban_ip_permanent");
-  const duration = getNonNegativeIntValue("ban_ip_duration", 0);
+  const selectEl = document.getElementById("ban_ip_permanent");
+  const permanent = selectEl ? selectEl.value === "1" : true;
+  const durationHours = parseFloat(getValue("ban_ip_duration") || "0") || 0;
+  if (!permanent && durationHours <= 0) {
+    showToast("临时封禁时长必须大于0", true);
+    return;
+  }
+  // 小时转秒
+  const durationSeconds = permanent ? 0 : Math.max(60, Math.round(durationHours * 3600));
   try {
     await apiFetch("/_admin/api/banned-ips", {
       method: "POST",
@@ -2322,18 +2745,90 @@ document.getElementById("ban-ip-form")?.addEventListener("submit", async (event)
         reason: reason || "",
         banned_by: "admin",
         permanent: permanent,
-        duration_seconds: permanent ? 0 : duration,
+        duration_seconds: durationSeconds,
+        path_prefix: pathPrefix,
       }),
     });
-    setValue("ban_ip_address", "");
-    setValue("ban_ip_reason", "");
-    setChecked("ban_ip_permanent", true);
-    setValue("ban_ip_duration", "3600");
-    showToast(`IP ${ip} 已封禁`);
+    const scopeText = pathPrefix ? `路径前缀 ${pathPrefix}` : "全局";
+    showToast(`IP ${ip} 已封禁（${scopeText}）`);
+    closeModal("ban-ip-modal");
+    loadBannedIpList();
+    // 从日志触发的封禁，刷新日志列表以更新按钮状态
+    if (getValue("ban_ip_mode") === "from-log") {
+      loadRouteLogs();
+    }
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
+
+// ============ 延长封禁弹窗 ============
+function openBanExtendModal(ip, currentExpireAt) {
+  setValue("ban_extend_ip", ip);
+  setValue("ban_extend_ip_display", ip);
+  let displayText;
+  if (!currentExpireAt || currentExpireAt <= 0) {
+    displayText = "永久封禁";
+  } else {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expired = currentExpireAt <= nowSec;
+    const dateStr = new Date(currentExpireAt * 1000).toLocaleString("zh-CN", { hour12: false });
+    displayText = expired ? `${dateStr}（已过期）` : dateStr;
+  }
+  setValue("ban_extend_current_expire", displayText);
+  setValue("ban_extend_duration", "1");
+  openModal("ban-extend-modal");
+}
+
+document.getElementById("ban-extend-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const ip = getValue("ban_extend_ip").trim();
+  const durationHours = parseFloat(getValue("ban_extend_duration") || "0") || 0;
+  if (!ip) {
+    showToast("IP地址不能为空", true);
+    return;
+  }
+  if (durationHours <= 0) {
+    showToast("延长时长必须大于0", true);
+    return;
+  }
+  try {
+    await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}/extend`, {
+      method: "POST",
+      body: JSON.stringify({ duration_hours: durationHours }),
+    });
+    showToast(`IP ${ip} 封禁时间已延长 ${durationHours} 小时`);
+    closeModal("ban-extend-modal");
     loadBannedIpList();
   } catch (error) {
     showToast(error.message, true);
   }
+});
+
+// 封禁列表事件委托：解封 + 延长
+document.getElementById("banned-ips-table-body")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const action = button.dataset.action;
+  const ip = button.dataset.ip;
+  if (action === "unban-ip") {
+    if (!window.confirm(`确认解封 IP ${ip} 吗？`)) return;
+    try {
+      await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      showToast(`IP ${ip} 已解封`);
+      loadBannedIpList();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  } else if (action === "extend-ban-ip") {
+    const expireAt = parseFloat(button.dataset.expire || "0") || 0;
+    openBanExtendModal(ip, expireAt);
+  }
+});
+
+// 添加封禁按钮：打开空白封禁弹窗
+document.getElementById("add-ban-btn")?.addEventListener("click", () => {
+  openBanModal({ mode: "add" });
 });
 
 document.getElementById("clear-bans-btn")?.addEventListener("click", async () => {
@@ -2341,10 +2836,39 @@ document.getElementById("clear-bans-btn")?.addEventListener("click", async () =>
   try {
     await apiFetch("/_admin/api/banned-ips/clear", { method: "POST" });
     showToast("所有封禁记录已清空");
+    state.banCurrentPage = 1;
     loadBannedIpList();
   } catch (error) {
     showToast(error.message, true);
   }
+});
+
+// 封禁列表自动刷新开关
+document.getElementById("ban_auto_refresh_enabled")?.addEventListener("change", () => {
+  if (getChecked("ban_auto_refresh_enabled")) {
+    startBanAutoRefresh();
+  } else {
+    stopBanAutoRefresh();
+    saveBanAutoRefreshConfig({ enabled: false, interval: parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5 });
+  }
+});
+
+// 封禁列表自动刷新间隔变更
+document.getElementById("ban_auto_refresh_interval")?.addEventListener("change", () => {
+  const interval = parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5;
+  saveBanAutoRefreshConfig({ enabled: getChecked("ban_auto_refresh_enabled"), interval });
+  if (getChecked("ban_auto_refresh_enabled")) {
+    startBanAutoRefresh();
+  }
+});
+
+// 封禁列表每页大小变更
+document.getElementById("ban_page_size")?.addEventListener("change", () => {
+  const size = parseInt(getValue("ban_page_size") || "20", 10) || 20;
+  state.banPageSize = Math.max(1, size);
+  state.banCurrentPage = 1;
+  localStorage.setItem("ban_page_size", String(state.banPageSize));
+  renderBannedIpListPage();
 });
 
 document.getElementById("log_auto_refresh_enabled")?.addEventListener("change", () => {
@@ -2362,6 +2886,17 @@ document.getElementById("log_auto_refresh_interval")?.addEventListener("change",
   if (getChecked("log_auto_refresh_enabled")) {
     startAutoRefresh();
   }
+});
+
+// 日志每页大小变更
+document.getElementById("log_page_size")?.addEventListener("change", () => {
+  const size = parseInt(getValue("log_page_size") || "50", 10) || 50;
+  state.logPageSize = Math.max(1, size);
+  state.logCurrentPage = 1;
+  localStorage.setItem("log_page_size", String(state.logPageSize));
+  loadRouteLogs().catch((error) => {
+    showToast(error.message, true);
+  });
 });
 
 document.getElementById("clear-ip-cache-btn")?.addEventListener("click", async () => {
@@ -2387,11 +2922,33 @@ window.addEventListener("DOMContentLoaded", async () => {
   setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
   updateAutoRefreshStatusUI();
 
+  // 恢复封禁列表自动刷新配置
+  const savedBanRefresh = getBanAutoRefreshConfig();
+  setChecked("ban_auto_refresh_enabled", savedBanRefresh.enabled);
+  setValue("ban_auto_refresh_interval", String(savedBanRefresh.interval));
+
+  // 恢复日志每页大小配置
+  const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "50", 10) || 50;
+  state.logPageSize = savedLogPageSize;
+  setValue("log_page_size", String(savedLogPageSize));
+
+  // 恢复封禁每页大小配置
+  const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "20", 10) || 20;
+  state.banPageSize = savedBanPageSize;
+  setValue("ban_page_size", String(savedBanPageSize));
+
   // 打开新增前缀弹框
   document.getElementById("add-prefix-btn").addEventListener("click", () => {
     resetRouteGroupForm();
     document.getElementById("route-group-form-title").textContent = "新增路径前缀";
     openModal("prefix-modal");
+  });
+
+  // 打开新增在线源弹框
+  document.getElementById("add-geo-source-btn")?.addEventListener("click", () => {
+    resetGeoSourceForm();
+    document.getElementById("geo-source-form-title").textContent = "新增在线源";
+    openModal("geo-source-modal");
   });
 
   // 打开新增规则弹框
@@ -2400,6 +2957,37 @@ window.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("rule-form-title").textContent = "新增规则";
     openModal("rule-modal");
   });
+
+  // 路由配置查询表单：实时过滤
+  const filterKeyword = document.getElementById("route_filter_keyword");
+  const filterStatus = document.getElementById("route_filter_status");
+  const filterDefault = document.getElementById("route_filter_default");
+  const filterResetBtn = document.getElementById("route-filter-reset-btn");
+
+  const applyRouteFilter = () => {
+    state.routeFilter.keyword = filterKeyword ? filterKeyword.value : "";
+    state.routeFilter.status = filterStatus ? filterStatus.value : "";
+    state.routeFilter.isDefault = filterDefault ? filterDefault.value : "";
+    renderRouteGroups(state.routeGroups);
+  };
+
+  if (filterKeyword) {
+    filterKeyword.addEventListener("input", applyRouteFilter);
+  }
+  if (filterStatus) {
+    filterStatus.addEventListener("change", applyRouteFilter);
+  }
+  if (filterDefault) {
+    filterDefault.addEventListener("change", applyRouteFilter);
+  }
+  if (filterResetBtn) {
+    filterResetBtn.addEventListener("click", () => {
+      if (filterKeyword) filterKeyword.value = "";
+      if (filterStatus) filterStatus.value = "";
+      if (filterDefault) filterDefault.value = "";
+      applyRouteFilter();
+    });
+  }
 
   // 关闭弹框按钮
   document.querySelectorAll("[data-close-modal]").forEach(btn => {
