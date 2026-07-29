@@ -398,6 +398,46 @@ function setActiveModule(moduleName) {
   document.querySelectorAll(".module-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.modulePanel === moduleName);
   });
+  try {
+    const url = new URL(window.location.href);
+    url.hash = moduleName;
+    window.history.replaceState(null, "", url.toString());
+  } catch (_) {}
+}
+
+const THEME_STORAGE_KEY = "proxy_admin_theme";
+const THEME_VALUES = ["light", "dark", "cosmic", "ocean", "amber", "forest", "sakura"];
+const THEME_MIGRATIONS = { sunset: "amber" };
+
+function initTheme() {
+  let saved = localStorage.getItem(THEME_STORAGE_KEY);
+  if (THEME_MIGRATIONS[saved]) {
+    saved = THEME_MIGRATIONS[saved];
+  }
+  const theme = THEME_VALUES.includes(saved) ? saved : "light";
+  applyTheme(theme);
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem(THEME_STORAGE_KEY, theme);
+  document.querySelectorAll(".theme-dot").forEach((dot) => {
+    dot.classList.toggle("active", dot.dataset.themeVal === theme);
+  });
+}
+
+function initHashRouting() {
+  const VALID_MODULES = ["overview", "route-config", "logs", "geoip-online", "geoip-offline", "ip-ban-manager", "ip-cache-manager"];
+  const hash = window.location.hash.replace(/^#\/?/, "");
+  if (hash && VALID_MODULES.includes(hash)) {
+    activateModule(hash);
+  }
+  window.addEventListener("hashchange", () => {
+    const newHash = window.location.hash.replace(/^#\/?/, "");
+    if (newHash && VALID_MODULES.includes(newHash) && newHash !== state.activeModule) {
+      activateModule(newHash);
+    }
+  });
 }
 
 function focusField(id) {
@@ -1923,6 +1963,12 @@ Object.entries(statCardModuleMap).forEach(([id, target]) => {
   }
 });
 
+document.querySelectorAll(".theme-dot").forEach((dot) => {
+  dot.addEventListener("click", () => {
+    applyTheme(dot.dataset.themeVal);
+  });
+});
+
 document.getElementById("geo-online-cache-clear-btn").addEventListener("click", async () => {
   const button = document.getElementById("geo-online-cache-clear-btn");
   const originalText = button.textContent;
@@ -2911,6 +2957,7 @@ document.getElementById("clear-ip-cache-btn")?.addEventListener("click", async (
 });
 
 window.addEventListener("DOMContentLoaded", async () => {
+  initTheme();
   setActiveModule("overview");
   bindGeoNumericInputSafety();
   ensureRouteLogFilterFields();
@@ -3023,6 +3070,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const auth = await loadAuthStatus();
     if (!auth.enabled || auth.authenticated) {
       await loadDashboard();
+      initHashRouting();
     } else {
       focusField("auth_username");
     }
