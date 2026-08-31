@@ -2,9 +2,9 @@ version: '3.8'
 
 services:
   302-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     image: registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest
     container_name: 302-proxy
     restart: unless-stopped
