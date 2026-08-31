@@ -13,10 +13,9 @@ ssl:
 
 logging:
   level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  format: "%(asctime)s [%(request_id)s] %(levelname)s %(message)s"
   file_path: log/nginx302_proxy.log
-  max_size: 10MB
-  backup_count: 5
+  retention_days: 30
 
 admin_auth:
   enabled: true
@@ -40,6 +39,30 @@ ip_result_cache:
   enabled: true
   ttl_seconds: 300
   max_entries: 5000
+
+auto_ban:
+  enabled: false
+  window_seconds: 60
+  max_requests: 100
+  ban_duration_seconds: 3600
+  max_404: 20
+  auto_ban_on_404: true
+  whitelist: ""
+  email_on_ban: false
+
+email:
+  enabled: false
+  smtp_host: ""
+  smtp_port: 465
+  smtp_ssl: true
+  sender: ""
+  sender_name: ""
+  password: ""
+  recipients: ""
+  alert_window_seconds: 60
+  alert_max_requests: 80
+  alert_max_404: 15
+  alert_cooldown_minutes: 30
 
 proxy_rules:
   - path_prefix: "/play"

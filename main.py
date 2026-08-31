@@ -31,8 +31,9 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from config import Config, load_config, setup_logging, normalize_request_host
+from config import Config, load_config, setup_logging, normalize_request_host, prune_app_log_files, set_request_id, get_request_id, generate_request_id
 from admin_console import AdminConsole
+from auto_ban_monitor import AutoBanMonitor
 from config_store import ConfigStore
 from geo_service import GeoResolver
 from offline_geoip_sync import OfflineGeoIPSyncService
@@ -70,10 +71,17 @@ class ProxyServer:
             max_entries=config.ip_result_cache.max_entries,
         )
         self.ip_ban_manager = IpBanManager()
+        self.auto_ban_monitor = AutoBanMonitor(
+            config=config.auto_ban,
+            ban_callback=self._auto_ban_ip,
+            email_config=config.email,
+        )
         self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
         self._ban_cleanup_task: Optional[asyncio.Task] = None
+        self._auto_ban_cleanup_task: Optional[asyncio.Task] = None
+        self._log_cleanup_task: Optional[asyncio.Task] = None
         self.admin_console = AdminConsole(
             config_store=self.config_store,
             reload_callback=self.reload_runtime_config,
@@ -81,6 +89,8 @@ class ProxyServer:
             offline_rollback_callback=self.rollback_offline_geoip_now,
             online_cache_clear_callback=self.clear_online_geoip_cache,
             ban_manager_callback=self._sync_ban_manager,
+            log_cleanup_callback=self._cleanup_log_files,
+            log_file_cleanup_callback=self._cleanup_log_files_on_disk,
         )
         self.app = web.Application(client_max_size=config.streaming.max_request_body_size)
         self._setup_routes()
@@ -96,26 +106,44 @@ class ProxyServer:
         self.app.router.add_post('/_ban/remove', self.unban_ip)
         self.app.router.add_post('/_ban/clear', self.clear_all_bans)
         self.app.router.add_get('/_ban/stats', self.get_ban_stats)
+        self.app.router.add_get('/_auto-ban/stats', self.get_auto_ban_stats)
+        self.app.router.add_get('/_auto-ban/tracked', self.get_auto_ban_tracked)
         self.admin_console.register(self.app)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
     def _setup_middleware(self):
         @web.middleware
         async def logging_middleware(request: web.Request, handler):
+            request_id = generate_request_id()
+            token = set_request_id(request_id)
+            request["_request_id"] = request_id
             start_time = time.perf_counter()
+            client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or ""
+            user_agent = request.headers.get("User-Agent", "")
+            full_url = request.path
+            if request.query_string:
+                full_url += "?" + request.query_string
             try:
                 response = await handler(request)
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 logger.info(
-                    f"{request.method} {request.path} - 状态码: {response.status} - 耗时: {duration_ms:.2f}毫秒"
+                    "%s %s %d %.1fms %s",
+                    request.method, full_url, response.status, duration_ms, client_ip,
                 )
+                logger.debug("UA=%s", user_agent[:120] if user_agent else "-")
+                if client_ip:
+                    await self.auto_ban_monitor.record_request(client_ip, response.status)
                 return response
             except Exception as e:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 logger.error(
-                    f"{request.method} {request.path} - 错误: {e} - 耗时: {duration_ms:.2f}毫秒"
+                    "%s %s ERROR:%s %.1fms %s",
+                    request.method, full_url, e, duration_ms, client_ip,
                 )
                 raise
+            finally:
+                set_request_id("-")
+                _ = token
         
         self.app.middlewares.append(logging_middleware)
 
@@ -134,6 +162,8 @@ class ProxyServer:
             )
             self.request_handler.set_ip_cache(self.ip_result_cache)
             logger.info("请求结果缓存配置已更新: enabled=%s ttl=%ds max=%d", cache_cfg.enabled, cache_cfg.ttl_seconds, cache_cfg.max_entries)
+        self.auto_ban_monitor.update_config(self.config.auto_ban)
+        self.auto_ban_monitor.update_email_config(self.config.email)
 
     async def sync_offline_geoip_now(self) -> Dict[str, Any]:
         return await self.offline_geoip_sync_service.sync_now(force=True)
@@ -172,6 +202,16 @@ class ProxyServer:
             await self.ip_ban_manager.extend_ban(ip, duration_seconds)
         elif action == "clear":
             await self.ip_ban_manager.clear_all()
+
+    async def _auto_ban_ip(self, ip: str, reason: str) -> None:
+        await self.ip_ban_manager.ban_ip(
+            ip=ip,
+            reason=f"[自动封禁] {reason}",
+            banned_by="auto_ban_monitor",
+            duration_seconds=self.config.auto_ban.ban_duration_seconds,
+            permanent=False,
+            path_prefix="",
+        )
 
     def _request_duration_ms(self, request: web.Request) -> int:
         started_at = request.get("_route_log_started_at")
@@ -342,6 +382,18 @@ class ProxyServer:
             return "forwarded_client_error"
         return "forwarded"
 
+    @staticmethod
+    def _extract_redirect_location(redirect_info) -> str:
+        if not redirect_info:
+            return ""
+        if redirect_info.redirect_chain:
+            return redirect_info.redirect_chain[-1].get("from", "")
+        if redirect_info.redirect_count > 0:
+            return redirect_info.redirect_url
+        if redirect_info.status_code in {301, 302, 303, 307, 308}:
+            return redirect_info.redirect_url
+        return ""
+
     def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> None:
         try:
             geo_location = route_decision.geo_location if route_decision else None
@@ -361,6 +413,7 @@ class ProxyServer:
             ):
                 geo_source = f"{geo_source}|cache_hit"
             payload = {
+                "request_id": request.get("_request_id", ""),
                 "request_method": request.method,
                 "request_path": request.path,
                 "request_query_string": request.query_string,
@@ -392,6 +445,7 @@ class ProxyServer:
                 "upstream_status": upstream_status,
                 "cache_status": cache_status,
                 "redirect_count": redirect_info.redirect_count if redirect_info else 0,
+                "redirect_location": self._extract_redirect_location(redirect_info),
                 "transport_mode": transport_mode,
                 "operation_duration_ms": self._request_duration_ms(request),
                 "result_status": self._infer_route_log_result_status(
@@ -464,12 +518,25 @@ class ProxyServer:
             body = await request.read()
             client_host = request.remote or ''
             scheme = request.scheme
+
+            logger.debug("路由匹配开始: %s %s", method, raw_path)
+
             route_decision = await self.request_handler.select_route(
                 path_decoded,
                 headers,
                 client_host,
                 query_string if query_string else None,
             )
+
+            if route_decision:
+                logger.debug(
+                    "路由匹配完成: 规则=%s 目标=%s 匹配=%s",
+                    route_decision.rule.path_prefix, route_decision.target_url,
+                    route_decision.match_strategy,
+                )
+            else:
+                logger.warning("无匹配路由: %s %s", method, raw_path)
+
             # 黑白名单拦截检查：命中黑名单或不在白名单内时跳转到 403 页面
             if route_decision and route_decision.blocked:
                 block_reason = route_decision.block_reason or "请求被访问控制规则拦截"
@@ -520,6 +587,12 @@ class ProxyServer:
             )
             
             range_header = headers.get('Range')
+
+            logger.debug(
+                "转发决策: 目标=%s 模式=%s Range=%s",
+                target_url, "streaming" if use_streaming_mode else "standard",
+                range_header or "-",
+            )
             
             # 直接转发请求到上游服务器
             if use_streaming_mode:
@@ -534,6 +607,7 @@ class ProxyServer:
                     route_decision=route_decision,
                 )
                 actual_cache_status = streaming_response.cache_status or "BYPASS"
+                logger.debug("流式响应: 状态=%s 缓存=%s", streaming_response.status, actual_cache_status)
                 return await self._send_streaming_response(request, streaming_response, cache_status=actual_cache_status)
             else:
                 status, response_headers, response_body, redirect_info, route_decision = await self.request_handler.handle_request(
@@ -545,6 +619,13 @@ class ProxyServer:
                     scheme=scheme,
                     query_string=query_string if query_string else None,
                     route_decision=route_decision,
+                )
+
+                redirect_count = redirect_info.redirect_count if redirect_info else 0
+                cache_status = self.request_handler.get_last_cache_status()
+                logger.debug(
+                    "标准响应: 状态=%d 缓存=%s 重定向=%d",
+                    status, cache_status, redirect_count,
                 )
                 
                 await self.stats.record_request(
@@ -771,6 +852,22 @@ class ProxyServer:
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats, ensure_ascii=False).encode()
         )
+
+    async def get_auto_ban_stats(self, request: web.Request) -> web.Response:
+        stats = self.auto_ban_monitor.get_stats()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(stats, ensure_ascii=False).encode()
+        )
+
+    async def get_auto_ban_tracked(self, request: web.Request) -> web.Response:
+        tracked = self.auto_ban_monitor.get_tracked_ips()
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"items": tracked}, ensure_ascii=False).encode()
+        )
     
     async def on_startup(self, app: web.Application):
         logger.info(f"代理服务器启动于 {self.config.server.host}:{self.config.server.port}")
@@ -807,6 +904,8 @@ class ProxyServer:
         )
         await self._load_bans_from_db()
         self._start_ban_cleanup_task()
+        self._start_auto_ban_cleanup_task()
+        self._start_log_cleanup_task()
         logger.info("IP封禁管理器已初始化")
 
     async def _load_bans_from_db(self) -> None:
@@ -831,6 +930,13 @@ class ProxyServer:
                 self._ban_cleanup_loop(), name="ip-ban-cleanup"
             )
 
+    def _start_auto_ban_cleanup_task(self) -> None:
+        """启动自动封禁监控器的清理任务。"""
+        if self._auto_ban_cleanup_task is None or self._auto_ban_cleanup_task.done():
+            self._auto_ban_cleanup_task = asyncio.create_task(
+                self.auto_ban_monitor.start_cleanup_loop(), name="auto-ban-cleanup"
+            )
+
     async def _ban_cleanup_loop(self) -> None:
         """每60秒清理一次过期的临时封禁记录（内存 + 数据库）。"""
         while True:
@@ -846,7 +952,65 @@ class ProxyServer:
                 raise
             except Exception as exc:
                 logger.warning(f"清理过期IP封禁任务异常: {exc}")
-    
+
+    def _start_log_cleanup_task(self) -> None:
+        """启动定时任务，定期清理过期的运行日志文件。"""
+        if self._log_cleanup_task is None or self._log_cleanup_task.done():
+            self._log_cleanup_task = asyncio.create_task(
+                self._log_cleanup_loop(), name="log-file-cleanup"
+            )
+
+    async def _log_cleanup_loop(self) -> None:
+        """每小时检查并清理超过保留天数的运行日志文件。"""
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                self._prune_log_files()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"清理过期日志文件任务异常: {exc}")
+
+    def _prune_log_files(self) -> int:
+        """清理超过保留天数的运行日志文件，返回删除的文件数。"""
+        from config import prune_app_log_files
+        if not self.config.logging.file_path:
+            return 0
+        log_path = Path(self.config.logging.file_path)
+        log_dir = log_path.parent
+        log_name = log_path.name
+        import glob as glob_module
+        import time
+        pattern = str(log_dir / f"{log_name}.*-20*")
+        cutoff = time.time() - self.config.logging.retention_days * 86400
+        deleted = 0
+        for f in glob_module.glob(pattern):
+            try:
+                if Path(f).stat().st_mtime < cutoff:
+                    Path(f).unlink()
+                    deleted += 1
+            except OSError:
+                pass
+        if deleted > 0:
+            logger.info(f"定时清理过期日志文件: 删除 {deleted} 个文件")
+        return deleted
+
+    async def _cleanup_log_files(self) -> Dict[str, Any]:
+        """手动触发规则转发日志清理，供管理后台调用。"""
+        result = self.config_store.prune_route_logs(force=True)
+        return result
+
+    async def _cleanup_log_files_on_disk(self) -> Dict[str, Any]:
+        """手动触发运行日志文件清理，供管理后台调用。"""
+        deleted = self._prune_log_files()
+        log_path = self.config.logging.file_path or ""
+        retention = self.config.logging.retention_days
+        return {
+            "deleted_count": deleted,
+            "retention_days": retention,
+            "log_path": log_path,
+        }
+
     async def on_shutdown(self, app: web.Application):
         logger.info("正在关闭代理服务器...")
         if self._ban_cleanup_task is not None:
@@ -856,6 +1020,20 @@ class ProxyServer:
             except asyncio.CancelledError:
                 pass
             self._ban_cleanup_task = None
+        if self._auto_ban_cleanup_task is not None:
+            self._auto_ban_cleanup_task.cancel()
+            try:
+                await self._auto_ban_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._auto_ban_cleanup_task = None
+        if self._log_cleanup_task is not None:
+            self._log_cleanup_task.cancel()
+            try:
+                await self._log_cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._log_cleanup_task = None
         await self.request_handler.close()
         await self.offline_geoip_sync_service.stop()
         await self.geo_resolver.close()
@@ -922,6 +1100,9 @@ def main():
         config.streaming.enabled = False
     
     logger = setup_logging(config.logging)
+    
+    if config.logging.file_path:
+        prune_app_log_files(config.logging.file_path, config.logging.retention_days)
     
     if not config.proxy_rules:
         logger.warning("当前本地数据库尚无代理规则。")

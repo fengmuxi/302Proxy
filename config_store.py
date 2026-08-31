@@ -11,7 +11,9 @@ import aiohttp
 
 from config import (
     DEFAULT_DB_PATH,
+    AutoBanConfig,
     Config,
+    EmailConfig,
     GeoIPSettings,
     IpResultCacheConfig,
     LoggingConfig,
@@ -96,8 +98,7 @@ class ConfigStore:
                     logging_level TEXT NOT NULL,
                     logging_format TEXT NOT NULL,
                     logging_file_path TEXT,
-                    logging_max_size INTEGER NOT NULL,
-                    logging_backup_count INTEGER NOT NULL,
+                    logging_retention_days INTEGER NOT NULL DEFAULT 30,
                     streaming_enabled INTEGER NOT NULL,
                     streaming_chunk_size INTEGER NOT NULL,
                     streaming_large_file_threshold INTEGER NOT NULL,
@@ -110,6 +111,26 @@ class ConfigStore:
                     ip_cache_enabled INTEGER NOT NULL,
                     ip_cache_ttl_seconds INTEGER NOT NULL,
                     ip_cache_max_entries INTEGER NOT NULL,
+                    auto_ban_enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_ban_window_seconds INTEGER NOT NULL DEFAULT 60,
+                    auto_ban_max_requests INTEGER NOT NULL DEFAULT 100,
+                    auto_ban_ban_duration_seconds INTEGER NOT NULL DEFAULT 3600,
+                    auto_ban_max_404 INTEGER NOT NULL DEFAULT 20,
+                    auto_ban_auto_ban_on_404 INTEGER NOT NULL DEFAULT 1,
+                    auto_ban_whitelist TEXT NOT NULL DEFAULT '',
+                    auto_ban_email_on_ban INTEGER NOT NULL DEFAULT 0,
+                    email_enabled INTEGER NOT NULL DEFAULT 0,
+                    email_smtp_host TEXT NOT NULL DEFAULT '',
+                    email_smtp_port INTEGER NOT NULL DEFAULT 465,
+                    email_smtp_ssl INTEGER NOT NULL DEFAULT 1,
+                    email_sender TEXT NOT NULL DEFAULT '',
+                    email_sender_name TEXT NOT NULL DEFAULT '',
+                    email_password TEXT NOT NULL DEFAULT '',
+                    email_recipients TEXT NOT NULL DEFAULT '',
+                    email_alert_window_seconds INTEGER NOT NULL DEFAULT 60,
+                    email_alert_max_requests INTEGER NOT NULL DEFAULT 80,
+                    email_alert_max_404 INTEGER NOT NULL DEFAULT 15,
+                    email_alert_cooldown_minutes INTEGER NOT NULL DEFAULT 30,
                     default_timeout INTEGER NOT NULL,
                     max_redirects INTEGER NOT NULL,
                     follow_redirects INTEGER NOT NULL,
@@ -236,6 +257,7 @@ class ConfigStore:
                     rule_request_host TEXT NOT NULL DEFAULT '',
                     rule_source TEXT NOT NULL DEFAULT '',
                     target_url TEXT NOT NULL DEFAULT '',
+                    redirect_location TEXT NOT NULL DEFAULT '',
                     original_client_ip TEXT NOT NULL DEFAULT '',
                     client_ip TEXT NOT NULL DEFAULT '',
                     region_matching_enabled INTEGER NOT NULL DEFAULT 0,
@@ -418,6 +440,12 @@ class ConfigStore:
             self._ensure_column(
                 connection,
                 "route_logs",
+                "redirect_location",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "route_logs",
                 "original_client_ip",
                 "TEXT NOT NULL DEFAULT ''",
             )
@@ -531,6 +559,40 @@ class ConfigStore:
                 "region_blacklist",
                 "TEXT NOT NULL DEFAULT ''",
             )
+            # 日志配置迁移：添加 retention_days，迁移旧数据
+            rows = connection.execute("PRAGMA table_info(system_settings)").fetchall()
+            existing_columns = {row["name"] for row in rows}
+            if "logging_retention_days" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE system_settings ADD COLUMN logging_retention_days INTEGER NOT NULL DEFAULT 30"
+                )
+                if "logging_backup_count" in existing_columns:
+                    connection.execute(
+                        "UPDATE system_settings SET logging_retention_days = logging_backup_count WHERE logging_retention_days = 30"
+                    )
+            # 自动封禁配置迁移
+            self._ensure_column(connection, "system_settings", "auto_ban_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "system_settings", "auto_ban_window_seconds", "INTEGER NOT NULL DEFAULT 60")
+            self._ensure_column(connection, "system_settings", "auto_ban_max_requests", "INTEGER NOT NULL DEFAULT 100")
+            self._ensure_column(connection, "system_settings", "auto_ban_ban_duration_seconds", "INTEGER NOT NULL DEFAULT 3600")
+            self._ensure_column(connection, "system_settings", "auto_ban_max_404", "INTEGER NOT NULL DEFAULT 20")
+            self._ensure_column(connection, "system_settings", "auto_ban_auto_ban_on_404", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "system_settings", "auto_ban_whitelist", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "auto_ban_email_on_ban", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "system_settings", "email_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "system_settings", "email_smtp_host", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_smtp_port", "INTEGER NOT NULL DEFAULT 465")
+            self._ensure_column(connection, "system_settings", "email_smtp_ssl", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "system_settings", "email_sender", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_sender_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_password", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_recipients", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_alert_window_seconds", "INTEGER NOT NULL DEFAULT 60")
+            self._ensure_column(connection, "system_settings", "email_alert_max_requests", "INTEGER NOT NULL DEFAULT 80")
+            self._ensure_column(connection, "system_settings", "email_alert_max_404", "INTEGER NOT NULL DEFAULT 15")
+            self._ensure_column(connection, "system_settings", "email_alert_cooldown_minutes", "INTEGER NOT NULL DEFAULT 30")
+            # 请求追踪：添加 request_id 列
+            self._ensure_column(connection, "route_logs", "request_id", "TEXT NOT NULL DEFAULT ''")
 
     def _ensure_column(
         self,
@@ -583,8 +645,8 @@ class ConfigStore:
                 INSERT INTO system_settings (
                     id, host, port, workers, keepalive_timeout, max_connections,
                     max_connections_per_host, ssl_enabled, cert_file, key_file,
-                    logging_level, logging_format, logging_file_path, logging_max_size,
-                    logging_backup_count, streaming_enabled, streaming_chunk_size,
+                    logging_level, logging_format, logging_file_path, logging_retention_days,
+                    streaming_enabled, streaming_chunk_size,
                     streaming_large_file_threshold, streaming_stream_timeout,
                     streaming_read_timeout, streaming_write_timeout, streaming_buffer_size,
                     streaming_enable_range_support, streaming_max_request_body_size,
@@ -609,8 +671,7 @@ class ConfigStore:
                     config.logging.level,
                     config.logging.format,
                     config.logging.file_path,
-                    config.logging.max_size,
-                    config.logging.backup_count,
+                    config.logging.retention_days,
                     int(config.streaming.enabled),
                     config.streaming.chunk_size,
                     config.streaming.large_file_threshold,
@@ -1037,8 +1098,7 @@ class ConfigStore:
                 level=system_row["logging_level"],
                 format=system_row["logging_format"],
                 file_path=system_row["logging_file_path"],
-                max_size=system_row["logging_max_size"],
-                backup_count=system_row["logging_backup_count"],
+                retention_days=system_row["logging_retention_days"] if "logging_retention_days" in system_row.keys() else 30,
             )
             config.streaming = StreamingConfig(
                 enabled=bool(system_row["streaming_enabled"]),
@@ -1055,6 +1115,30 @@ class ConfigStore:
                 enabled=bool(system_row["ip_cache_enabled"]),
                 ttl_seconds=system_row["ip_cache_ttl_seconds"],
                 max_entries=system_row["ip_cache_max_entries"],
+            )
+            config.auto_ban = AutoBanConfig(
+                enabled=bool(system_row["auto_ban_enabled"]),
+                window_seconds=system_row["auto_ban_window_seconds"],
+                max_requests=system_row["auto_ban_max_requests"],
+                ban_duration_seconds=system_row["auto_ban_ban_duration_seconds"],
+                max_404=system_row["auto_ban_max_404"],
+                auto_ban_on_404=bool(system_row["auto_ban_auto_ban_on_404"]),
+                whitelist=system_row["auto_ban_whitelist"],
+                email_on_ban=bool(system_row["auto_ban_email_on_ban"]) if "auto_ban_email_on_ban" in system_row.keys() else False,
+            )
+            config.email = EmailConfig(
+                enabled=bool(system_row["email_enabled"]),
+                smtp_host=system_row["email_smtp_host"],
+                smtp_port=system_row["email_smtp_port"],
+                smtp_ssl=bool(system_row["email_smtp_ssl"]),
+                sender=system_row["email_sender"],
+                sender_name=system_row["email_sender_name"] if "email_sender_name" in system_row.keys() else "",
+                password=system_row["email_password"],
+                recipients=system_row["email_recipients"],
+                alert_window_seconds=system_row["email_alert_window_seconds"],
+                alert_max_requests=system_row["email_alert_max_requests"],
+                alert_max_404=system_row["email_alert_max_404"],
+                alert_cooldown_minutes=system_row["email_alert_cooldown_minutes"],
             )
             config.default_timeout = system_row["default_timeout"]
             config.max_redirects = system_row["max_redirects"]
@@ -1250,17 +1334,18 @@ class ConfigStore:
             cursor = connection.execute(
                 """
                 INSERT INTO route_logs (
-                    request_method, request_path, request_query_string, request_host, path_prefix, rule_id,
-                    rule_name, rule_request_host, rule_source, target_url, original_client_ip, client_ip, region_matching_enabled,
+                    request_id, request_method, request_path, request_query_string, request_host, path_prefix, rule_id,
+                    rule_name, rule_request_host, rule_source, target_url, redirect_location, original_client_ip, client_ip, region_matching_enabled,
                     geo_source, geo_summary, geo_country, geo_region, geo_city,
                     configured_ip_whitelist, matched_ip_whitelist, configured_regions, matched_region, match_strategy, match_detail,
                     upstream_status, cache_status, redirect_count, transport_mode,
                     operation_duration_ms, result_status, error_message, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
+                    str(payload.get("request_id", "")).strip(),
                     str(payload.get("request_method", "")).strip(),
                     str(payload.get("request_path", "")).strip(),
                     str(payload.get("request_query_string", "")).strip(),
@@ -1271,6 +1356,7 @@ class ConfigStore:
                     normalize_request_host(payload.get("rule_request_host", "")),
                     str(payload.get("rule_source", "")).strip(),
                     str(payload.get("target_url", "")).strip(),
+                    str(payload.get("redirect_location", "")).strip(),
                     str(payload.get("original_client_ip", "")).strip(),
                     str(payload.get("client_ip", "")).strip(),
                     int(coerce_bool(payload.get("region_matching_enabled"), False)),
@@ -1324,11 +1410,11 @@ class ConfigStore:
             clauses.append(
                 "("
                 "request_path LIKE ? OR request_host LIKE ? OR rule_request_host LIKE ? OR "
-                "path_prefix LIKE ? OR rule_name LIKE ? OR target_url LIKE ? OR geo_summary LIKE ? OR "
-                "matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ?"
+                "path_prefix LIKE ? OR rule_name LIKE ? OR target_url LIKE ? OR redirect_location LIKE ? OR "
+                "geo_summary LIKE ? OR matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ?"
                 ")"
             )
-            params.extend([like_value] * 10)
+            params.extend([like_value] * 11)
 
         path_prefix = str(filters.get("path_prefix", "")).strip()
         if path_prefix:
@@ -1642,6 +1728,96 @@ class ConfigStore:
                 (int(enabled), ttl_seconds, max_entries, now),
             )
         return self.get_ip_cache_config()
+
+    def get_auto_ban_config(self) -> Dict[str, Any]:
+        config = self.load_runtime_config()
+        return {
+            "enabled": config.auto_ban.enabled,
+            "window_seconds": config.auto_ban.window_seconds,
+            "max_requests": config.auto_ban.max_requests,
+            "ban_duration_seconds": config.auto_ban.ban_duration_seconds,
+            "max_404": config.auto_ban.max_404,
+            "auto_ban_on_404": config.auto_ban.auto_ban_on_404,
+            "whitelist": config.auto_ban.whitelist,
+            "email_on_ban": config.auto_ban.email_on_ban,
+        }
+
+    def update_auto_ban_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        window_seconds = max(10, int(payload.get("window_seconds", 60) or 60))
+        max_requests = max(1, int(payload.get("max_requests", 100) or 100))
+        ban_duration_seconds = max(60, int(payload.get("ban_duration_seconds", 3600) or 3600))
+        max_404 = max(1, int(payload.get("max_404", 20) or 20))
+        auto_ban_on_404 = coerce_bool(payload.get("auto_ban_on_404", True))
+        whitelist = str(payload.get("whitelist", "") or "")
+        email_on_ban = coerce_bool(payload.get("email_on_ban", False))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE system_settings
+                SET auto_ban_enabled = ?, auto_ban_window_seconds = ?, auto_ban_max_requests = ?,
+                    auto_ban_ban_duration_seconds = ?, auto_ban_max_404 = ?, auto_ban_auto_ban_on_404 = ?,
+                    auto_ban_whitelist = ?, auto_ban_email_on_ban = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (int(enabled), window_seconds, max_requests, ban_duration_seconds, max_404, int(auto_ban_on_404), whitelist, int(email_on_ban), now),
+            )
+        return self.get_auto_ban_config()
+
+    def get_email_config(self) -> Dict[str, Any]:
+        config = self.load_runtime_config()
+        return {
+            "enabled": config.email.enabled,
+            "smtp_host": config.email.smtp_host,
+            "smtp_port": config.email.smtp_port,
+            "smtp_ssl": config.email.smtp_ssl,
+            "sender": config.email.sender,
+            "sender_name": config.email.sender_name,
+            "password": config.email.password,
+            "recipients": config.email.recipients,
+            "alert_window_seconds": config.email.alert_window_seconds,
+            "alert_max_requests": config.email.alert_max_requests,
+            "alert_max_404": config.email.alert_max_404,
+            "alert_cooldown_minutes": config.email.alert_cooldown_minutes,
+        }
+
+    def update_email_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        smtp_host = str(payload.get("smtp_host", "") or "")
+        smtp_port = max(1, int(payload.get("smtp_port", 465) or 465))
+        smtp_ssl = coerce_bool(payload.get("smtp_ssl", True))
+        sender = str(payload.get("sender", "") or "")
+        sender_name = str(payload.get("sender_name", "") or "")
+        # 密码字段：如果payload中没有提供，则保持数据库中的原值
+        password = str(payload.get("password", "") or "")
+        recipients = str(payload.get("recipients", "") or "")
+        alert_window_seconds = max(10, int(payload.get("alert_window_seconds", 60) or 60))
+        alert_max_requests = max(1, int(payload.get("alert_max_requests", 80) or 80))
+        alert_max_404 = max(1, int(payload.get("alert_max_404", 15) or 15))
+        alert_cooldown_minutes = max(1, int(payload.get("alert_cooldown_minutes", 30) or 30))
+        now = utc_now()
+        
+        # 如果密码为空，从数据库获取原密码
+        if not password:
+            config = self.load_runtime_config()
+            password = config.email.password
+        
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE system_settings
+                SET email_enabled = ?, email_smtp_host = ?, email_smtp_port = ?,
+                    email_smtp_ssl = ?, email_sender = ?, email_sender_name = ?,
+                    email_password = ?, email_recipients = ?, email_alert_window_seconds = ?,
+                    email_alert_max_requests = ?, email_alert_max_404 = ?, email_alert_cooldown_minutes = ?,
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (int(enabled), smtp_host, smtp_port, int(smtp_ssl), sender, sender_name, password, recipients,
+                 alert_window_seconds, alert_max_requests, alert_max_404, alert_cooldown_minutes, now),
+            )
+        return self.get_email_config()
 
     def list_rules(self) -> List[Dict[str, Any]]:
         config = self.load_runtime_config()
@@ -2368,6 +2544,7 @@ class ConfigStore:
             "rule_request_host": row["rule_request_host"],
             "rule_source": row["rule_source"],
             "target_url": row["target_url"],
+            "redirect_location": row["redirect_location"],
             "original_client_ip": row["original_client_ip"],
             "client_ip": row["client_ip"],
             "region_matching_enabled": bool(row["region_matching_enabled"]),

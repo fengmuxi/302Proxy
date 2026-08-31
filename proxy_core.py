@@ -231,6 +231,10 @@ class RedirectHandler:
                     }
                 )
                 redirect_count += 1
+                logger.debug(
+                    "重定向跟踪: %d -> %s (状态 %d)",
+                    redirect_count, redirect_url, response.status,
+                )
 
                 if response.status in {301, 302, 303} and method.upper() not in {"GET", "HEAD"}:
                     method = "GET"
@@ -712,7 +716,16 @@ class ProxyRequestHandler:
                 route_group.normalized_region_whitelist()
                 or route_group.normalized_region_blacklist()
             ) and geo_location is None and self.geo_resolver:
+                geo_start = time.perf_counter()
                 geo_location = await self.geo_resolver.resolve(client_ip, self.config.geoip)
+                geo_ms = (time.perf_counter() - geo_start) * 1000
+                if geo_location:
+                    logger.debug(
+                        "GeoIP解析: IP=%s 结果=%s/%s/%s 耗时=%.1fms",
+                        client_ip, geo_location.country, geo_location.region, geo_location.city, geo_ms,
+                    )
+                else:
+                    logger.debug("GeoIP解析: IP=%s 无结果 耗时=%.1fms", client_ip, geo_ms)
 
             group_block = self._evaluate_access_control(
                 route_group.normalized_access_ip_whitelist(),
@@ -1002,6 +1015,8 @@ class ProxyRequestHandler:
                     except Exception as exc:
                         logger.warning("请求结果缓存直接请求失败，回退到正常流程: %s", exc)
 
+        logger.debug("IP缓存未命中: IP=%s 目标=%s", client_ip, target_url)
+
         redirect_handler = RedirectHandler(
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
@@ -1157,6 +1172,8 @@ class ProxyRequestHandler:
                     None,
                     route_decision,
                 )
+
+        logger.debug("IP缓存未命中: IP=%s 目标=%s", client_ip, target_url)
 
         redirect_handler = RedirectHandler(
             max_redirects=rule.max_redirects,

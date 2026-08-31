@@ -1,14 +1,36 @@
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
+
+_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+def set_request_id(request_id: str) -> contextvars.Token[str]:
+    return _request_id_var.set(request_id)
+
+
+def get_request_id() -> str:
+    return _request_id_var.get()
+
+
+def generate_request_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+class RequestIDFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = get_request_id()
+        return True
 
 
 DEFAULT_DB_PATH = "data/proxy_config.db"
@@ -160,10 +182,9 @@ class SSLConfig:
 @dataclass
 class LoggingConfig:
     level: str = "INFO"
-    format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format: str = "%(asctime)s [%(request_id)s] %(levelname)s %(message)s"
     file_path: Optional[str] = None
-    max_size: int = 10 * 1024 * 1024
-    backup_count: int = 5
+    retention_days: int = 30
 
 
 @dataclass
@@ -194,6 +215,34 @@ class IpResultCacheConfig:
     enabled: bool = True
     ttl_seconds: int = 300
     max_entries: int = 5000
+
+
+@dataclass
+class AutoBanConfig:
+    enabled: bool = False
+    window_seconds: int = 60
+    max_requests: int = 100
+    ban_duration_seconds: int = 3600
+    max_404: int = 20
+    auto_ban_on_404: bool = True
+    whitelist: str = ""
+    email_on_ban: bool = False
+
+
+@dataclass
+class EmailConfig:
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_ssl: bool = True
+    sender: str = ""
+    sender_name: str = ""
+    password: str = ""
+    recipients: str = ""
+    alert_window_seconds: int = 60
+    alert_max_requests: int = 80
+    alert_max_404: int = 15
+    alert_cooldown_minutes: int = 30
 
 
 @dataclass
@@ -338,6 +387,8 @@ class Config:
     remote_config: RemoteConfigSettings = field(default_factory=RemoteConfigSettings)
     geoip: GeoIPSettings = field(default_factory=GeoIPSettings)
     ip_result_cache: IpResultCacheConfig = field(default_factory=IpResultCacheConfig)
+    auto_ban: AutoBanConfig = field(default_factory=AutoBanConfig)
+    email: EmailConfig = field(default_factory=EmailConfig)
     hop_by_hop_headers: List[str] = field(
         default_factory=lambda: [
             "Connection",
@@ -388,8 +439,7 @@ class Config:
                 level=str(logging_data.get("level", config.logging.level)),
                 format=str(logging_data.get("format", config.logging.format)),
                 file_path=logging_data.get("file_path", config.logging.file_path),
-                max_size=parse_size(logging_data.get("max_size", config.logging.max_size)),
-                backup_count=int(logging_data.get("backup_count", config.logging.backup_count)),
+                retention_days=max(1, int(logging_data.get("retention_days", config.logging.retention_days) or 30)),
             )
 
         admin_auth_data = data.get("admin_auth", {})
@@ -664,6 +714,36 @@ class Config:
                 max_entries=max(0, int(ip_result_cache_data.get("max_entries", config.ip_result_cache.max_entries) or 0)),
             )
 
+        auto_ban_data = data.get("auto_ban", {})
+        if isinstance(auto_ban_data, dict):
+            config.auto_ban = AutoBanConfig(
+                enabled=coerce_bool(auto_ban_data.get("enabled"), config.auto_ban.enabled),
+                window_seconds=max(10, int(auto_ban_data.get("window_seconds", config.auto_ban.window_seconds) or 60)),
+                max_requests=max(1, int(auto_ban_data.get("max_requests", config.auto_ban.max_requests) or 100)),
+                ban_duration_seconds=max(60, int(auto_ban_data.get("ban_duration_seconds", config.auto_ban.ban_duration_seconds) or 3600)),
+                max_404=max(1, int(auto_ban_data.get("max_404", config.auto_ban.max_404) or 20)),
+                auto_ban_on_404=coerce_bool(auto_ban_data.get("auto_ban_on_404"), config.auto_ban.auto_ban_on_404),
+                whitelist=str(auto_ban_data.get("whitelist", config.auto_ban.whitelist) or ""),
+                email_on_ban=coerce_bool(auto_ban_data.get("email_on_ban"), config.auto_ban.email_on_ban),
+            )
+
+        email_data = data.get("email", {})
+        if isinstance(email_data, dict):
+            config.email = EmailConfig(
+                enabled=coerce_bool(email_data.get("enabled"), config.email.enabled),
+                smtp_host=str(email_data.get("smtp_host", config.email.smtp_host) or ""),
+                smtp_port=max(1, int(email_data.get("smtp_port", config.email.smtp_port) or 465)),
+                smtp_ssl=coerce_bool(email_data.get("smtp_ssl"), config.email.smtp_ssl),
+                sender=str(email_data.get("sender", config.email.sender) or ""),
+                sender_name=str(email_data.get("sender_name", config.email.sender_name) or ""),
+                password=str(email_data.get("password", config.email.password) or ""),
+                recipients=str(email_data.get("recipients", config.email.recipients) or ""),
+                alert_window_seconds=max(10, int(email_data.get("alert_window_seconds", config.email.alert_window_seconds) or 60)),
+                alert_max_requests=max(1, int(email_data.get("alert_max_requests", config.email.alert_max_requests) or 80)),
+                alert_max_404=max(1, int(email_data.get("alert_max_404", config.email.alert_max_404) or 15)),
+                alert_cooldown_minutes=max(1, int(email_data.get("alert_cooldown_minutes", config.email.alert_cooldown_minutes) or 30)),
+            )
+
         return config
 
     def to_dict(self) -> Dict[str, Any]:
@@ -888,25 +968,46 @@ def setup_logging(config: LoggingConfig) -> logging.Logger:
         logger.removeHandler(handler)
         handler.close()
 
+    request_id_filter = RequestIDFilter()
     formatter = logging.Formatter(config.format)
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(request_id_filter)
     logger.addHandler(console_handler)
 
     if config.file_path:
         log_path = Path(config.file_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
+        file_handler = TimedRotatingFileHandler(
             str(log_path),
-            maxBytes=config.max_size,
-            backupCount=config.backup_count,
+            when="midnight",
+            interval=1,
+            backupCount=config.retention_days,
             encoding="utf-8",
         )
+        file_handler.suffix = "%Y-%m-%d"
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(request_id_filter)
         logger.addHandler(file_handler)
 
     return logger
+
+
+def prune_app_log_files(file_path: str, retention_days: int) -> None:
+    import glob as glob_module
+    import time
+    log_path = Path(file_path)
+    log_dir = log_path.parent
+    log_name = log_path.name
+    pattern = str(log_dir / f"{log_name}.*-20*")
+    cutoff = time.time() - retention_days * 86400
+    for f in glob_module.glob(pattern):
+        if Path(f).stat().st_mtime < cutoff:
+            try:
+                Path(f).unlink()
+            except OSError:
+                pass
 
 
 def ensure_config_file(config_path: str, config: Config) -> None:

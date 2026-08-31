@@ -1,10 +1,12 @@
 version: '3.8'
 
+# ============================================
+# 服务器端部署配置
+# 放置在服务器 /opt/302_proxy/ 目录下
+# ============================================
+
 services:
   302-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest
     container_name: 302-proxy
     restart: unless-stopped

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Proxy Control Center</title>
   <link rel="icon" type="image/svg+xml" href="/_admin/static/favicon.svg">
-  <link rel="stylesheet" href="/_admin/static/admin.css">
+  <link rel="stylesheet" href="/_admin/static/admin.css?v=20260831">
 </head>
 <body>
   <div id="auth-overlay" class="auth-overlay is-active">
@@ -110,6 +110,10 @@
           <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
           <span>日志管理</span>
         </button>
+        <button class="module-btn" data-module-target="app-logs" type="button">
+          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          <span>应用日志</span>
+        </button>
         <button class="module-btn" data-module-target="ip-cache-manager" type="button">
           <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
           <span>请求结果缓存</span>
@@ -117,6 +121,14 @@
         <button class="module-btn" data-module-target="ip-ban-manager" type="button">
           <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
           <span>IP 封禁管理</span>
+        </button>
+        <button class="module-btn" data-module-target="email-manager" type="button">
+          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          <span>邮件提醒</span>
+        </button>
+        <button class="module-btn" data-module-target="backup-manager" type="button">
+          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>数据管理</span>
         </button>
       </div>
 
@@ -364,7 +376,7 @@
               <div class="two-col">
                 <label>
                   <span>关键词</span>
-                  <input id="log_keyword" type="text" placeholder="路径、目标地址、地区、IP、原始IP" />
+                  <input id="log_keyword" type="text" placeholder="路径、目标地址、302地址、地区、IP、原始IP" />
                 </label>
                 <label>
                   <span>路径前缀</span>
@@ -418,7 +430,10 @@
                   <input id="log_retention_days" type="number" min="1" value="30" />
                 </label>
                 <p class="hint">超过该天数的规则日志会自动删除。系统启动时和运行过程中都会定期清理。</p>
-                <button type="submit" class="primary-btn">保存保留策略</button>
+                <div class="row gap">
+                  <button type="submit" class="primary-btn">保存保留策略</button>
+                  <button type="button" id="log-cleanup-btn" class="ghost-btn danger">手动清理过期日志</button>
+                </div>
               </form>
 
               <div id="route-log-settings-status" class="test-result-card is-empty">
@@ -483,6 +498,55 @@
               </div>
 
               <div id="log-pagination" class="pagination"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="app-logs">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Application Logs</p>
+              <h2>应用日志</h2>
+              <p class="hint">查看应用运行日志，支持日期筛选和关键词搜索。</p>
+            </div>
+            <div class="table-actions">
+              <button id="app-log-cleanup-btn" type="button" class="ghost-btn danger">清理过期日志文件</button>
+              <button id="app-log-refresh-btn" type="button" class="ghost-btn">刷新</button>
+              <label class="auto-refresh-toggle" title="开启后每3秒自动刷新日志内容">
+                <input id="app-log-auto-refresh" type="checkbox" />
+                <span class="auto-refresh-label">自动刷新</span>
+              </label>
+            </div>
+          </div>
+          <div class="app-log-layout">
+            <div class="app-log-main">
+              <div class="app-log-toolbar">
+                <label>
+                  <span>日志文件</span>
+                  <select id="app-log-file-select"></select>
+                </label>
+                <label>
+                  <span>关键词搜索</span>
+                  <input id="app-log-keyword" type="text" placeholder="输入关键词过滤日志" />
+                </label>
+                <label>
+                  <span>显示行数</span>
+                  <select id="app-log-tail-lines">
+                    <option value="100">100 行</option>
+                    <option value="500" selected>500 行</option>
+                    <option value="1000">1000 行</option>
+                    <option value="5000">5000 行</option>
+                  </select>
+                </label>
+                <button id="app-log-search-btn" type="button" class="primary-btn">搜索</button>
+              </div>
+              <div class="app-log-info">
+                <span id="app-log-file-info">-</span>
+                <span id="app-log-line-info">-</span>
+              </div>
+              <pre id="app-log-content" class="app-log-content"></pre>
             </div>
           </div>
         </div>
@@ -625,7 +689,38 @@
             <div>
               <p class="section-tag">IP Ban Manager</p>
               <h2>IP封禁管理</h2>
-              <p class="hint">管理被封禁的IP地址，被封禁的IP请求将被拒绝（返回403）。支持从日志中快速封禁，也可手动添加。</p>
+              <p class="hint">管理被封禁的IP地址或IP段，被封禁的请求将被拒绝（返回403）。支持单IP封禁、CIDR网段封禁（如 192.168.1.0/24）、从日志快速封禁，也可手动添加。</p>
+            </div>
+          </div>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>自动封禁</h3>
+              <div class="table-actions">
+                <button id="open-auto-ban-modal-btn" type="button" class="primary-btn">自动封禁配置</button>
+              </div>
+            </div>
+            <div class="stats-grid">
+              <div class="stat-item">
+                <span class="stat-label">状态</span>
+                <span class="stat-value" id="auto-ban-status">-</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">监控IP数</span>
+                <span class="stat-value" id="auto-ban-tracked-count">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">白名单IP数</span>
+                <span class="stat-value" id="auto-ban-whitelist-count">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">累计请求</span>
+                <span class="stat-value" id="auto-ban-total-requests">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">累计封禁</span>
+                <span class="stat-value" id="auto-ban-total-bans">0</span>
+              </div>
             </div>
           </div>
 
@@ -671,7 +766,7 @@
               <table class="rules-table compact-table">
                 <thead>
                   <tr>
-                    <th>IP地址</th>
+                    <th>IP地址/段</th>
                     <th>路径前缀</th>
                     <th>原因</th>
                     <th>操作者</th>
@@ -734,6 +829,163 @@
             <div id="ip-cache-stats" class="test-result-card is-empty">
               <p class="test-result-placeholder">这里会显示缓存命中率和当前条目数。</p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="email-manager">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Email Alert</p>
+              <h2>邮件提醒</h2>
+              <p class="hint">配置邮件提醒，当检测到IP请求异常时自动发送邮件通知管理员。</p>
+            </div>
+          </div>
+
+          <form id="email-settings-form" class="sub-card stack-form">
+            <div class="sub-card-head">
+              <h3>邮件配置</h3>
+            </div>
+            <label>
+              <span>启用邮件提醒</span>
+              <select id="email_enabled">
+                <option value="1">启用</option>
+                <option value="0">禁用</option>
+              </select>
+            </label>
+            <label>
+              <span>SMTP服务器</span>
+              <input id="email_smtp_host" type="text" placeholder="smtp.qq.com" />
+            </label>
+            <div class="two-col">
+              <label>
+                <span>SMTP端口</span>
+                <input id="email_smtp_port" type="number" min="1" value="465" />
+              </label>
+              <label>
+                <span>SSL/TLS</span>
+                <select id="email_smtp_ssl">
+                  <option value="1">启用</option>
+                  <option value="0">禁用</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>发件邮箱</span>
+              <input id="email_sender" type="email" placeholder="your-email@qq.com" />
+            </label>
+            <label>
+              <span>发件人名称（可选）</span>
+              <input id="email_sender_name" type="text" placeholder="代理监控系统" />
+            </label>
+            <p class="hint">自定义发件人显示名称，如"代理监控系统"。留空则只显示邮箱地址。</p>
+            <label>
+              <span>邮箱密码/授权码</span>
+              <input id="email_password" type="password" placeholder="请输入邮箱密码或授权码" />
+            </label>
+            <label>
+              <span>收件邮箱（多个用逗号分隔）</span>
+              <input id="email_recipients" type="text" placeholder="admin1@example.com,admin2@example.com" />
+            </label>
+            <p class="hint">多个收件邮箱用逗号分隔，系统会在检测到异常时向所有收件人发送邮件。</p>
+
+            <div class="sub-card-head" style="margin-top: 16px;">
+              <h3>提醒阈值</h3>
+            </div>
+            <div class="two-col">
+              <label>
+                <span>监测时间窗口（秒）</span>
+                <input id="email_alert_window_seconds" type="number" min="10" value="60" />
+              </label>
+              <label>
+                <span>请求频率阈值</span>
+                <input id="email_alert_max_requests" type="number" min="1" value="80" />
+              </label>
+            </div>
+            <div class="two-col">
+              <label>
+                <span>404错误阈值</span>
+                <input id="email_alert_max_404" type="number" min="1" value="15" />
+              </label>
+              <label>
+                <span>同IP提醒冷却时间（分钟）</span>
+                <input id="email_alert_cooldown_minutes" type="number" min="1" value="30" />
+              </label>
+            </div>
+            <p class="hint">同一IP在冷却时间内不会重复发送提醒邮件，避免邮件轰炸。</p>
+            <div class="row gap">
+              <button type="submit" class="primary-btn">保存配置</button>
+              <label class="inline-label">
+                <span>测试模板</span>
+                <select id="email_test_template_type">
+                  <option value="alert">异常请求模板</option>
+                  <option value="ban">封禁通知模板</option>
+                </select>
+              </label>
+              <button type="button" id="test-email-btn" class="ghost-btn">发送测试邮件</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="module-panel" data-module-panel="backup-manager">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <p class="section-tag">Data Management</p>
+              <h2>数据备份与恢复</h2>
+              <p class="hint">备份和恢复数据库配置。覆盖模式会替换整个数据库，合并模式仅导入新规则（跳过已存在的）。</p>
+            </div>
+            <div class="table-actions">
+              <button id="backup-create-btn" type="button" class="primary-btn">创建备份</button>
+            </div>
+          </div>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>备份列表</h3>
+              <div class="table-actions">
+                <span class="hint" id="backup-total-count">共 0 个备份</span>
+                <button id="backup-refresh-btn" type="button" class="ghost-btn">刷新</button>
+              </div>
+            </div>
+            <div class="rule-list-wrap">
+              <table class="rules-table compact-table">
+                <thead>
+                  <tr>
+                    <th>文件名</th>
+                    <th>大小</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="backup-table-body">
+                  <tr><td colspan="4">暂无备份</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="sub-card">
+            <div class="sub-card-head">
+              <h3>从文件恢复</h3>
+            </div>
+            <form id="backup-upload-form" class="stack-form">
+              <label>
+                <span>恢复模式</span>
+                <select id="backup_restore_mode">
+                  <option value="overwrite">覆盖模式（替换整个数据库）</option>
+                  <option value="merge">合并模式（仅导入新规则）</option>
+                </select>
+              </label>
+              <p class="hint" id="backup-mode-hint">覆盖模式：用上传的数据库文件完全替换当前数据库。合并模式：仅导入上传文件中的新规则，跳过已存在的规则。</p>
+              <label>
+                <span>选择数据库文件</span>
+                <input id="backup-file-input" type="file" accept=".db" />
+              </label>
+              <button type="submit" class="primary-btn">上传并恢复</button>
+            </form>
           </div>
         </div>
       </section>
@@ -898,8 +1150,8 @@
       <form id="ban-ip-form" class="modal-body">
         <input id="ban_ip_mode" type="hidden" value="add" />
         <label>
-          <span>IP地址 <strong style="color:#c00">*</strong></span>
-          <input id="ban_ip_address" type="text" placeholder="1.2.3.4" required />
+          <span>IP地址 / IP段 <strong style="color:#c00">*</strong></span>
+          <input id="ban_ip_address" type="text" placeholder="单个IP: 1.2.3.4 ｜ IP段: 192.168.1.0/24" required />
         </label>
         <label>
           <span>路径前缀（可选）</span>
@@ -920,7 +1172,7 @@
           <span>临时封禁时长（小时，支持小数） <strong style="color:#c00">*</strong></span>
           <input id="ban_ip_duration" type="number" min="0.0166" step="any" value="1" placeholder="1 = 1小时，0.5 = 30分钟，0.25 = 15分钟" />
         </label>
-        <p class="hint">路径前缀留空表示全局封禁（拦截所有请求）；填写后只封禁该前缀下的请求（如 /play 只拦截 /play 开头的请求）。选择"临时封禁"时，IP将在指定时长后自动解封。</p>
+        <p class="hint">支持单个IP（如 1.2.3.4）或 CIDR 网段（如 192.168.1.0/24 封禁整个 192.168.1.x 网段）。路径前缀留空表示全局封禁；填写后只封禁该前缀下的请求。选择"临时封禁"时，到期后自动解封。</p>
       </form>
       <div class="modal-footer">
         <button type="button" class="ghost-btn" data-close-modal="ban-ip-modal">取消</button>
@@ -1052,6 +1304,97 @@
     </div>
   </div>
 
-  <script src="/_admin/static/admin.js" defer></script>
+  <!-- 自动封禁配置弹窗 -->
+  <div id="auto-ban-modal" class="modal-overlay" hidden>
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <h3>自动封禁配置</h3>
+        <button type="button" class="modal-close-btn" data-close-modal="auto-ban-modal" aria-label="关闭">×</button>
+      </div>
+      <form id="auto-ban-settings-form" class="modal-body">
+        <div class="two-col">
+          <label>
+            <span>启用自动封禁</span>
+            <select id="auto_ban_enabled">
+              <option value="1">启用</option>
+              <option value="0">禁用</option>
+            </select>
+          </label>
+          <label>
+            <span>启用404错误检测</span>
+            <select id="auto_ban_auto_ban_on_404">
+              <option value="1">启用</option>
+              <option value="0">禁用</option>
+            </select>
+          </label>
+          <label>
+            <span>封禁时发送邮件</span>
+            <select id="auto_ban_email_on_ban">
+              <option value="1">启用</option>
+              <option value="0">禁用</option>
+            </select>
+          </label>
+        </div>
+        <div class="two-col">
+          <label>
+            <span>监测时间窗口（秒）</span>
+            <input id="auto_ban_window_seconds" type="number" min="10" value="60" />
+          </label>
+          <label>
+            <span>最大请求数</span>
+            <input id="auto_ban_max_requests" type="number" min="1" value="100" />
+          </label>
+        </div>
+        <div class="two-col">
+          <label>
+            <span>封禁时长（秒）</span>
+            <input id="auto_ban_ban_duration_seconds" type="number" min="60" value="3600" />
+          </label>
+          <label>
+            <span>最大404错误数</span>
+            <input id="auto_ban_max_404" type="number" min="1" value="20" />
+          </label>
+        </div>
+        <label>
+          <span>白名单IP（逗号分隔）</span>
+          <input id="auto_ban_whitelist" type="text" placeholder="192.168.1.1,10.0.0.1" />
+        </label>
+        <p class="hint">白名单中的IP地址将不受自动封禁规则限制。</p>
+      </form>
+      <div class="modal-footer">
+        <button type="button" class="ghost-btn" data-close-modal="auto-ban-modal">取消</button>
+        <button type="submit" form="auto-ban-settings-form" class="primary-btn">保存配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 恢复确认弹框 -->
+  <div id="backup-restore-modal" class="modal-overlay" hidden>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>恢复数据库</h3>
+        <button type="button" class="modal-close-btn" data-close-modal="backup-restore-modal" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <input id="restore_backup_filename" type="hidden" />
+        <p>即将从备份文件 <strong id="restore-backup-name"></strong> 恢复数据库。</p>
+        <label>
+          <span>恢复模式</span>
+          <select id="restore_mode">
+            <option value="overwrite">覆盖模式（替换整个数据库）</option>
+            <option value="merge">合并模式（仅导入新配置）</option>
+          </select>
+        </label>
+        <p class="hint" id="restore-mode-hint">覆盖模式会替换当前数据库中的所有配置和数据。合并模式会导入所有配置表（系统设置、路由规则、GeoIP 等），跳过已存在的条目，运行日志和封禁列表不会被导入。</p>
+        <p class="hint" style="color: var(--error);">注意：恢复后服务配置将自动重新加载。</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="ghost-btn" data-close-modal="backup-restore-modal">取消</button>
+        <button type="button" id="backup-restore-confirm-btn" class="primary-btn">确认恢复</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/_admin/static/admin.js?v=20260831" defer></script>
 </body>
 </html>

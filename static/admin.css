@@ -1925,6 +1925,17 @@ select {
   border-color: var(--ink-400);
 }
 
+.ghost-btn.danger {
+  color: #dc3545;
+  border-color: #dc3545;
+}
+
+.ghost-btn.danger:hover {
+  background: #dc3545;
+  color: #fff;
+  border-color: #dc3545;
+}
+
 .rules-layout {
   display: grid;
   grid-template-columns: 1.2fr 1fr;
@@ -2051,9 +2062,103 @@ select {
 
 .rules-layout > *,
 .route-groups-layout > *,
-.logs-layout > * {
+.logs-layout > *,
+.app-log-layout > * {
   min-width: 0;
 }
+
+.app-log-layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+@media (max-width: 768px) {
+}
+
+.app-log-toolbar {
+  display: flex;
+  gap: var(--spacing-md);
+  align-items: flex-end;
+  margin-bottom: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.app-log-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#app-log-file-select {
+  min-width: 280px;
+}
+
+.app-log-toolbar label span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.app-log-info {
+  display: flex;
+  gap: var(--spacing-md);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: var(--spacing-sm);
+}
+
+.app-log-content {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border: 1px solid #313244;
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  height: 520px;
+  max-height: 520px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  tab-size: 4;
+  scrollbar-width: thin;
+  scrollbar-color: #45475a #1e1e2e;
+}
+
+.app-log-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.app-log-content::-webkit-scrollbar-track {
+  background: #1e1e2e;
+}
+
+.app-log-content::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 4px;
+}
+
+.app-log-content::-webkit-scrollbar-thumb:hover {
+  background: #585b70;
+}
+
+.log-ts { color: #6c7086; }
+.log-reqid { color: #cba6f7; font-weight: 600; }
+.log-level-INFO { color: #a6e3a1; font-weight: 600; }
+.log-level-DEBUG { color: #6c7086; }
+.log-level-WARNING { color: #f9e2af; font-weight: 600; }
+.log-level-ERROR { color: #f38ba8; font-weight: 600; }
+.log-level-CRITICAL { color: #f38ba8; font-weight: 700; text-decoration: underline; }
+.log-method { color: #cba6f7; font-weight: 600; }
+.log-status-2xx { color: #a6e3a1; }
+.log-status-3xx { color: #89b4fa; }
+.log-status-4xx { color: #f9e2af; }
+.log-status-5xx { color: #f38ba8; }
+.log-duration { color: #fab387; }
+.log-url { color: #89b4fa; }
 
 .route-group-cards {
   display: flex;
@@ -4393,6 +4498,17 @@ label span strong[style*="color"] {
   transform: translateY(0) scale(0.98);
 }
 
+.ghost-btn.danger {
+  color: #e74c3c;
+  border-color: #e74c3c;
+}
+
+.ghost-btn.danger:hover {
+  background: #e74c3c;
+  color: #fff;
+  border-color: #e74c3c;
+}
+
 /* focus-visible 统一（所有可交互元素） */
 .primary-btn:focus-visible,
 .ghost-btn:focus-visible,
@@ -4608,25 +4724,132 @@ select:focus-visible {
     justify-content: stretch;
   }
 
-  /* 规则表格容器横向滚动 */
+  /* ===== 表格移动端卡片式布局 ===== */
+
   .rule-list-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: visible;
   }
 
-  .rule-list-wrap > .rules-table,
-  .rule-list-wrap > .compact-table {
-    min-width: 720px;
-  }
-
-  /* 前缀卡片内规则表格横向滚动 */
   .prefix-card-rules {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: visible;
   }
 
-  .prefix-card-rules .rules-table {
-    min-width: 820px;
+  .prefix-card-rules .rules-table,
+  #geoip-online .rules-table,
+  #ip-ban-manager .compact-table {
+    display: block;
+    width: 100%;
+  }
+
+  .prefix-card-rules .rules-table thead,
+  #geoip-online .rules-table thead,
+  #ip-ban-manager .compact-table thead {
+    display: none;
+  }
+
+  .prefix-card-rules .rules-table tbody,
+  #geoip-online .rules-table tbody,
+  #ip-ban-manager .compact-table tbody {
+    display: block;
+  }
+
+  .prefix-card-rules .rules-table tr,
+  #geoip-online .rules-table tr,
+  #ip-ban-manager .compact-table tr {
+    display: block;
+    margin-bottom: var(--spacing-sm);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+  }
+
+  .prefix-card-rules .rules-table td,
+  #geoip-online .rules-table td,
+  #ip-ban-manager .compact-table td {
+    display: block;
+    padding: 4px var(--spacing-sm);
+    border: none;
+    border-bottom: 1px solid var(--border-lighter, rgba(0,0,0,0.04));
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    font-size: 13px;
+    position: static;
+  }
+
+  .prefix-card-rules .rules-table td:last-child,
+  #geoip-online .rules-table td:last-child,
+  #ip-ban-manager .compact-table td:last-child {
+    border-bottom: none;
+  }
+
+  /* label 在上方一行 */
+  .prefix-card-rules .rules-table td::before,
+  #geoip-online .rules-table td::before,
+  #ip-ban-manager .compact-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-bottom: 2px;
+  }
+
+  /* 操作列：不显示 label，按钮左对齐 */
+  .prefix-card-rules .rules-table td:last-child,
+  #geoip-online .rules-table td:last-child,
+  #ip-ban-manager .compact-table td:last-child {
+    position: static;
+    width: auto;
+    min-width: 0;
+    box-shadow: none;
+    background: transparent;
+    padding: var(--spacing-sm);
+    border-top: 1px solid var(--border-light);
+    text-align: left;
+  }
+
+  .prefix-card-rules .rules-table td:last-child::before,
+  #geoip-online .rules-table td:last-child::before,
+  #ip-ban-manager .compact-table td:last-child::before {
+    display: none;
+  }
+
+  .prefix-card-rules .rules-table td:last-child .table-actions,
+  #geoip-online .rules-table td:last-child .table-actions,
+  #ip-ban-manager .compact-table td:last-child .table-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  /* 移除 sticky 定位 */
+  .prefix-card-rules .rules-table th:nth-child(11),
+  .prefix-card-rules .rules-table td:nth-child(11),
+  #geoip-online .rules-table th:nth-child(6),
+  #geoip-online .rules-table td:nth-child(6),
+  .compact-table th:nth-child(7),
+  .compact-table td:nth-child(7) {
+    position: static;
+    width: auto;
+    min-width: 0;
+    box-shadow: none;
+  }
+
+  /* 卡片 hover */
+  .prefix-card-rules .rules-table tr:hover,
+  #geoip-online .rules-table tr:hover,
+  #ip-ban-manager .compact-table tr:hover {
+    box-shadow: none;
+    border-color: var(--accent-border);
+  }
+
+  /* rewrite-cell code 不截断 */
+  .prefix-card-rules .rules-table .rewrite-cell code {
+    overflow: visible !important;
+    white-space: normal !important;
+    text-overflow: clip !important;
+    word-break: break-all;
   }
 
   /* table-actions 居中换行 */
@@ -4704,18 +4927,6 @@ select:focus-visible {
 
   .modal-content::before {
     border-radius: 0;
-  }
-
-  /* 封禁列表表格横滚适配（与路由列表 prefix-card-rules 同源） */
-  #ip-ban-manager .rule-list-wrap {
-    overflow-x: auto;
-    overflow-y: auto;
-    max-height: var(--panel-scroll-max-height);
-    -webkit-overflow-scrolling: touch;
-  }
-
-  #ip-ban-manager .rule-list-wrap > .compact-table {
-    min-width: 760px;
   }
 }
 

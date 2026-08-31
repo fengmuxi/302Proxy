@@ -4,9 +4,13 @@ import hashlib
 import hmac
 import json
 import inspect
+import os
+import shutil
+import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from aiohttp import web
 
@@ -24,6 +28,8 @@ class AdminConsole:
         offline_rollback_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
         online_cache_clear_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
         ban_manager_callback: Callable[[str, Dict], Awaitable[None]] | None = None,
+        log_cleanup_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
+        log_file_cleanup_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
     ):
         self.config_store = config_store
         self.reload_callback = reload_callback
@@ -31,7 +37,11 @@ class AdminConsole:
         self.offline_rollback_callback = offline_rollback_callback
         self.online_cache_clear_callback = online_cache_clear_callback
         self.ban_manager_callback = ban_manager_callback
+        self.log_cleanup_callback = log_cleanup_callback
+        self.log_file_cleanup_callback = log_file_cleanup_callback
         self.static_dir = Path(__file__).resolve().parent / "static"
+        self.backup_dir = Path(__file__).resolve().parent / "data" / "backups"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/_admin", self.index)
@@ -56,6 +66,8 @@ class AdminConsole:
         app.router.add_delete("/_admin/api/logs", self.delete_route_logs)
         app.router.add_get("/_admin/api/log-settings", self.get_route_log_settings)
         app.router.add_put("/_admin/api/log-settings", self.update_route_log_settings)
+        app.router.add_get("/_admin/api/app-logs", self.list_app_log_files)
+        app.router.add_get("/_admin/api/app-logs/content", self.get_app_log_content)
         app.router.add_get("/_admin/api/ip-cache-settings", self.get_ip_cache_settings)
         app.router.add_put("/_admin/api/ip-cache-settings", self.update_ip_cache_settings)
         app.router.add_get("/_admin/api/banned-ips", self.list_banned_ips)
@@ -63,11 +75,23 @@ class AdminConsole:
         app.router.add_delete("/_admin/api/banned-ips/{ip:.+}", self.remove_banned_ip)
         app.router.add_post("/_admin/api/banned-ips/clear", self.clear_banned_ips)
         app.router.add_post("/_admin/api/banned-ips/{ip:.+}/extend", self.extend_banned_ip)
+        app.router.add_get("/_admin/api/auto-ban", self.get_auto_ban_settings)
+        app.router.add_put("/_admin/api/auto-ban", self.update_auto_ban_settings)
+        app.router.add_get("/_admin/api/email", self.get_email_settings)
+        app.router.add_put("/_admin/api/email", self.update_email_settings)
+        app.router.add_post("/_admin/api/email/test", self.test_email)
         app.router.add_get("/_admin/api/rules", self.list_rules)
         app.router.add_post("/_admin/api/rules", self.create_rule)
         app.router.add_get("/_admin/api/rules/{rule_id:\\d+}", self.get_rule)
         app.router.add_put("/_admin/api/rules/{rule_id:\\d+}", self.update_rule)
         app.router.add_delete("/_admin/api/rules/{rule_id:\\d+}", self.delete_rule)
+        app.router.add_get("/_admin/api/backup/list", self.list_backups)
+        app.router.add_post("/_admin/api/backup/create", self.create_backup)
+        app.router.add_get("/_admin/api/backup/download/{filename}", self.download_backup)
+        app.router.add_post("/_admin/api/backup/restore", self.restore_backup)
+        app.router.add_delete("/_admin/api/backup/{filename}", self.delete_backup)
+        app.router.add_post("/_admin/api/log-cleanup", self.cleanup_log_files)
+        app.router.add_post("/_admin/api/log-file-cleanup", self.cleanup_log_files_on_disk)
 
     async def index(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(self.static_dir / "admin.html")
@@ -279,6 +303,78 @@ class AdminConsole:
         payload = await self._read_json(request)
         return await self._run_protected(request, lambda: self.config_store.update_route_log_settings(payload))
 
+    async def list_app_log_files(self, request: web.Request) -> web.Response:
+        config = self.config_store.load_runtime_config()
+        log_path = config.logging.file_path
+        if not log_path:
+            return self._json({"items": [], "current": ""})
+        from pathlib import Path
+        import glob as glob_module
+        log_file = Path(log_path)
+        log_dir = log_file.parent
+        log_name = log_file.name
+        patterns = [
+            str(log_dir / f"{log_name}.*"),
+            str(log_dir / "*.log"),
+            str(log_dir / "*.log.*"),
+        ]
+        seen = set()
+        files = []
+        for pattern in patterns:
+            for f in glob_module.glob(pattern):
+                p = Path(f)
+                if p.name in seen or not p.is_file():
+                    continue
+                seen.add(p.name)
+                try:
+                    stat = p.stat()
+                except OSError:
+                    continue
+                files.append({
+                    "name": p.name,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "is_current": p.name == log_name,
+                })
+        files.sort(key=lambda x: x["modified"], reverse=True)
+        current_name = log_name
+        return self._json({"items": files, "current": current_name})
+
+    async def get_app_log_content(self, request: web.Request) -> web.Response:
+        config = self.config_store.load_runtime_config()
+        log_path = config.logging.file_path
+        if not log_path:
+            return self._json({"content": "", "total_lines": 0})
+        from pathlib import Path
+        file_name = request.query.get("file", "")
+        keyword = request.query.get("keyword", "").strip()
+        tail_lines = int(request.query.get("tail", "500") or "500")
+        if file_name:
+            target = Path(log_path).parent / file_name
+        else:
+            target = Path(log_path)
+        if not target.exists() or not target.is_file():
+            return self._json({"content": "", "total_lines": 0, "error": "文件不存在"})
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+        except Exception as e:
+            return self._json({"content": "", "total_lines": 0, "error": str(e)})
+        total_lines = len(all_lines)
+        if keyword:
+            matched = [line for line in all_lines if keyword.lower() in line.lower()]
+            content = "".join(reversed(matched[-tail_lines:]))
+            matched_count = len(matched)
+        else:
+            content = "".join(reversed(all_lines[-tail_lines:]))
+            matched_count = total_lines
+        return self._json({
+            "content": content,
+            "total_lines": total_lines,
+            "matched_lines": matched_count,
+            "file": target.name,
+        })
+
     async def get_ip_cache_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self._get_ip_cache_settings())
 
@@ -304,6 +400,99 @@ class AdminConsole:
             else:
                 loop.run_until_complete(self.reload_callback())
         return {"message": "请求结果缓存配置已更新", **result}
+
+    async def get_auto_ban_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self._get_auto_ban_settings())
+
+    def _get_auto_ban_settings(self) -> Dict[str, Any]:
+        config = self.config_store.load_runtime_config()
+        return {
+            "enabled": config.auto_ban.enabled,
+            "window_seconds": config.auto_ban.window_seconds,
+            "max_requests": config.auto_ban.max_requests,
+            "ban_duration_seconds": config.auto_ban.ban_duration_seconds,
+            "max_404": config.auto_ban.max_404,
+            "auto_ban_on_404": config.auto_ban.auto_ban_on_404,
+            "whitelist": config.auto_ban.whitelist,
+            "email_on_ban": config.auto_ban.email_on_ban,
+        }
+
+    async def update_auto_ban_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_auto_ban_settings(payload))
+
+    def _update_auto_ban_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_auto_ban_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "自动封禁配置已更新", **result}
+
+    async def get_email_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self._get_email_settings())
+
+    def _get_email_settings(self) -> Dict[str, Any]:
+        config = self.config_store.load_runtime_config()
+        return {
+            "enabled": config.email.enabled,
+            "smtp_host": config.email.smtp_host,
+            "smtp_port": config.email.smtp_port,
+            "smtp_ssl": config.email.smtp_ssl,
+            "sender": config.email.sender,
+            "sender_name": config.email.sender_name,
+            "password": config.email.password,
+            "recipients": config.email.recipients,
+            "alert_window_seconds": config.email.alert_window_seconds,
+            "alert_max_requests": config.email.alert_max_requests,
+            "alert_max_404": config.email.alert_max_404,
+            "alert_cooldown_minutes": config.email.alert_cooldown_minutes,
+        }
+
+    async def update_email_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_email_settings(payload))
+
+    def _update_email_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_email_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "邮件提醒配置已更新", **result}
+
+    async def test_email(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._test_email(payload))
+
+    def _test_email(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from email_notifier import EmailNotifier
+        from config import EmailConfig
+        
+        email_config = EmailConfig(
+            enabled=True,
+            smtp_host=str(payload.get("smtp_host", "") or ""),
+            smtp_port=max(1, int(payload.get("smtp_port", 465) or 465)),
+            smtp_ssl=bool(payload.get("smtp_ssl", True)),
+            sender=str(payload.get("sender", "") or ""),
+            sender_name=str(payload.get("sender_name", "") or ""),
+            password=str(payload.get("password", "") or ""),
+            recipients=str(payload.get("recipients", "") or ""),
+        )
+        
+        # 获取模板类型，默认为alert
+        template_type = str(payload.get("template_type", "alert") or "alert")
+        
+        notifier = EmailNotifier(email_config)
+        success, message = notifier.send_test_email_sync(email_config, template_type)
+        
+        return {"success": success, "message": message}
 
     async def list_banned_ips(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: {"items": self.config_store.list_banned_ips()})
@@ -384,6 +573,267 @@ class AdminConsole:
             await self.reload_callback()
             return {"deleted": True, "id": rule_id}
         return await self._run_protected(request, operation)
+
+    # ===== 备份与恢复 =====
+
+    async def list_backups(self, request: web.Request) -> web.Response:
+        async def operation():
+            items = []
+            for f in sorted(self.backup_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True):
+                stat = f.stat()
+                items.append({
+                    "filename": f.name,
+                    "size": stat.st_size,
+                    "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds"),
+                })
+            return {"items": items}
+        return await self._run_protected(request, operation)
+
+    async def create_backup(self, request: web.Request) -> web.Response:
+        async def operation():
+            db_path = self.config_store.db_path
+            if not db_path.exists():
+                raise ValueError("数据库文件不存在，无法创建备份。")
+            now = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"backup_{now}.db"
+            backup_path = self.backup_dir / backup_filename
+            shutil.copy2(str(db_path), str(backup_path))
+            return {
+                "filename": backup_filename,
+                "size": backup_path.stat().st_size,
+            }
+        return await self._run_protected(request, operation, status=201)
+
+    async def download_backup(self, request: web.Request) -> web.Response:
+        filename = request.match_info["filename"]
+        if not filename.endswith(".db") or "/" in filename or "\\" in filename:
+            return self._json({"error": "无效的文件名"}, status=400)
+
+        if self._is_auth_enabled() and not self._is_authenticated(request):
+            return self._json({"error": "未登录或登录已失效。"}, status=401)
+
+        backup_path = self.backup_dir / filename
+        if not backup_path.exists():
+            return self._json({"error": "备份文件不存在"}, status=404)
+        return web.FileResponse(
+            backup_path,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+
+    async def restore_backup(self, request: web.Request) -> web.Response:
+        async def operation():
+            reader = await request.multipart()
+            restore_mode = ""
+            backup_filename = ""
+            uploaded_file: Optional[bytes] = None
+
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                field_name = part.name
+                if field_name == "restore_mode":
+                    restore_mode = (await part.read()).decode("utf-8").strip()
+                elif field_name == "backup_filename":
+                    backup_filename = (await part.read()).decode("utf-8").strip()
+                elif field_name == "file":
+                    uploaded_file = await part.read()
+
+            if restore_mode not in ("overwrite", "merge"):
+                raise ValueError("恢复模式必须是 overwrite 或 merge。")
+
+            db_path = self.config_store.db_path
+
+            if uploaded_file:
+                if restore_mode == "overwrite":
+                    with open(str(db_path), "wb") as f:
+                        f.write(uploaded_file)
+                    await self.reload_callback()
+                    return {"message": "数据库已覆盖恢复，服务配置已重新加载。", "mode": "overwrite"}
+                else:
+                    return await self._merge_import(uploaded_file)
+
+            if backup_filename:
+                backup_path = self.backup_dir / backup_filename
+                if not backup_path.exists():
+                    raise ValueError(f"备份文件 {backup_filename} 不存在。")
+                if restore_mode == "overwrite":
+                    shutil.copy2(str(backup_path), str(db_path))
+                    await self.reload_callback()
+                    return {"message": f"已从 {backup_filename} 覆盖恢复，服务配置已重新加载。", "mode": "overwrite"}
+                else:
+                    with open(str(backup_path), "rb") as f:
+                        backup_data = f.read()
+                    return await self._merge_import(backup_data)
+
+            raise ValueError("请提供上传文件或指定备份文件名。")
+
+        return await self._run_protected(request, operation)
+
+    async def _merge_import(self, backup_data: bytes) -> Dict[str, Any]:
+        db_path = self.config_store.db_path
+        current_conn = sqlite3.connect(str(db_path))
+        backup_conn = sqlite3.connect(":memory:")
+        try:
+            sql_text = backup_data.decode("utf-8", errors="replace") if isinstance(backup_data, bytes) else backup_data
+            backup_conn.executescript(sql_text)
+
+            results = {}
+
+            # --- 单行配置表：用备份数据覆盖当前值 ---
+            single_row_tables = [
+                "system_settings",
+                "feature_flags",
+                "remote_config_sources",
+                "geoip_settings",
+                "route_log_settings",
+            ]
+            for table in single_row_tables:
+                backup_row = backup_conn.execute(f"SELECT * FROM {table} WHERE id = 1").fetchone()
+                if backup_row:
+                    columns = [desc[0] for desc in backup_conn.execute(f"SELECT * FROM {table} LIMIT 0").description]
+                    row_dict = dict(zip(columns, backup_row))
+                    set_clause = ", ".join(f"{col} = ?" for col in columns if col != "id")
+                    vals = [row_dict[col] for col in columns if col != "id"]
+                    current_conn.execute(f"UPDATE {table} SET {set_clause} WHERE id = 1", vals)
+                    results[table] = "已覆盖"
+
+            # --- forward_rules：按 (path_prefix, request_host, target_url) 去重插入 ---
+            if self._table_exists(backup_conn, "forward_rules"):
+                existing_rules = set()
+                for row in current_conn.execute(
+                    "SELECT path_prefix, request_host, target_url FROM forward_rules"
+                ):
+                    existing_rules.add((row[0] or "", row[1] or "", row[2] or ""))
+
+                columns = [desc[0] for desc in backup_conn.execute("SELECT * FROM forward_rules LIMIT 0").description]
+                insert_cols = [c for c in columns if c != "id"]
+                inserted = 0
+                skipped = 0
+                for row in backup_conn.execute("SELECT * FROM forward_rules").fetchall():
+                    row_dict = dict(zip(columns, row))
+                    key = (row_dict.get("path_prefix", ""), row_dict.get("request_host", ""), row_dict.get("target_url", ""))
+                    if key in existing_rules:
+                        skipped += 1
+                        continue
+                    vals = [row_dict[c] for c in insert_cols]
+                    placeholders = ", ".join(["?"] * len(insert_cols))
+                    col_names = ", ".join(insert_cols)
+                    current_conn.execute(
+                        f"INSERT OR IGNORE INTO forward_rules ({col_names}) VALUES ({placeholders})",
+                        vals,
+                    )
+                    inserted += 1
+                results["forward_rules"] = f"新增 {inserted} 条，跳过 {skipped} 条"
+
+            # --- route_groups：按 PK (request_host, path_prefix) 去重插入 ---
+            if self._table_exists(backup_conn, "route_groups"):
+                existing_groups = set()
+                for row in current_conn.execute("SELECT request_host, path_prefix FROM route_groups"):
+                    existing_groups.add((row[0] or "", row[1] or ""))
+                columns = [desc[0] for desc in backup_conn.execute("SELECT * FROM route_groups LIMIT 0").description]
+                insert_cols = [c for c in columns if c not in ("request_host", "path_prefix")]
+                inserted = 0
+                skipped = 0
+                for row in backup_conn.execute("SELECT * FROM route_groups").fetchall():
+                    row_dict = dict(zip(columns, row))
+                    key = (row_dict.get("request_host", ""), row_dict.get("path_prefix", ""))
+                    if key in existing_groups:
+                        skipped += 1
+                        continue
+                    all_cols = ["request_host", "path_prefix"] + insert_cols
+                    vals = [row_dict[c] for c in all_cols]
+                    placeholders = ", ".join(["?"] * len(all_cols))
+                    col_names = ", ".join(all_cols)
+                    current_conn.execute(
+                        f"INSERT OR IGNORE INTO route_groups ({col_names}) VALUES ({placeholders})",
+                        vals,
+                    )
+                    inserted += 1
+                results["route_groups"] = f"新增 {inserted} 条，跳过 {skipped} 条"
+
+            # --- geoip_online_sources：按 name 去重插入 ---
+            if self._table_exists(backup_conn, "geoip_online_sources"):
+                existing_sources = set()
+                for row in current_conn.execute("SELECT name FROM geoip_online_sources"):
+                    existing_sources.add(row[0] or "")
+                columns = [desc[0] for desc in backup_conn.execute("SELECT * FROM geoip_online_sources LIMIT 0").description]
+                insert_cols = [c for c in columns if c != "id"]
+                inserted = 0
+                skipped = 0
+                for row in backup_conn.execute("SELECT * FROM geoip_online_sources").fetchall():
+                    row_dict = dict(zip(columns, row))
+                    if row_dict.get("name", "") in existing_sources:
+                        skipped += 1
+                        continue
+                    vals = [row_dict[c] for c in insert_cols]
+                    placeholders = ", ".join(["?"] * len(insert_cols))
+                    col_names = ", ".join(insert_cols)
+                    current_conn.execute(
+                        f"INSERT OR IGNORE INTO geoip_online_sources ({col_names}) VALUES ({placeholders})",
+                        vals,
+                    )
+                    inserted += 1
+                results["geoip_online_sources"] = f"新增 {inserted} 条，跳过 {skipped} 条"
+
+            current_conn.commit()
+            await self.reload_callback()
+
+            summary_parts = [f"{tbl}: {msg}" for tbl, msg in results.items()]
+            return {
+                "message": "合并导入完成：" + "；".join(summary_parts),
+                "mode": "merge",
+                "details": results,
+            }
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(f"备份文件不是有效的 SQLite 数据库: {exc}")
+        finally:
+            current_conn.close()
+            backup_conn.close()
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    async def delete_backup(self, request: web.Request) -> web.Response:
+        filename = request.match_info["filename"]
+        async def operation():
+            if not filename.endswith(".db") or "/" in filename or "\\" in filename:
+                raise ValueError("无效的文件名。")
+            backup_path = self.backup_dir / filename
+            if not backup_path.exists():
+                raise KeyError(f"备份文件 {filename} 不存在。")
+            backup_path.unlink()
+            return {"deleted": True, "filename": filename}
+        return await self._run_protected(request, operation)
+
+    async def cleanup_log_files(self, request: web.Request) -> web.Response:
+        await self._read_json(request)
+
+        async def operation():
+            if self.log_cleanup_callback is None:
+                raise ValueError("日志清理服务不可用。")
+            return await self.log_cleanup_callback()
+
+        return await self._run_protected(request, operation)
+
+    async def cleanup_log_files_on_disk(self, request: web.Request) -> web.Response:
+        await self._read_json(request)
+
+        async def operation():
+            if self.log_file_cleanup_callback is None:
+                raise ValueError("日志文件清理服务不可用。")
+            return await self.log_file_cleanup_callback()
+
+        return await self._run_protected(request, operation)
+
+    # ===== 内部工具方法 =====
 
     async def _read_json(self, request: web.Request) -> Dict[str, Any]:
         try:

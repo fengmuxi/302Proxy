@@ -9,10 +9,11 @@ IP封禁管理模块
 """
 
 import asyncio
+import ipaddress
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 logger = logging.getLogger("proxy.ip_ban")
 
@@ -31,9 +32,21 @@ class BanEntry:
 class IpBanManager:
     def __init__(self):
         self._bans: Dict[str, BanEntry] = {}
+        self._cidr_bans: List[Tuple[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], BanEntry]] = []
         self._lock = asyncio.Lock()
         self._total_bans = 0
         self._total_hits = 0
+
+    def _is_cidr(self, ip_str: str) -> bool:
+        """判断字符串是否为 CIDR 网段格式（如 192.168.1.0/24）。"""
+        return "/" in ip_str
+
+    def _parse_cidr(self, cidr_str: str) -> Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+        """解析 CIDR 字符串为网络对象，失败返回 None。"""
+        try:
+            return ipaddress.ip_network(cidr_str, strict=False)
+        except ValueError:
+            return None
 
     def _is_expired(self, entry: BanEntry) -> bool:
         if entry.permanent or entry.expire_at <= 0:
@@ -48,17 +61,38 @@ class IpBanManager:
 
     async def is_banned(self, ip: str, path: str = "") -> Optional[BanEntry]:
         async with self._lock:
+            # 1. 先精确匹配单 IP（快速路径，大多数封禁是单 IP）
             entry = self._bans.get(ip)
-            if entry is None:
-                return None
-            if self._is_expired(entry):
-                del self._bans[ip]
-                return None
-            # 路径前缀不匹配：不算命中，但不删除记录
-            if not self._matches_path(entry, path):
-                return None
-            self._total_hits += 1
-            return entry
+            if entry is not None:
+                if self._is_expired(entry):
+                    del self._bans[ip]
+                elif self._matches_path(entry, path):
+                    self._total_hits += 1
+                    return entry
+            # 2. 再遍历 CIDR 网段列表匹配
+            if self._cidr_bans:
+                try:
+                    parsed_ip = ipaddress.ip_address(ip)
+                except ValueError:
+                    parsed_ip = None
+                if parsed_ip is not None:
+                    expired_cidrs = []
+                    matched = None
+                    for net, cidr_entry in self._cidr_bans:
+                        if self._is_expired(cidr_entry):
+                            expired_cidrs.append((net, cidr_entry))
+                            continue
+                        if parsed_ip in net and self._matches_path(cidr_entry, path):
+                            matched = cidr_entry
+                            break
+                    # 清理过期的 CIDR 条目
+                    for item in expired_cidrs:
+                        self._cidr_bans.remove(item)
+                        self._bans.pop(item[1].ip, None)
+                    if matched:
+                        self._total_hits += 1
+                        return matched
+            return None
 
     async def ban_ip(
         self,
@@ -89,6 +123,11 @@ class IpBanManager:
         )
         async with self._lock:
             self._bans[ip] = entry
+            # 如果是 CIDR 网段，同时加入 CIDR 列表用于网段匹配
+            if self._is_cidr(ip):
+                net = self._parse_cidr(ip)
+                if net is not None:
+                    self._cidr_bans.append((net, entry))
             self._total_bans += 1
         logger.info(
             "IP已封禁: %s 原因=%s 操作者=%s 永久=%s 到期=%s 作用域=%s",
@@ -102,6 +141,9 @@ class IpBanManager:
         async with self._lock:
             if ip in self._bans:
                 del self._bans[ip]
+                # 如果是 CIDR 网段，同时从 CIDR 列表移除
+                if self._is_cidr(ip):
+                    self._cidr_bans = [(n, e) for n, e in self._cidr_bans if e.ip != ip]
                 logger.info("IP已解封: %s", ip)
                 return True
             return False
@@ -154,6 +196,7 @@ class IpBanManager:
         async with self._lock:
             count = len(self._bans)
             self._bans.clear()
+            self._cidr_bans.clear()
             return count
 
     async def cleanup_expired(self) -> int:
@@ -161,6 +204,9 @@ class IpBanManager:
             expired_keys = [ip for ip, e in self._bans.items() if self._is_expired(e)]
             for k in expired_keys:
                 del self._bans[k]
+            # 同步清理过期的 CIDR 条目
+            if self._cidr_bans:
+                self._cidr_bans = [(n, e) for n, e in self._cidr_bans if not self._is_expired(e)]
             return len(expired_keys)
 
     async def import_bans(self, bans: List[Dict]) -> int:
@@ -182,6 +228,11 @@ class IpBanManager:
             )
             async with self._lock:
                 self._bans[ip] = entry
+                # 如果是 CIDR 网段，同时加入 CIDR 列表
+                if self._is_cidr(ip):
+                    net = self._parse_cidr(ip)
+                    if net is not None:
+                        self._cidr_bans.append((net, entry))
                 count += 1
         return count
 
