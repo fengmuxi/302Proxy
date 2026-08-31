@@ -1834,8 +1834,9 @@ async function loadAppLogContent(isAutoRefresh = false) {
   params.set("tail", tailLines);
   
   const contentEl = document.getElementById("app-log-content");
-  const oldLineCount = contentEl ? contentEl.children.length : 0;
-  const oldScrollTop = contentEl ? contentEl.scrollTop : 0;
+  const distanceFromBottom = contentEl 
+    ? contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight 
+    : 0;
   
   const data = await apiFetch(`/_admin/api/app-logs/content?${params.toString()}`);
   if (!data) return;
@@ -1871,12 +1872,7 @@ async function loadAppLogContent(isAutoRefresh = false) {
   if (state.logAutoScroll && contentEl) {
     contentEl.scrollTop = contentEl.scrollHeight;
   } else if (!getChecked("app-log-auto-refresh") && isAutoRefresh && contentEl) {
-    const newLineCount = contentEl.children.length;
-    const addedLines = newLineCount - oldLineCount;
-    if (addedLines > 0 && oldScrollTop > 0) {
-      const lineHeight = contentEl.scrollHeight / newLineCount;
-      contentEl.scrollTop = oldScrollTop + (addedLines * lineHeight);
-    }
+    contentEl.scrollTop = contentEl.scrollHeight - contentEl.clientHeight - distanceFromBottom;
   }
 }
 
