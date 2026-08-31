@@ -1038,11 +1038,19 @@ class ProxyRequestHandler:
                             "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                             client_ip, target_url, cached.redirect_url,
                         )
+                    # 创建 RedirectInfo 以便日志记录 redirect_location
+                    cached_redirect_info = RedirectInfo(
+                        original_url=target_url,
+                        redirect_url=cached.redirect_url,
+                        status_code=cached.status_code,
+                        redirect_count=1,
+                        redirect_chain=[],
+                    )
                     return StreamingResponse(
                         status=cached.status_code,
                         headers={"Location": cached.redirect_url},
                         body_stream=self._empty_stream(),
-                        redirect_info=None,
+                        redirect_info=cached_redirect_info,
                         route_decision=route_decision,
                         cache_status="HIT_REDIRECT",
                     )
@@ -1236,12 +1244,20 @@ class ProxyRequestHandler:
                         "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                         client_ip, target_url, cached.redirect_url,
                     )
+                # 创建 RedirectInfo 以便日志记录 redirect_location
+                cached_redirect_info = RedirectInfo(
+                    original_url=target_url,
+                    redirect_url=cached.redirect_url,
+                    status_code=cached.status_code,
+                    redirect_count=1,
+                    redirect_chain=[],
+                )
                 self._last_cache_status = "HIT_REDIRECT"
                 return (
                     cached.status_code,
                     {"Location": cached.redirect_url},
                     b"",
-                    None,
+                    cached_redirect_info,
                     route_decision,
                 )
 
