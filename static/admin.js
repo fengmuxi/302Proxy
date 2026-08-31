@@ -227,6 +227,97 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+// URL Tooltip 和复制功能
+let urlTooltip = null;
+
+function showUrlTooltip(e, url) {
+  if (!url || url === "-") return;
+  
+  hideUrlTooltip();
+  
+  urlTooltip = document.createElement("div");
+  urlTooltip.className = "url-tooltip";
+  urlTooltip.textContent = url;
+  document.body.appendChild(urlTooltip);
+  
+  const rect = e.target.getBoundingClientRect();
+  let top = rect.bottom + 8;
+  let left = rect.left;
+  
+  // 防止超出右边界
+  if (left + 500 > window.innerWidth) {
+    left = window.innerWidth - 510;
+  }
+  
+  // 防止超出下边界
+  if (top + 200 > window.innerHeight) {
+    top = rect.top - 208;
+  }
+  
+  urlTooltip.style.top = top + "px";
+  urlTooltip.style.left = left + "px";
+}
+
+function hideUrlTooltip() {
+  if (urlTooltip) {
+    urlTooltip.remove();
+    urlTooltip = null;
+  }
+}
+
+function copyToClipboard(text) {
+  if (!text || text === "-") return;
+  
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      showCopyToast("已复制到剪贴板");
+    }).catch(() => {
+      fallbackCopy(text);
+    });
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+    showCopyToast("已复制到剪贴板");
+  } catch (e) {
+    showCopyToast("复制失败");
+  }
+  document.body.removeChild(textarea);
+}
+
+function showCopyToast(message) {
+  const toast = document.createElement("div");
+  toast.style.cssText = `
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    background: #10b981;
+    color: white;
+    border-radius: 8px;
+    font-size: 14px;
+    z-index: 10001;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  `;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  
+  setTimeout(() => {
+    toast.remove();
+  }, 2000);
+}
+
 function formatDateTime(value) {
   if (!value) return "-";
   const date = new Date(value);
@@ -2559,7 +2650,29 @@ document.getElementById("route-log-delete-all-btn").addEventListener("click", as
   }
 });
 
+document.getElementById("route-logs-list-body").addEventListener("mouseover", (event) => {
+  const target = event.target.closest(".route-log-target-url");
+  if (target) {
+    const url = target.getAttribute("title") || target.textContent;
+    showUrlTooltip(event, url);
+  }
+});
+
+document.getElementById("route-logs-list-body").addEventListener("mouseout", (event) => {
+  const target = event.target.closest(".route-log-target-url");
+  if (target) {
+    hideUrlTooltip();
+  }
+});
+
 document.getElementById("route-logs-list-body").addEventListener("click", async (event) => {
+  const target = event.target.closest(".route-log-target-url");
+  if (target) {
+    const url = target.getAttribute("title") || target.textContent;
+    copyToClipboard(url);
+    return;
+  }
+  
   const button = event.target.closest("button[data-action]");
   if (!button) return;
 

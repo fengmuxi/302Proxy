@@ -3893,6 +3893,49 @@ label span strong[style*="color"] {
 .route-log-target-url {
   color: var(--accent-primary);
   font-weight: 500;
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  position: relative;
+  vertical-align: bottom;
+}
+
+.route-log-target-url:hover {
+  text-decoration: underline;
+}
+
+/* URL tooltip 样式 */
+.url-tooltip {
+  position: fixed;
+  z-index: 10000;
+  max-width: 500px;
+  max-height: 200px;
+  overflow: auto;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.url-tooltip::after {
+  content: "点击复制";
+  display: block;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: right;
 }
 
 .logs-layout .rule-list-wrap {
