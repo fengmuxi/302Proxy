@@ -149,7 +149,9 @@ class ProxyServer:
                 )
                 logger.debug("UA=%s", user_agent[:120] if user_agent else "-")
                 if client_ip:
-                    await self.auto_ban_monitor.record_request(client_ip, response.status)
+                    # 排除内部接口，不进行自动封禁监控
+                    if not request.path.startswith("/_"):
+                        await self.auto_ban_monitor.record_request(client_ip, response.status)
                 return response
             except Exception as e:
                 duration_ms = (time.perf_counter() - start_time) * 1000
