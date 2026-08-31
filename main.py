@@ -99,21 +99,34 @@ class ProxyServer:
     
     def _setup_routes(self):
         self.app.router.add_get('/_health', self.health_check)
-        self.app.router.add_get('/_stats', self.get_stats)
-        self.app.router.add_get('/_ip-cache/stats', self.get_ip_cache_stats)
-        self.app.router.add_post('/_ip-cache/clear', self.clear_ip_cache)
-        self.app.router.add_get('/_ban/list', self.list_bans)
-        self.app.router.add_post('/_ban/add', self.ban_ip)
-        self.app.router.add_post('/_ban/remove', self.unban_ip)
-        self.app.router.add_post('/_ban/clear', self.clear_all_bans)
-        self.app.router.add_get('/_ban/stats', self.get_ban_stats)
-        self.app.router.add_get('/_auto-ban/stats', self.get_auto_ban_stats)
-        self.app.router.add_get('/_auto-ban/tracked', self.get_auto_ban_tracked)
+        self.app.router.add_get('/_admin/api/stats', self.get_stats)
+        self.app.router.add_get('/_admin/api/ip-cache/stats', self.get_ip_cache_stats)
+        self.app.router.add_post('/_admin/api/ip-cache/clear', self.clear_ip_cache)
+        self.app.router.add_get('/_admin/api/ban/list', self.list_bans)
+        self.app.router.add_post('/_admin/api/ban/add', self.ban_ip)
+        self.app.router.add_post('/_admin/api/ban/remove', self.unban_ip)
+        self.app.router.add_post('/_admin/api/ban/clear', self.clear_all_bans)
+        self.app.router.add_get('/_admin/api/ban/stats', self.get_ban_stats)
+        self.app.router.add_get('/_admin/api/auto-ban/stats', self.get_auto_ban_stats)
+        self.app.router.add_get('/_admin/api/auto-ban/tracked', self.get_auto_ban_tracked)
         self.app.router.add_get('/_block/{token}', self.block_token_page)
         self.app.router.add_get('/_block/{token}/info', self.block_token_info)
         self.app.router.add_post('/_block/{token}/confirm', self.block_token_confirm)
         self.admin_console.register(self.app)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
+    
+    async def check_admin_auth(self, request: web.Request) -> bool:
+        config = self.admin_console._get_auth_config()
+        if not config.enabled:
+            return True
+        return self.admin_console._is_authenticated(request)
+    
+    def _add_security_headers(self, response: web.Response) -> web.Response:
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        if self.config.ssl.enabled:
+            response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        return response
     
     def _setup_middleware(self):
         @web.middleware
@@ -794,45 +807,50 @@ class ProxyServer:
         return response
     
     async def health_check(self, request: web.Request) -> web.Response:
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({
                 'status': 'healthy',
-                'database_path': str(self.config_store.db_path),
+                'timestamp': int(time.time()),
                 'route_group_count': len(self.config.route_groups),
-                'region_enabled_group_count': sum(
-                    1 for group in self.config.route_groups if group.region_matching_enabled
-                ),
                 'rule_count': len(self.config.proxy_rules)
             }, ensure_ascii=False).encode()
-        )
+        ))
     
     async def get_stats(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         stats = self.stats.get_stats()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats).encode()
-        )
+        ))
 
     async def get_ip_cache_stats(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         stats = self.ip_result_cache.get_stats()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats, ensure_ascii=False).encode()
-        )
+        ))
 
     async def clear_ip_cache(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         count = await self.ip_result_cache.clear()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"message": f"已清除 {count} 条请求结果缓存"}, ensure_ascii=False).encode()
-        )
+        ))
 
     async def list_bans(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         bans = await self.ip_ban_manager.list_bans()
         items = []
         for entry in bans:
@@ -845,13 +863,15 @@ class ProxyServer:
                 "permanent": entry.permanent,
             })
         stats = self.ip_ban_manager.get_stats()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"items": items, "stats": stats}, ensure_ascii=False).encode()
-        )
+        ))
 
     async def ban_ip(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         payload = await request.json()
         ip = str(payload.get("ip", "")).strip()
         reason = str(payload.get("reason", "")).strip()
@@ -859,16 +879,16 @@ class ProxyServer:
         duration_seconds = int(payload.get("duration_seconds", 0) or 0)
         permanent = bool(payload.get("permanent", True))
         if not ip:
-            return web.Response(
+            return self._add_security_headers(web.Response(
                 status=400,
                 headers={'Content-Type': 'application/json'},
                 body=json.dumps({"error": "IP地址不能为空"}, ensure_ascii=False).encode()
-            )
+            ))
         entry = await self.ip_ban_manager.ban_ip(
             ip=ip, reason=reason, banned_by=banned_by,
             duration_seconds=duration_seconds, permanent=permanent,
         )
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({
@@ -877,61 +897,71 @@ class ProxyServer:
                 "permanent": entry.permanent,
                 "expire_at": entry.expire_at,
             }, ensure_ascii=False).encode()
-        )
+        ))
 
     async def unban_ip(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         payload = await request.json()
         ip = str(payload.get("ip", "")).strip()
         if not ip:
-            return web.Response(
+            return self._add_security_headers(web.Response(
                 status=400,
                 headers={'Content-Type': 'application/json'},
                 body=json.dumps({"error": "IP地址不能为空"}, ensure_ascii=False).encode()
-            )
+            ))
         removed = await self.ip_ban_manager.unban_ip(ip)
         if not removed:
-            return web.Response(
+            return self._add_security_headers(web.Response(
                 status=404,
                 headers={'Content-Type': 'application/json'},
                 body=json.dumps({"error": f"IP {ip} 不在封禁列表中"}, ensure_ascii=False).encode()
-            )
-        return web.Response(
+            ))
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"message": f"IP {ip} 已解封"}, ensure_ascii=False).encode()
-        )
+        ))
 
     async def clear_all_bans(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         count = await self.ip_ban_manager.clear_all()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"message": f"已清除 {count} 条封禁记录"}, ensure_ascii=False).encode()
-        )
+        ))
 
     async def get_ban_stats(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         stats = self.ip_ban_manager.get_stats()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats, ensure_ascii=False).encode()
-        )
+        ))
 
     async def get_auto_ban_stats(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         stats = self.auto_ban_monitor.get_stats()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats, ensure_ascii=False).encode()
-        )
+        ))
 
     async def get_auto_ban_tracked(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
         tracked = self.auto_ban_monitor.get_tracked_ips()
-        return web.Response(
+        return self._add_security_headers(web.Response(
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"items": tracked}, ensure_ascii=False).encode()
-        )
+        ))
     
     async def block_token_page(self, request: web.Request) -> web.Response:
         """显示封禁确认页面"""

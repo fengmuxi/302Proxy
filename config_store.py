@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,6 +72,7 @@ class ConfigStore:
         self.db_path = Path(db_path or DEFAULT_DB_PATH)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.bootstrap_config = bootstrap_config or Config()
+        self._lock = threading.Lock()
 
         self._initialize_schema()
         self._bootstrap_if_needed(self.bootstrap_config)
@@ -602,6 +604,11 @@ class ConfigStore:
             self._ensure_column(connection, "system_settings", "email_alert_cooldown_minutes", "INTEGER NOT NULL DEFAULT 30")
             # 请求追踪：添加 request_id 列
             self._ensure_column(connection, "route_logs", "request_id", "TEXT NOT NULL DEFAULT ''")
+            # 安全增强：添加 session_secret 和 rsa_private_key 列
+            self._ensure_column(connection, "system_settings", "session_secret", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "rsa_private_key", "TEXT NOT NULL DEFAULT ''")
+            # 为旧数据库自动生成缺失的安全密钥
+            self._ensure_security_keys(connection)
 
     def _ensure_column(
         self,
@@ -615,6 +622,46 @@ class ConfigStore:
         if column_name in existing_columns:
             return
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition_sql}")
+
+    def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
+        """确保旧数据库也有 session_secret 和 rsa_private_key"""
+        import secrets as secrets_module
+        row = connection.execute(
+            "SELECT session_secret, rsa_private_key FROM system_settings WHERE id = 1"
+        ).fetchone()
+        if not row:
+            return
+        
+        updates = {}
+        if not row["session_secret"]:
+            updates["session_secret"] = secrets_module.token_hex(32)
+        
+        if not row["rsa_private_key"]:
+            try:
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                
+                private_key = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=2048,
+                )
+                private_pem = private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                ).decode('utf-8')
+                updates["rsa_private_key"] = private_pem
+            except ImportError:
+                # cryptography 未安装，跳过 RSA 密钥生成
+                pass
+        
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+            vals = list(updates.values())
+            connection.execute(
+                f"UPDATE system_settings SET {set_clause} WHERE id = 1",
+                vals,
+            )
 
     def _migrate_route_groups_table(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("PRAGMA table_info(route_groups)").fetchall()
@@ -648,6 +695,27 @@ class ConfigStore:
             if existing:
                 return
 
+            import secrets as secrets_module
+            session_secret = secrets_module.token_hex(32)
+            
+            # 生成 RSA 密钥对
+            rsa_private_key = ""
+            try:
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                
+                private_key = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=2048,
+                )
+                rsa_private_key = private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                ).decode('utf-8')
+            except ImportError:
+                pass
+
             now = utc_now()
             connection.execute(
                 """
@@ -661,10 +729,11 @@ class ConfigStore:
                     streaming_enable_range_support, streaming_max_request_body_size,
                     ip_cache_enabled, ip_cache_ttl_seconds, ip_cache_max_entries,
                     default_timeout, max_redirects,
-                    follow_redirects, trust_forward_headers, database_path, updated_at
+                    follow_redirects, trust_forward_headers, database_path, updated_at,
+                    session_secret, rsa_private_key
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -699,6 +768,8 @@ class ConfigStore:
                     int(config.trust_forward_headers),
                     str(self.db_path),
                     now,
+                    session_secret,
+                    rsa_private_key,
                 ),
             )
 
@@ -1275,6 +1346,10 @@ class ConfigStore:
 
         config.proxy_rules = [self._row_to_rule(row) for row in rules]
         config.admin_auth = self.bootstrap_config.admin_auth
+        # 从数据库读取安全密钥
+        if system_row:
+            config.admin_auth.session_secret = system_row["session_secret"] if "session_secret" in system_row.keys() else ""
+            config.admin_auth.rsa_private_key = system_row["rsa_private_key"] if "rsa_private_key" in system_row.keys() else ""
         return config
 
     def get_dashboard_data(self) -> Dict[str, Any]:

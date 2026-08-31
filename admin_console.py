@@ -49,6 +49,7 @@ class AdminConsole:
         app.router.add_static("/_admin/static/", str(self.static_dir), show_index=False)
         app.router.add_get("/_admin/api/auth/status", self.auth_status)
         app.router.add_post("/_admin/api/auth/login", self.login)
+        app.router.add_get("/_admin/api/auth/public-key", self.public_key)
         app.router.add_post("/_admin/api/auth/logout", self.logout)
         app.router.add_get("/_admin/api/bootstrap", self.bootstrap)
         app.router.add_get("/_admin/api/route-groups", self.list_route_groups)
@@ -107,6 +108,30 @@ class AdminConsole:
             }
         )
 
+    async def public_key(self, request: web.Request) -> web.Response:
+        """返回 RSA 公钥，供前端加密密码"""
+        config = self._get_auth_config()
+        rsa_private_key = getattr(config, 'rsa_private_key', '')
+        if not rsa_private_key:
+            return self._json({"error": "RSA 密钥未初始化"}, status=500)
+        
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import serialization
+            
+            private_key = load_pem_private_key(rsa_private_key.encode('utf-8'), password=None)
+            public_key = private_key.public_key()
+            public_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+            
+            return self._json({"public_key": public_pem})
+        except ImportError:
+            return self._json({"error": "cryptography 库未安装"}, status=500)
+        except Exception as e:
+            return self._json({"error": f"获取公钥失败: {str(e)}"}, status=500)
+
     async def login(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
         config = self._get_auth_config()
@@ -115,6 +140,35 @@ class AdminConsole:
 
         username = str(payload.get("username", "")).strip()
         password = str(payload.get("password", ""))
+        encrypted = payload.get("encrypted", False)
+        
+        # 如果是加密密码，进行解密
+        if encrypted:
+            rsa_private_key = getattr(config, 'rsa_private_key', '')
+            if rsa_private_key:
+                try:
+                    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+                    from cryptography.hazmat.primitives.asymmetric import padding
+                    from cryptography.hazmat.primitives import hashes
+                    import base64
+                    
+                    private_key = load_pem_private_key(rsa_private_key.encode('utf-8'), password=None)
+                    encrypted_bytes = base64.b64decode(password)
+                    password = private_key.decrypt(
+                        encrypted_bytes,
+                        padding.OAEP(
+                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None
+                        )
+                    ).decode('utf-8')
+                except ImportError:
+                    return self._json({"error": "cryptography 库未安装，无法解密密码"}, status=400)
+                except Exception:
+                    return self._json({"error": "密码解密失败"}, status=400)
+            else:
+                return self._json({"error": "RSA 密钥未配置"}, status=400)
+        
         if username != config.username or password != config.password:
             return self._json({"error": "账号或密码错误。"}, status=401)
 
@@ -126,12 +180,14 @@ class AdminConsole:
             }
         )
         max_age = max(3600, int(config.session_ttl_hours) * 3600)
+        ssl_enabled = getattr(self.config_store.load_runtime_config().ssl, 'enabled', False)
         response.set_cookie(
             config.cookie_name,
             self._build_session_token(config.username, max_age),
             max_age=max_age,
             httponly=True,
             samesite="Lax",
+            secure=ssl_enabled,
             path="/_admin",
         )
         return response
@@ -346,34 +402,75 @@ class AdminConsole:
         if not log_path:
             return self._json({"content": "", "total_lines": 0})
         from pathlib import Path
+        import asyncio
+        from collections import deque
+        
         file_name = request.query.get("file", "")
         keyword = request.query.get("keyword", "").strip()
-        tail_lines = int(request.query.get("tail", "500") or "500")
+        tail_lines = min(int(request.query.get("tail", "100") or "100"), 2000)
+        offset = int(request.query.get("offset", "0") or "0")
+        
+        display_limit = tail_lines
+        
         if file_name:
             target = Path(log_path).parent / file_name
         else:
             target = Path(log_path)
         if not target.exists() or not target.is_file():
             return self._json({"content": "", "total_lines": 0, "error": "文件不存在"})
-        try:
-            with open(target, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
-        except Exception as e:
-            return self._json({"content": "", "total_lines": 0, "error": str(e)})
-        total_lines = len(all_lines)
-        if keyword:
-            matched = [line for line in all_lines if keyword.lower() in line.lower()]
-            content = "".join(reversed(matched[-tail_lines:]))
-            matched_count = len(matched)
-        else:
-            content = "".join(reversed(all_lines[-tail_lines:]))
-            matched_count = total_lines
-        return self._json({
-            "content": content,
-            "total_lines": total_lines,
-            "matched_lines": matched_count,
-            "file": target.name,
-        })
+        
+        def _read_log():
+            try:
+                if keyword:
+                    matched = []
+                    total_lines = 0
+                    kw_lower = keyword.lower()
+                    with open(target, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            total_lines += 1
+                            if kw_lower in line.lower():
+                                matched.append(line)
+                                if len(matched) > 5000:
+                                    matched = matched[-3000:]
+                    total_matched = len(matched)
+                    if offset > 0:
+                        end = max(0, total_matched - offset)
+                        start = max(0, end - display_limit)
+                        selected = matched[start:end]
+                    else:
+                        selected = matched[-display_limit:] if len(matched) > display_limit else matched
+                    content = "".join(reversed(selected))
+                    return {
+                        "content": content,
+                        "total_lines": total_lines,
+                        "matched_lines": total_matched,
+                        "file": target.name,
+                    }
+                else:
+                    total_lines = 0
+                    last_lines = deque(maxlen=display_limit + offset)
+                    with open(target, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            total_lines += 1
+                            last_lines.append(line)
+                    if offset >= len(last_lines):
+                        selected = []
+                    else:
+                        end_idx = len(last_lines) - offset
+                        start_idx = max(0, end_idx - display_limit)
+                        selected = list(last_lines)[start_idx:end_idx]
+                    content = "".join(reversed(selected))
+                    return {
+                        "content": content,
+                        "total_lines": total_lines,
+                        "matched_lines": total_lines,
+                        "file": target.name,
+                    }
+            except Exception as e:
+                return {"content": "", "total_lines": 0, "error": str(e)}
+        
+        result = await asyncio.get_event_loop().run_in_executor(None, _read_log)
+        return self._json(result)
 
     async def get_ip_cache_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self._get_ip_cache_settings())
@@ -475,6 +572,11 @@ class AdminConsole:
         from email_notifier import EmailNotifier
         from config import EmailConfig
         
+        password = str(payload.get("password", "") or "")
+        masked_password = password[:2] + "****" if len(password) > 2 else "****"
+        logger.info("测试邮件配置: smtp_host=%s, sender=%s, password=%s", 
+                    payload.get("smtp_host", ""), payload.get("sender", ""), masked_password)
+        
         email_config = EmailConfig(
             enabled=True,
             smtp_host=str(payload.get("smtp_host", "") or ""),
@@ -482,11 +584,10 @@ class AdminConsole:
             smtp_ssl=bool(payload.get("smtp_ssl", True)),
             sender=str(payload.get("sender", "") or ""),
             sender_name=str(payload.get("sender_name", "") or ""),
-            password=str(payload.get("password", "") or ""),
+            password=password,
             recipients=str(payload.get("recipients", "") or ""),
         )
         
-        # 获取模板类型，默认为alert
         template_type = str(payload.get("template_type", "alert") or "alert")
         
         notifier = EmailNotifier(email_config)
@@ -845,11 +946,14 @@ class AdminConsole:
         return payload
 
     def _json(self, data: Dict[str, Any], status: int = 200) -> web.Response:
-        return web.Response(
+        response = web.Response(
             status=status,
             headers={"Content-Type": "application/json; charset=utf-8"},
             body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
         )
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        return response
 
     def _get_auth_config(self):
         return self.config_store.bootstrap_config.admin_auth
@@ -870,6 +974,10 @@ class AdminConsole:
 
     def _session_secret(self) -> bytes:
         config = self._get_auth_config()
+        # 优先使用独立的 session_secret
+        if hasattr(config, 'session_secret') and config.session_secret:
+            return config.session_secret.encode("utf-8")
+        # 回退到原有逻辑（兼容）
         return f"{config.username}\n{config.password}\n{config.cookie_name}".encode("utf-8")
 
     def _is_authenticated(self, request: web.Request) -> bool:

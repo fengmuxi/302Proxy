@@ -109,6 +109,57 @@ function showToast(message, isError = false) {
   }, 2600);
 }
 
+// ===== RSA 密码加密功能 =====
+let cachedPublicKey = null;
+
+async function getPublicKey() {
+  if (cachedPublicKey) return cachedPublicKey;
+  try {
+    const result = await apiFetch("/_admin/api/auth/public-key");
+    if (result && result.public_key) {
+      cachedPublicKey = result.public_key;
+      return cachedPublicKey;
+    }
+  } catch (e) {
+    console.error("获取公钥失败:", e);
+  }
+  return null;
+}
+
+async function encryptPassword(password, publicKeyPem) {
+  // 将 PEM 格式公钥转换为 ArrayBuffer
+  const pemHeader = "-----BEGIN PUBLIC KEY-----";
+  const pemFooter = "-----END PUBLIC KEY-----";
+  const pemContents = publicKeyPem
+    .replace(pemHeader, "")
+    .replace(pemFooter, "")
+    .replace(/\s/g, "");
+  
+  const binaryString = atob(pemContents);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  
+  const publicKey = await crypto.subtle.importKey(
+    "spki",
+    bytes.buffer,
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    false,
+    ["encrypt"]
+  );
+  
+  const encoded = new TextEncoder().encode(password);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    publicKey,
+    encoded
+  );
+  
+  // 转换为 Base64
+  return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+}
+
 async function apiFetch(url, options = {}) {
   const response = await fetch(url, {
     headers: {
@@ -1759,36 +1810,15 @@ async function loadAppLogFiles() {
 
 function highlightLogLine(line) {
   if (!line) return line;
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  let safe = esc(line);
-  safe = safe.replace(
-    /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/,
-    '<span class="log-ts">$1</span>'
-  );
-  safe = safe.replace(
-    /\[([a-f0-9]{8,12})\]/,
-    '<span class="log-reqid">[$1]</span>'
-  );
-  safe = safe.replace(
-    /\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/,
-    '<span class="log-level-$1">$1</span>'
-  );
-  safe = safe.replace(
-    /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/,
-    '<span class="log-method">$1</span>'
-  );
-  safe = safe.replace(
-    /\b([1-5]\d{2})\b/g,
-    '<span class="log-status-$1">$1</span>'
-  );
-  safe = safe.replace(
-    /\b(\d+\.?\d*ms)\b/,
-    '<span class="log-duration">$1</span>'
-  );
-  safe = safe.replace(
-    /(https?:\/\/[^\s<&]+)/g,
-    '<span class="log-url">$1</span>'
-  );
+  let safe = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const tsMatch = safe.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/);
+  if (tsMatch) safe = '<span class="log-ts">' + tsMatch[1] + '</span>' + safe.slice(tsMatch[1].length);
+  const reqMatch = safe.match(/\[([a-f0-9]{8,12})\]/);
+  if (reqMatch) safe = safe.replace(reqMatch[0], '<span class="log-reqid">' + reqMatch[0] + '</span>');
+  safe = safe.replace(/\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/g, '<span class="log-level-$1">$1</span>');
+  safe = safe.replace(/\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/g, '<span class="log-method">$1</span>');
+  safe = safe.replace(/\b([1-5]\d{2})\b/g, '<span class="log-status-$1">$1</span>');
+  safe = safe.replace(/\b(\d+\.?\d*ms)\b/, '<span class="log-duration">$1</span>');
   return safe;
 }
 
@@ -1797,7 +1827,7 @@ async function loadAppLogContent() {
   if (state.appLogFile) params.set("file", state.appLogFile);
   const keyword = (getValue("app-log-keyword") || "").trim();
   if (keyword) params.set("keyword", keyword);
-  const tailLines = getValue("app-log-tail-lines") || "500";
+  const tailLines = getValue("app-log-tail-lines") || "100";
   params.set("tail", tailLines);
   const data = await apiFetch(`/_admin/api/app-logs/content?${params.toString()}`);
   if (!data) return;
@@ -1805,8 +1835,24 @@ async function loadAppLogContent() {
   const fileInfoEl = document.getElementById("app-log-file-info");
   const lineInfoEl = document.getElementById("app-log-line-info");
   if (contentEl) {
-    const raw = data.content || "(无内容)";
-    contentEl.innerHTML = raw.split("\n").map(highlightLogLine).join("\n");
+    const raw = data.content || "";
+    if (!raw) {
+      contentEl.textContent = "(无内容)";
+    } else {
+      const lines = raw.split("\n");
+      const fragment = document.createDocumentFragment();
+      const pre = document.createElement("pre");
+      pre.style.margin = "0";
+      pre.style.whiteSpace = "pre-wrap";
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) fragment.appendChild(document.createElement("br"));
+        const span = document.createElement("span");
+        span.innerHTML = highlightLogLine(lines[i]);
+        fragment.appendChild(span);
+      }
+      contentEl.innerHTML = "";
+      contentEl.appendChild(fragment);
+    }
   }
   if (fileInfoEl) fileInfoEl.textContent = `文件: ${data.file || state.appLogFile || "-"}`;
   if (lineInfoEl) {
@@ -2216,6 +2262,12 @@ document.getElementById("app-log-search-btn").addEventListener("click", () => {
   });
 });
 
+document.getElementById("app-log-tail-lines").addEventListener("change", () => {
+  loadAppLogContent().catch((error) => {
+    showToast(error.message, true);
+  });
+});
+
 document.getElementById("app-log-auto-refresh").addEventListener("change", () => {
   if (getChecked("app-log-auto-refresh")) {
     startAppLogAutoRefresh();
@@ -2430,7 +2482,7 @@ async function loadIpCacheSettings() {
 
 async function loadIpCacheStats() {
   try {
-    const stats = await apiFetch("/_ip-cache/stats");
+    const stats = await apiFetch("/_admin/api/ip-cache/stats");
     const el = document.getElementById("ip-cache-stats");
     if (!el || !stats) return;
     el.className = "test-result-card";
@@ -2482,7 +2534,7 @@ async function loadAutoBanSettings() {
 
 async function loadAutoBanStats() {
   try {
-    const stats = await apiFetch("/_auto-ban/stats");
+    const stats = await apiFetch("/_admin/api/auto-ban/stats");
     if (stats) {
       document.getElementById("auto-ban-status").textContent = stats.enabled ? "已启用" : "已禁用";
       document.getElementById("auto-ban-tracked-count").textContent = stats.tracked_ips || 0;
@@ -3010,11 +3062,27 @@ async function submitLogin() {
   const username = getValue("auth_username").trim();
   const password = getValue("auth_password");
   setAuthError("");
+  
+  let encryptedPassword = password;
+  let encrypted = false;
+  
+  // 尝试加密密码
+  const publicKey = await getPublicKey();
+  if (publicKey) {
+    try {
+      encryptedPassword = await encryptPassword(password, publicKey);
+      encrypted = true;
+    } catch (e) {
+      console.error("密码加密失败，使用明文:", e);
+    }
+  }
+  
   const result = await apiFetch("/_admin/api/auth/login", {
     method: "POST",
     body: JSON.stringify({
       username,
-      password,
+      password: encryptedPassword,
+      encrypted,
     }),
   });
   applyAuthState(result || {});
@@ -3546,7 +3614,7 @@ document.getElementById("log_page_size")?.addEventListener("change", () => {
 document.getElementById("clear-ip-cache-btn")?.addEventListener("click", async () => {
   if (!window.confirm("确认清空所有请求结果缓存吗？")) return;
   try {
-    const data = await apiFetch("/_ip-cache/clear", { method: "POST" });
+    const data = await apiFetch("/_admin/api/ip-cache/clear", { method: "POST" });
     showToast(data.message || "缓存已清空");
     loadIpCacheStats();
   } catch (error) {

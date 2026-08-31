@@ -194,6 +194,7 @@ class AdminAuthConfig:
     password: str = ""
     session_ttl_hours: int = 12
     cookie_name: str = "proxy_admin_session"
+    session_secret: str = ""  # 独立的 session 签名密钥，自动生成
 
 
 @dataclass
