@@ -3893,14 +3893,15 @@ label span strong[style*="color"] {
 .route-log-target-url {
   color: var(--accent-primary);
   font-weight: 500;
-  display: inline-block;
-  max-width: 200px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-all;
   cursor: pointer;
   position: relative;
-  vertical-align: bottom;
+  line-height: 1.5;
+  max-height: 4.5em;
 }
 
 .route-log-target-url:hover {
