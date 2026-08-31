@@ -1834,34 +1834,31 @@ async function loadAppLogContent(isAutoRefresh = false) {
   params.set("tail", tailLines);
   
   const contentEl = document.getElementById("app-log-content");
-  const distanceFromBottom = contentEl 
-    ? contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight 
-    : 0;
+  if (!contentEl) return;
   
   const data = await apiFetch(`/_admin/api/app-logs/content?${params.toString()}`);
   if (!data) return;
+  
   const fileInfoEl = document.getElementById("app-log-file-info");
   const lineInfoEl = document.getElementById("app-log-line-info");
-  if (contentEl) {
-    const raw = data.content || "";
-    if (!raw) {
-      contentEl.textContent = "(无内容)";
-    } else {
-      const lines = raw.split("\n");
-      const fragment = document.createDocumentFragment();
-      const pre = document.createElement("pre");
-      pre.style.margin = "0";
-      pre.style.whiteSpace = "pre-wrap";
-      for (let i = 0; i < lines.length; i++) {
-        if (i > 0) fragment.appendChild(document.createElement("br"));
-        const span = document.createElement("span");
-        span.innerHTML = highlightLogLine(lines[i]);
-        fragment.appendChild(span);
-      }
-      contentEl.innerHTML = "";
-      contentEl.appendChild(fragment);
-    }
+  const raw = data.content || "";
+  
+  if (!raw) {
+    contentEl.textContent = "(无内容)";
+    return;
   }
+  
+  const lines = raw.split("\n");
+  const fragment = document.createDocumentFragment();
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) fragment.appendChild(document.createElement("br"));
+    const span = document.createElement("span");
+    span.innerHTML = highlightLogLine(lines[i]);
+    fragment.appendChild(span);
+  }
+  contentEl.innerHTML = "";
+  contentEl.appendChild(fragment);
+  
   if (fileInfoEl) fileInfoEl.textContent = `文件: ${data.file || state.appLogFile || "-"}`;
   if (lineInfoEl) {
     const matched = data.matched_lines != null ? data.matched_lines : data.total_lines;
@@ -1869,10 +1866,9 @@ async function loadAppLogContent(isAutoRefresh = false) {
       ? `匹配: ${matched} / 总计: ${data.total_lines} 行`
       : `共 ${data.total_lines} 行`;
   }
-  if (state.logAutoScroll && contentEl) {
+  
+  if (state.logAutoScroll) {
     contentEl.scrollTop = contentEl.scrollHeight;
-  } else if (!getChecked("app-log-auto-refresh") && isAutoRefresh && contentEl) {
-    contentEl.scrollTop = contentEl.scrollHeight - contentEl.clientHeight - distanceFromBottom;
   }
 }
 
@@ -1884,6 +1880,7 @@ function startAppLogAutoRefresh() {
       stopAppLogAutoRefresh();
       return;
     }
+    if (!state.logAutoScroll) return;
     loadAppLogContent(true).catch(() => {});
   }, 3000);
 }
