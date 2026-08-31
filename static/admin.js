@@ -21,6 +21,7 @@ const state = {
   banPageSize: 20,
   routeFilter: { keyword: "", status: "", isDefault: "" },
   backups: [],
+  logAutoScroll: true,
 };
 
 function openModal(modalId) {
@@ -1822,7 +1823,7 @@ function highlightLogLine(line) {
   return safe;
 }
 
-async function loadAppLogContent() {
+async function loadAppLogContent(isAutoRefresh = false) {
   const params = new URLSearchParams();
   if (state.appLogFile) params.set("file", state.appLogFile);
   const keyword = (getValue("app-log-keyword") || "").trim();
@@ -1861,6 +1862,9 @@ async function loadAppLogContent() {
       ? `匹配: ${matched} / 总计: ${data.total_lines} 行`
       : `共 ${data.total_lines} 行`;
   }
+  if (state.logAutoScroll && contentEl) {
+    contentEl.scrollTop = contentEl.scrollHeight;
+  }
 }
 
 function startAppLogAutoRefresh() {
@@ -1871,7 +1875,7 @@ function startAppLogAutoRefresh() {
       stopAppLogAutoRefresh();
       return;
     }
-    loadAppLogContent().catch(() => {});
+    loadAppLogContent(true).catch(() => {});
   }, 3000);
 }
 
@@ -1884,6 +1888,17 @@ function stopAppLogAutoRefresh() {
 
 async function refreshAppLogModule() {
   await loadAppLogFiles();
+  initLogScrollDetection();
+}
+
+function initLogScrollDetection() {
+  const contentEl = document.getElementById("app-log-content");
+  if (!contentEl || contentEl._scrollListenerAdded) return;
+  contentEl._scrollListenerAdded = true;
+  contentEl.addEventListener("scroll", () => {
+    const isAtBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < 50;
+    state.logAutoScroll = isAtBottom;
+  });
 }
 
 function renderRules(rules) {

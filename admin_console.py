@@ -439,7 +439,7 @@ class AdminConsole:
                         selected = matched[start:end]
                     else:
                         selected = matched[-display_limit:] if len(matched) > display_limit else matched
-                    content = "".join(reversed(selected))
+                    content = "".join(selected)
                     return {
                         "content": content,
                         "total_lines": total_lines,
@@ -459,7 +459,7 @@ class AdminConsole:
                         end_idx = len(last_lines) - offset
                         start_idx = max(0, end_idx - display_limit)
                         selected = list(last_lines)[start_idx:end_idx]
-                    content = "".join(reversed(selected))
+                    content = "".join(selected)
                     return {
                         "content": content,
                         "total_lines": total_lines,
