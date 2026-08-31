@@ -1070,6 +1070,7 @@ class ProxyRequestHandler:
                             headers=request_headers,
                             allow_redirects=False,
                             timeout=direct_timeout,
+                            ssl=False,
                         ) as direct_response:
                             if direct_response.status in (200, 206):
                                 resp_headers = dict(direct_response.headers)
