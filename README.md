@@ -9,6 +9,9 @@
 - 在线 IP 定位支持多源配置，按权重轮询，单次失败回退，离线 MMDB 兜底
 - 双定位策略：在线接口优先，本地 MMDB 次之
 - 定位失败时优雅降级到默认转发规则
+- **自动封禁监控**：基于滑动窗口检测异常请求，支持IP白名单和邮件通知
+- **邮件提醒系统**：异常请求和IP封禁独立HTML邮件模板，手机端优化
+- **Docker部署**：支持容器化部署，一键构建推送镜像
 
 一个高性能的Python反向代理服务器，能够自动处理并转发302重定向的外网链接地址流量，支持大媒体文件流式传输。
 
@@ -24,6 +27,9 @@
 - **重试机制**: 自动重试失败的请求
 - **统计监控**: 内置请求统计和健康检查端点
 - **可配置超时**: 支持全局和每规则的超时设置
+- **自动封禁监控**: 滑动窗口检测异常请求，自动封禁恶意IP
+- **邮件提醒**: 异常请求和IP封禁独立HTML邮件模板
+- **日志轮转**: 按日期自动轮转应用日志
 
 ## 项目结构
 
@@ -34,10 +40,20 @@ nginx302_proxy/
 ├── config_store.py              # 配置存储模块（SQLite）
 ├── proxy_core.py                # 代理核心逻辑
 ├── admin_console.py             # 后台管理控制台
+├── auto_ban_monitor.py          # 自动封禁监控
+├── email_notifier.py            # 邮件通知模块
+├── email_templates.py           # 邮件HTML模板
+├── ip_ban_manager.py            # IP封禁管理
 ├── geo_service.py               # IP 定位服务
 ├── offline_geoip_sync.py        # 离线 IP 库同步
 ├── config.yaml.template         # 配置文件模版
 ├── requirements.txt             # 项目依赖
+├── Dockerfile                   # Docker镜像构建
+├── docker-compose.yml           # 本地Docker配置
+├── docker-compose.server.yml    # 服务器端Docker配置
+├── deploy.bat                   # Windows部署脚本
+├── data/                        # 数据目录（SQLite数据库）
+├── log/                         # 日志目录
 └── static/                      # 前端资源
     ├── admin.html               # 后台页面
     ├── admin.css                # 后台样式
@@ -46,12 +62,48 @@ nginx302_proxy/
 
 ## 安装部署
 
-### 环境要求
+### 方式一：Docker部署（推荐）
 
+#### 前置条件
+- 安装Docker和Docker Compose
+- 登录阿里云镜像仓库：`docker login registry.cn-hangzhou.aliyuncs.com`
+
+#### 本地构建并推送
+```bash
+# 使用部署脚本（Windows）
+deploy.bat
+
+# 或手动构建
+docker build -t registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest .
+docker push registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest
+```
+
+#### 服务器端部署
+```bash
+# 创建部署目录
+mkdir -p /opt/302_proxy
+cd /opt/302_proxy
+
+# 复制配置文件
+cp /path/to/config.yaml .
+
+# 使用服务器端docker-compose
+cp docker-compose.server.yml docker-compose.yml
+
+# 启动服务
+docker-compose up -d
+
+# 后续更新
+docker-compose pull && docker-compose up -d
+```
+
+### 方式二：本地Python部署
+
+#### 环境要求
 - Python 3.8+
 - pip包管理器
 
-### 安装步骤
+#### 安装步骤
 
 1. 克隆或下载项目到本地
 
@@ -117,6 +169,30 @@ admin_auth:
   password: "123456"
   session_ttl_hours: 12
   cookie_name: "proxy_admin_session"
+
+auto_ban:
+  enabled: false                  # 是否启用自动封禁
+  window_seconds: 60              # 监测时间窗口（秒）
+  max_requests: 100               # 窗口内最大请求数
+  ban_duration_seconds: 3600      # 封禁时长（秒）
+  max_404: 20                     # 404错误阈值
+  auto_ban_on_404: true           # 是否检测404错误
+  whitelist: ""                   # 白名单IP（逗号分隔）
+  email_on_ban: false             # 封禁时是否发送邮件
+
+email:
+  enabled: false                  # 是否启用邮件提醒
+  smtp_host: ""                   # SMTP服务器
+  smtp_port: 465                  # SMTP端口
+  smtp_ssl: true                  # 是否启用SSL
+  sender: ""                      # 发件邮箱
+  sender_name: ""                 # 发件人名称（可选）
+  password: ""                    # 邮箱密码/授权码
+  recipients: ""                  # 收件邮箱（逗号分隔）
+  alert_window_seconds: 60        # 监测时间窗口
+  alert_max_requests: 80          # 请求频率阈值
+  alert_max_404: 15               # 404错误阈值
+  alert_cooldown_minutes: 30      # 同IP冷却时间（分钟）
 
 proxy_rules:
   - path_prefix: "/api"           # 路径前缀
@@ -498,6 +574,14 @@ MIT 许可证
 欢迎提交 Issue 和 Pull Request。
 
 ## 更新日志
+
+### v5.0.0
+- **新增自动封禁监控**：基于滑动窗口检测异常请求，支持IP白名单
+- **新增邮件提醒系统**：异常请求和IP封禁独立HTML邮件模板，手机端优化
+- **新增Docker部署支持**：Dockerfile、docker-compose、一键部署脚本
+- **新增日志轮转**：按日期自动轮转应用日志
+- **修复发送人名称保存问题**：邮件配置API返回sender_name字段
+- **优化手机端显示**：邮件模板在小屏设备上正常显示
 
 ### v4.0.0
 - **移除本地缓存模块**：移除流式缓存、LRU淘汰、预加载等功能
