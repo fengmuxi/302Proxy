@@ -75,6 +75,7 @@ class ProxyServer:
             config=config.auto_ban,
             ban_callback=self._auto_ban_ip,
             email_config=config.email,
+            config_store=self.config_store,
         )
         self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
@@ -108,6 +109,9 @@ class ProxyServer:
         self.app.router.add_get('/_ban/stats', self.get_ban_stats)
         self.app.router.add_get('/_auto-ban/stats', self.get_auto_ban_stats)
         self.app.router.add_get('/_auto-ban/tracked', self.get_auto_ban_tracked)
+        self.app.router.add_get('/_block/{token}', self.block_token_page)
+        self.app.router.add_get('/_block/{token}/info', self.block_token_info)
+        self.app.router.add_post('/_block/{token}/confirm', self.block_token_confirm)
         self.admin_console.register(self.app)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
@@ -283,6 +287,65 @@ class ProxyServer:
     <h1 class="title">访问受限</h1>
     <p>您没有权限访问此资源。</p>
     <div class="reason"><strong>原因：</strong>{safe_reason}</div>
+    <p><a href="/">返回首页</a></p>
+  </div>
+</body>
+</html>"""
+
+    async def _render_404_page(self, reason: str = "") -> web.Response:
+        """渲染 404 错误页面"""
+        from pathlib import Path
+
+        static_dir = Path(__file__).parent / "static"
+        error_page_path = static_dir / "404.html"
+
+        html_content = ""
+        try:
+            if error_page_path.exists():
+                html_content = error_page_path.read_text(encoding="utf-8")
+                html_content = html_content.replace(
+                    'id="error-reason-container" hidden>',
+                    'id="error-reason-container">'
+                )
+                html_content = html_content.replace(
+                    '<div class="error-reason-text" id="error-reason-text">-</div>',
+                    f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                )
+            else:
+                html_content = self._fallback_404_html(reason)
+        except Exception as e:
+            logger.error("读取 404 页面失败: %s", e)
+            html_content = self._fallback_404_html(reason)
+
+        return web.Response(
+            text=html_content,
+            status=404,
+            content_type="text/html",
+            charset="utf-8",
+        )
+
+    def _fallback_404_html(self, reason: str) -> str:
+        """生成回退的 404 HTML"""
+        import html
+        safe_reason = html.escape(reason) if reason else "未找到匹配的代理规则"
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 - 未找到匹配规则</title>
+  <style>
+    body {{ font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f8fafc; color: #0f172a; }}
+    .card {{ background: #fff; border-radius: 12px; padding: 48px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; max-width: 480px; }}
+    h1 {{ font-size: 72px; margin: 0; color: #2563eb; }}
+    p {{ color: #64748b; margin: 16px 0 0; }}
+    a {{ color: #2563eb; text-decoration: none; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>404</h1>
+    <p>{safe_reason}</p>
     <p><a href="/">返回首页</a></p>
   </div>
 </body>
@@ -536,6 +599,7 @@ class ProxyServer:
                 )
             else:
                 logger.warning("无匹配路由: %s %s", method, raw_path)
+                return await self._render_404_page("未找到匹配的代理规则")
 
             # 黑白名单拦截检查：命中黑名单或不在白名单内时跳转到 403 页面
             if route_decision and route_decision.blocked:
@@ -646,7 +710,7 @@ class ProxyServer:
                     response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
                     response_headers['X-Original-URL'] = redirect_info.original_url
                     response_headers['X-Final-URL'] = redirect_info.redirect_url
-                
+
                 return web.Response(
                     status=status,
                     headers=response_headers,
@@ -869,6 +933,103 @@ class ProxyServer:
             body=json.dumps({"items": tracked}, ensure_ascii=False).encode()
         )
     
+    async def block_token_page(self, request: web.Request) -> web.Response:
+        """显示封禁确认页面"""
+        from pathlib import Path
+        token = request.match_info.get('token', '')
+        
+        static_dir = Path(__file__).parent / "static"
+        page_path = static_dir / "confirm_block.html"
+        
+        if page_path.exists():
+            html_content = page_path.read_text(encoding="utf-8")
+            return web.Response(
+                text=html_content,
+                content_type="text/html",
+                charset="utf-8",
+            )
+        
+        return web.Response(
+            status=404,
+            text="页面未找到",
+            content_type="text/plain",
+        )
+    
+    async def block_token_info(self, request: web.Request) -> web.Response:
+        """获取token信息（IP和原因）"""
+        import json as json_module
+        token = request.match_info.get('token', '')
+        
+        info = self.config_store.validate_block_token(token)
+        if not info:
+            return web.Response(
+                status=400,
+                headers={'Content-Type': 'application/json'},
+                body=json_module.dumps({
+                    "ok": False,
+                    "error": "链接无效或已过期"
+                }, ensure_ascii=False).encode()
+            )
+        
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json_module.dumps({
+                "ok": True,
+                "ip": info["ip"],
+                "reason": info["reason"],
+            }, ensure_ascii=False).encode()
+        )
+    
+    async def block_token_confirm(self, request: web.Request) -> web.Response:
+        """确认封禁IP"""
+        import json as json_module
+        token = request.match_info.get('token', '')
+        
+        info = self.config_store.validate_block_token(token)
+        if not info:
+            return web.Response(
+                status=400,
+                headers={'Content-Type': 'application/json'},
+                body=json_module.dumps({
+                    "ok": False,
+                    "error": "链接无效或已过期"
+                }, ensure_ascii=False).encode()
+            )
+        
+        # 标记token为已使用
+        if not self.config_store.use_block_token(token):
+            return web.Response(
+                status=400,
+                headers={'Content-Type': 'application/json'},
+                body=json_module.dumps({
+                    "ok": False,
+                    "error": "链接已被使用"
+                }, ensure_ascii=False).encode()
+            )
+        
+        # 执行封禁
+        ip = info["ip"]
+        reason = info["reason"]
+        await self.ip_ban_manager.ban_ip(
+            ip=ip,
+            reason=f"邮件链接封禁: {reason}",
+            banned_by="email_link",
+            duration_seconds=0,
+            permanent=True,
+        )
+        
+        logger.info(f"通过邮件链接封禁IP: {ip}, 原因: {reason}")
+        
+        return web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json_module.dumps({
+                "ok": True,
+                "message": f"IP {ip} 已成功封禁"
+            }, ensure_ascii=False).encode()
+        )
+    
     async def on_startup(self, app: web.Application):
         logger.info(f"代理服务器启动于 {self.config.server.host}:{self.config.server.port}")
         logger.info(f"代理规则数量: {len(self.config.proxy_rules)}")
@@ -902,6 +1063,15 @@ class ProxyServer:
             f"TTL={self.ip_result_cache.ttl_seconds}秒, "
             f"最大条目={self.ip_result_cache.max_entries}"
         )
+        
+        # 设置封禁链接的基础URL
+        host = self.config.server.host
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        base_url = f"http://{host}:{self.config.server.port}"
+        self.auto_ban_monitor.set_base_url(base_url)
+        logger.info(f"封禁链接基础URL: {base_url}")
+        
         await self._load_bans_from_db()
         self._start_ban_cleanup_task()
         self._start_auto_ban_cleanup_task()

@@ -16,6 +16,7 @@ def get_email_template(
     smtp_port: int = 465,
     sender: str = "",
     is_test: bool = False,
+    block_link_url: Optional[str] = None,
 ) -> tuple:
     """
     生成统一的邮件模板
@@ -382,6 +383,49 @@ def get_email_template(
             line-height: 1.8;
         }}
         
+        /* 封禁链接 */
+        .block-link-box {{
+            background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
+            border: 2px dashed #e53935;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+        }}
+        .block-link-box h4 {{
+            color: #c62828;
+            font-size: 16px;
+            margin: 0 0 8px 0;
+        }}
+        .block-link-box p {{
+            color: #b71c1c;
+            font-size: 14px;
+            margin: 0 0 16px 0;
+        }}
+        .block-btn {{
+            display: inline-block;
+            background: linear-gradient(135deg, #e53935 0%, #c62828 100%);
+            color: #ffffff !important;
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            padding: 14px 32px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(229, 57, 53, 0.4);
+            transition: all 0.3s ease;
+        }}
+        .block-btn:hover {{
+            background: linear-gradient(135deg, #c62828 0%, #b71c1c 100%);
+            box-shadow: 0 6px 16px rgba(229, 57, 53, 0.5);
+            transform: translateY(-2px);
+        }}
+        .block-hint {{
+            font-size: 12px !important;
+            color: #999 !important;
+            margin-top: 12px !important;
+            margin-bottom: 0 !important;
+        }}
+        
         /* 系统状态 */
         .status-box {{
             background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
@@ -554,6 +598,19 @@ def get_email_template(
                 font-size: 13px;
                 line-height: 1.6;
             }}
+            .block-link-box {{
+                padding: 14px;
+                margin-bottom: 14px;
+                border-radius: 8px;
+            }}
+            .block-link-box h4 {{
+                font-size: 14px;
+                white-space: nowrap;
+            }}
+            .block-btn {{
+                font-size: 14px;
+                padding: 12px 24px;
+            }}
             .footer {{
                 padding: 14px 16px;
             }}
@@ -590,6 +647,18 @@ def get_email_template(
                 
                 <!-- 处理建议 -->
                 {suggestion}
+                
+                <!-- 封禁链接 -->
+                {"" if is_test or not block_link_url else f'''
+                <div class="block-link-box">
+                    <h4>🔒 快速封禁</h4>
+                    <p>点击下方按钮可直接封禁此IP地址：</p>
+                    <a href="{block_link_url}" class="block-btn" target="_blank">
+                        立即封禁此IP
+                    </a>
+                    <p class="block-hint">链接30分钟内有效，仅可使用一次</p>
+                </div>
+                '''}
             </div>
             
             <!-- 页脚 -->

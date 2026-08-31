@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from config import AutoBanConfig, EmailConfig
 from email_notifier import EmailNotifier
+from config_store import ConfigStore
 
 
 logger = logging.getLogger("proxy.auto_ban")
@@ -27,18 +28,25 @@ class AutoBanMonitor:
         config: AutoBanConfig,
         ban_callback: Callable[[str, str], Any],
         email_config: Optional[EmailConfig] = None,
+        config_store: Optional[ConfigStore] = None,
     ):
         self.config = config
         self.ban_callback = ban_callback
         self._email_config = email_config
         self._email_notifier: Optional[EmailNotifier] = EmailNotifier(email_config) if email_config else None
+        self._config_store = config_store
         self._stats: Dict[str, IpRequestStats] = defaultdict(IpRequestStats)
         self._whitelist: Set[str] = set()
         self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
         self._total_requests: int = 0
         self._total_bans: int = 0
+        self._base_url: str = ""
         self._update_whitelist()
+    
+    def set_base_url(self, base_url: str) -> None:
+        """设置服务器基础URL，用于生成封禁链接"""
+        self._base_url = base_url.rstrip("/")
 
     def _update_whitelist(self) -> None:
         raw = self.config.whitelist or ""
@@ -98,22 +106,39 @@ class AutoBanMonitor:
         email_config = self._email_notifier._config
         
         if request_count >= email_config.alert_max_requests:
+            block_link_url = self._generate_block_link(ip, "请求频率超限")
             await self._email_notifier.send_alert(
                 ip=ip,
                 alert_type="请求频率超限",
                 current_count=request_count,
                 threshold=email_config.alert_max_requests,
                 window_seconds=email_config.alert_window_seconds,
+                block_link_url=block_link_url,
             )
         
         if self.config.auto_ban_on_404 and error_404_count >= email_config.alert_max_404:
+            block_link_url = self._generate_block_link(ip, "404错误频率超限")
             await self._email_notifier.send_alert(
                 ip=ip,
                 alert_type="404错误频率超限",
                 current_count=error_404_count,
                 threshold=email_config.alert_max_404,
                 window_seconds=email_config.alert_window_seconds,
+                block_link_url=block_link_url,
             )
+    
+    def _generate_block_link(self, ip: str, reason: str) -> Optional[str]:
+        """生成封禁链接URL"""
+        if not self._base_url or not self._config_store:
+            return None
+        
+        try:
+            # 生成token，30分钟有效期
+            token = self._config_store.create_block_token(ip, reason, expires_in_seconds=1800)
+            return f"{self._base_url}/_block/{token}"
+        except Exception as e:
+            logger.error("生成封禁链接失败: %s", e)
+            return None
 
     async def _ban_ip(self, ip: str, reason: str) -> None:
         if ip in self._stats:

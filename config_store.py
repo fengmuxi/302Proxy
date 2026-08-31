@@ -337,6 +337,15 @@ class ConfigStore:
                     ON route_logs(match_strategy);
                 CREATE INDEX IF NOT EXISTS idx_route_logs_result_status
                     ON route_logs(result_status);
+
+                CREATE TABLE IF NOT EXISTS email_block_tokens (
+                    token TEXT PRIMARY KEY,
+                    ip TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             self._migrate_route_groups_table(connection)
@@ -2734,3 +2743,51 @@ class ConfigStore:
         if suffix:
             return path.with_suffix(f"{suffix}.bak")
         return path.with_name(f"{path.name}.bak")
+
+    def create_block_token(self, ip: str, reason: str, expires_in_seconds: int = 1800) -> str:
+        """创建封禁链接token，返回token字符串"""
+        import secrets
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                """INSERT INTO email_block_tokens (token, ip, reason, created_at, expires_at, used)
+                   VALUES (?, ?, ?, ?, ?, 0)""",
+                (token, ip, reason, now, now + expires_in_seconds),
+            )
+            conn.commit()
+        return token
+
+    def validate_block_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """验证token，返回有效信息或None（无效/过期/已使用）"""
+        with self._lock:
+            conn = self._get_connection()
+            row = conn.execute(
+                "SELECT token, ip, reason, created_at, expires_at, used FROM email_block_tokens WHERE token = ?",
+                (token,),
+            ).fetchone()
+            if not row:
+                return None
+            if row["used"]:
+                return None
+            if time.time() > row["expires_at"]:
+                return None
+            return {
+                "token": row["token"],
+                "ip": row["ip"],
+                "reason": row["reason"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+            }
+
+    def use_block_token(self, token: str) -> bool:
+        """标记token为已使用，返回是否成功"""
+        with self._lock:
+            conn = self._get_connection()
+            result = conn.execute(
+                "UPDATE email_block_tokens SET used = 1 WHERE token = ? AND used = 0",
+                (token,),
+            )
+            conn.commit()
+            return result.rowcount > 0

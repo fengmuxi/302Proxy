@@ -53,6 +53,7 @@ class EmailNotifier:
         current_count: int,
         threshold: int,
         window_seconds: int,
+        block_link_url: Optional[str] = None,
     ) -> tuple:
         """构建邮件内容"""
         return get_email_template(
@@ -63,6 +64,7 @@ class EmailNotifier:
             window_seconds=window_seconds,
             system_name="代理监控系统",
             is_test=False,
+            block_link_url=block_link_url,
         )
 
     def _build_ban_email_content(
@@ -150,6 +152,7 @@ class EmailNotifier:
         current_count: int,
         threshold: int,
         window_seconds: int,
+        block_link_url: Optional[str] = None,
     ) -> bool:
         """发送异常提醒邮件"""
         if not self._config.enabled:
@@ -163,7 +166,7 @@ class EmailNotifier:
                 return False
 
             subject, html_content, text_content = self._build_email_content(
-                ip, alert_type, current_count, threshold, window_seconds
+                ip, alert_type, current_count, threshold, window_seconds, block_link_url
             )
             
             loop = asyncio.get_event_loop()
