@@ -1477,6 +1477,8 @@ form.sub-card + form.sub-card {
 #dash-stat-rules::after { background: radial-gradient(circle at 30% 50%, var(--success-on-bg), transparent 70%); }
 #dash-stat-bans::after { background: radial-gradient(circle at 30% 50%, var(--error-on-bg), transparent 70%); }
 #dash-stat-sources::after { background: radial-gradient(circle at 30% 50%, var(--accent-table-row-hover), transparent 70%); }
+#dash-stat-logfiles::after { background: radial-gradient(circle at 30% 50%, rgba(99,102,241,0.12), transparent 70%); }
+#dash-stat-backups::after { background: radial-gradient(circle at 30% 50%, rgba(20,184,166,0.12), transparent 70%); }
 
 .dash-stat-card:hover::after {
   opacity: 1;
@@ -1508,6 +1510,8 @@ form.sub-card + form.sub-card {
 .rules-icon::after { animation-delay: 0.75s; }
 .bans-icon::after { animation-delay: 1.5s; }
 .sources-icon::after { animation-delay: 2.25s; }
+.logfiles-icon::after { animation-delay: 3s; }
+.backups-icon::after { animation-delay: 3.75s; }
 
 @keyframes stat-ring-pulse {
   0%, 100% { opacity: 0; transform: scale(1); }
@@ -1518,6 +1522,8 @@ form.sub-card + form.sub-card {
 .rules-icon { background: var(--success-bg); color: var(--success); }
 .bans-icon { background: var(--error-bg); color: var(--error); }
 .sources-icon { background: #f3e8ff; color: #8b5cf6; }
+.logfiles-icon { background: #eef2ff; color: #6366f1; }
+.backups-icon { background: #f0fdfa; color: #14b8a6; }
 
 .dash-stat-body {
   display: flex;
@@ -1809,6 +1815,24 @@ select {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+}
+
+.row.gap {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.inline-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.inline-label span {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .form-head-inline {

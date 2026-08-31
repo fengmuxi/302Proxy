@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Proxy Control Center</title>
   <link rel="icon" type="image/svg+xml" href="/_admin/static/favicon.svg">
-  <link rel="stylesheet" href="/_admin/static/admin.css?v=20260831">
+  <link rel="stylesheet" href="/_admin/static/admin.css?v=2026083103">
 </head>
 <body>
   <div id="auth-overlay" class="auth-overlay is-active">
@@ -220,6 +220,24 @@
               <span class="dash-stat-label">在线定位源</span>
             </div>
           </article>
+          <article class="dash-stat-card" id="dash-stat-logfiles">
+            <div class="dash-stat-icon logfiles-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            </div>
+            <div class="dash-stat-body">
+              <span class="dash-stat-value" data-metric="logfiles">—</span>
+              <span class="dash-stat-label">日志文件</span>
+            </div>
+          </article>
+          <article class="dash-stat-card" id="dash-stat-backups">
+            <div class="dash-stat-icon backups-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+            <div class="dash-stat-body">
+              <span class="dash-stat-value" data-metric="backups">—</span>
+              <span class="dash-stat-label">备份文件</span>
+            </div>
+          </article>
         </div>
 
         <div class="dash-modules-grid">
@@ -264,6 +282,27 @@
             </div>
             <h3 class="dash-module-title">IP 封禁管理</h3>
             <p class="dash-module-desc">永久/临时封禁、路径前缀级封禁、批量管理</p>
+          </article>
+          <article class="dash-module-card" data-module-target="app-logs">
+            <div class="dash-module-icon" style="--module-color: #6366f1">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            </div>
+            <h3 class="dash-module-title">应用日志</h3>
+            <p class="dash-module-desc">查看运行日志文件，支持关键词搜索、语法高亮</p>
+          </article>
+          <article class="dash-module-card" data-module-target="email-manager">
+            <div class="dash-module-icon" style="--module-color: #ec4899">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            </div>
+            <h3 class="dash-module-title">邮件提醒</h3>
+            <p class="dash-module-desc">自动封禁通知、告警邮件配置、发送测试</p>
+          </article>
+          <article class="dash-module-card" data-module-target="backup-manager">
+            <div class="dash-module-icon" style="--module-color: #14b8a6">
+              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+            <h3 class="dash-module-title">数据管理</h3>
+            <p class="dash-module-desc">数据库备份与恢复、合并导入、日志文件清理</p>
           </article>
         </div>
 
@@ -1395,6 +1434,6 @@
     </div>
   </div>
 
-  <script src="/_admin/static/admin.js?v=20260831" defer></script>
+  <script src="/_admin/static/admin.js?v=2026083102" defer></script>
 </body>
 </html>

@@ -10,6 +10,8 @@ const state = {
   routeLogs: [],
   routeLogSettings: null,
   bannedIps: [],
+  logFiles: [],
+  backups: [],
   activeModule: "overview",
   logCurrentPage: 1,
   logTotalPages: 1,
@@ -494,6 +496,8 @@ function renderDashboardMetrics(animate = true) {
     rules: state.rules.length,
     bans: state.bannedIps.length,
     sources: state.geoSources.length,
+    logfiles: (state.logFiles || []).length,
+    backups: (state.backups || []).length,
   };
   document.querySelectorAll("[data-metric]").forEach((el) => {
     const key = el.dataset.metric;
@@ -1978,11 +1982,15 @@ async function updateGroupRegionSwitch(pathPrefix, requestHost, enabled) {
 }
 
 async function loadDashboard() {
-  const [data, bansData] = await Promise.all([
+  const [data, bansData, logsData, backupsData] = await Promise.all([
     apiFetch("/_admin/api/bootstrap"),
     apiFetch("/_admin/api/banned-ips").catch(() => ({ items: [] })),
+    apiFetch("/_admin/api/app-logs").catch(() => ({ items: [] })),
+    apiFetch("/_admin/api/backup/list").catch(() => ({ items: [] })),
   ]);
   state.bannedIps = bansData.items || [];
+  state.logFiles = logsData.items || [];
+  state.backups = backupsData.items || [];
   renderSummary(data.summary || {});
   renderRules(data.rules || []);
   renderRouteGroups(data.route_groups || []);
@@ -2144,6 +2152,8 @@ const statCardModuleMap = {
   "dash-stat-rules": "route-config",
   "dash-stat-bans": "ip-ban-manager",
   "dash-stat-sources": "geoip-online",
+  "dash-stat-logfiles": "app-logs",
+  "dash-stat-backups": "backup-manager",
 };
 Object.entries(statCardModuleMap).forEach(([id, target]) => {
   const card = document.getElementById(id);
