@@ -19,6 +19,81 @@ from ip_ban_manager import IpBanManager
 logger = logging.getLogger("proxy")
 
 
+# ===== 404 错误页面渲染（未匹配代理规则）=====
+_404_HTML_CACHE: Optional[str] = None
+
+
+def _load_404_template() -> Optional[str]:
+    """加载 static/404.html 模板，带模块级缓存"""
+    global _404_HTML_CACHE
+    if _404_HTML_CACHE is not None:
+        return _404_HTML_CACHE
+    try:
+        from pathlib import Path
+        template_path = Path(__file__).parent / "static" / "404.html"
+        if template_path.exists():
+            _404_HTML_CACHE = template_path.read_text(encoding="utf-8")
+            return _404_HTML_CACHE
+    except Exception as e:
+        logger.error("读取 404 页面失败: %s", e)
+    return None
+
+
+def _build_404_html(request_path: str = "") -> str:
+    """构建 404 错误页面 HTML，显示未匹配的请求路径"""
+    import html as html_module
+    template = _load_404_template()
+    if template:
+        if request_path:
+            safe_path = html_module.escape(request_path)
+            template = template.replace(
+                'id="error-reason-container" hidden>',
+                'id="error-reason-container">'
+            )
+            template = template.replace(
+                '<div class="error-reason-text" id="error-reason-text">-</div>',
+                f'<div class="error-reason-text" id="error-reason-text">{safe_path}</div>'
+            )
+        return template
+    # 回退到内置 HTML
+    safe_path = html_module.escape(request_path) if request_path else ""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 - 未找到匹配规则</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b; }}
+    .card {{ max-width: 480px; width: 100%; text-align: center; padding: 64px 32px; }}
+    .code {{ font-size: 72px; font-weight: 700; color: #dc2626; margin-bottom: 16px; }}
+    h1 {{ font-size: 24px; font-weight: 600; margin-bottom: 8px; }}
+    p {{ color: #64748b; margin-bottom: 32px; }}
+    .reason {{ background: #fee2e2; border-radius: 8px; padding: 16px; margin-bottom: 32px; text-align: left; }}
+    .reason-label {{ font-size: 12px; font-weight: 600; color: #dc2626; margin-bottom: 4px; text-transform: uppercase; }}
+    .reason-text {{ font-size: 14px; color: #1e293b; word-break: break-word; }}
+    .footer {{ font-size: 12px; color: #94a3b8; }}
+  </style>
+</head>
+<body>
+  <article class="card">
+    <div class="code">404</div>
+    <h1>未找到匹配规则</h1>
+    <p>请求的资源未找到匹配的代理规则。</p>
+    {'<div class="reason"><div class="reason-label">请求路径</div><div class="reason-text">' + safe_path + '</div></div>' if safe_path else ''}
+    <footer class="footer"><p>如有疑问，请联系系统管理员</p></footer>
+  </article>
+</body>
+</html>"""
+
+
+async def _stream_string(content: str) -> AsyncGenerator[bytes, None]:
+    """将字符串作为异步流输出"""
+    yield content.encode("utf-8")
+
+
 # ===== 500 错误页面渲染（隐藏内部异常细节）=====
 _500_HTML_CACHE: Optional[str] = None
 
@@ -939,13 +1014,10 @@ class ProxyRequestHandler:
     ) -> StreamingResponse:
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
         if not route_decision:
-            async def error_stream():
-                yield '{"error": "未找到匹配的代理规则"}'.encode("utf-8")
-
             return StreamingResponse(
                 status=404,
-                headers={"Content-Type": "application/json"},
-                body_stream=error_stream(),
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body_stream=_stream_string(_build_404_html(path)),
                 redirect_info=None,
             )
 
