@@ -669,21 +669,33 @@ class ConfigStore:
         rows = connection.execute("PRAGMA table_info(route_groups)").fetchall()
         existing_columns = {row["name"] for row in rows}
         if not existing_columns or "request_host" in existing_columns:
+            # 清理可能残留的 route_groups_v2 表（上次迁移中断导致）
+            connection.execute("DROP TABLE IF EXISTS route_groups_v2")
             return
+
+        # 清理可能残留的 route_groups_v2 表（上次迁移中断导致）
+        connection.execute("DROP TABLE IF EXISTS route_groups_v2")
 
         connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS route_groups_v2 (
+            CREATE TABLE route_groups_v2 (
                 request_host TEXT NOT NULL DEFAULT '',
                 path_prefix TEXT NOT NULL,
                 region_matching_enabled INTEGER NOT NULL DEFAULT 0,
                 notes TEXT NOT NULL DEFAULT '',
+                access_ip_whitelist TEXT NOT NULL DEFAULT '',
+                ip_blacklist TEXT NOT NULL DEFAULT '',
+                region_whitelist TEXT NOT NULL DEFAULT '',
+                region_blacklist TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (request_host, path_prefix)
             );
 
-            INSERT INTO route_groups_v2 (request_host, path_prefix, region_matching_enabled, notes, updated_at)
-            SELECT '', path_prefix, region_matching_enabled, notes, updated_at
+            INSERT INTO route_groups_v2 (request_host, path_prefix, region_matching_enabled, notes,
+                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, updated_at)
+            SELECT '', path_prefix, region_matching_enabled, notes,
+                COALESCE(access_ip_whitelist, ''), COALESCE(ip_blacklist, ''),
+                COALESCE(region_whitelist, ''), COALESCE(region_blacklist, ''), updated_at
             FROM route_groups;
 
             DROP TABLE route_groups;
@@ -735,7 +747,7 @@ class ConfigStore:
                     session_secret, rsa_private_key
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1081,10 +1093,10 @@ class ConfigStore:
                 (
                     int(normalized_enabled if normalized_enabled is not None else bool(existing["region_matching_enabled"])),
                     notes if notes is not None else existing["notes"],
-                    normalize_region_filter_value(access_ip_whitelist) if access_ip_whitelist is not None else existing["access_ip_whitelist"],
-                    normalize_region_filter_value(ip_blacklist) if ip_blacklist is not None else existing["ip_blacklist"],
-                    normalize_region_filter_value(region_whitelist) if region_whitelist is not None else existing["region_whitelist"],
-                    normalize_region_filter_value(region_blacklist) if region_blacklist is not None else existing["region_blacklist"],
+                    normalize_region_filter_value(access_ip_whitelist) if access_ip_whitelist is not None else (existing["access_ip_whitelist"] if "access_ip_whitelist" in existing.keys() else ""),
+                    normalize_region_filter_value(ip_blacklist) if ip_blacklist is not None else (existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else ""),
+                    normalize_region_filter_value(region_whitelist) if region_whitelist is not None else (existing["region_whitelist"] if "region_whitelist" in existing.keys() else ""),
+                    normalize_region_filter_value(region_blacklist) if region_blacklist is not None else (existing["region_blacklist"] if "region_blacklist" in existing.keys() else ""),
                     now,
                     normalized_host,
                     path_prefix,
@@ -1281,7 +1293,7 @@ class ConfigStore:
                     method=row["method"],
                     request_location=row["request_location"],
                     body_format=row["body_format"],
-                    query_params_json=row["query_params_json"],
+                    query_params_json=row["query_params_json"] if "query_params_json" in row.keys() else "{}",
                     headers_json=row["headers_json"],
                     body_template=row["body_template"],
                     ip_param_name=row["ip_param_name"],
@@ -1319,7 +1331,7 @@ class ConfigStore:
             config.geoip = GeoIPSettings(
                 enabled=bool(geo_row["enabled"]),
                 sources=sources,
-                online_cache_ttl_seconds=max(0, int(geo_row["online_cache_ttl_seconds"] or 0)),
+                online_cache_ttl_seconds=max(0, int(geo_row["online_cache_ttl_seconds"] or 0)) if "online_cache_ttl_seconds" in geo_row.keys() else 120,
                 primary=PrimaryGeoIPSettings(
                     enabled=bool(geo_row["primary_enabled"]),
                     url=geo_row["primary_url"],
@@ -1337,13 +1349,13 @@ class ConfigStore:
                     enabled=bool(geo_row["offline_enabled"]),
                     db_path=geo_row["offline_db_path"],
                     locale=geo_row["offline_locale"],
-                    download_url=geo_row["offline_download_url"],
-                    download_headers_json=geo_row["offline_download_headers_json"],
-                    refresh_interval_hours=geo_row["offline_refresh_interval_hours"],
-                    last_sync_at=geo_row["offline_last_sync_at"] or "",
-                    last_sync_status=geo_row["offline_last_sync_status"] or "",
-                    last_sync_message=geo_row["offline_last_sync_message"] or "",
-                    last_success_at=geo_row["offline_last_success_at"] or "",
+                    download_url=geo_row["offline_download_url"] if "offline_download_url" in geo_row.keys() else "",
+                    download_headers_json=geo_row["offline_download_headers_json"] if "offline_download_headers_json" in geo_row.keys() else "{}",
+                    refresh_interval_hours=geo_row["offline_refresh_interval_hours"] if "offline_refresh_interval_hours" in geo_row.keys() else 24,
+                    last_sync_at=geo_row["offline_last_sync_at"] if "offline_last_sync_at" in geo_row.keys() else "",
+                    last_sync_status=geo_row["offline_last_sync_status"] if "offline_last_sync_status" in geo_row.keys() else "",
+                    last_sync_message=geo_row["offline_last_sync_message"] if "offline_last_sync_message" in geo_row.keys() else "",
+                    last_success_at=geo_row["offline_last_success_at"] if "offline_last_success_at" in geo_row.keys() else "",
                 ),
             )
 
@@ -2296,7 +2308,7 @@ class ConfigStore:
                 "method": source_row["method"],
                 "request_location": source_row["request_location"],
                 "body_format": source_row["body_format"],
-                "query_params_json": source_row["query_params_json"],
+                "query_params_json": source_row["query_params_json"] if "query_params_json" in source_row.keys() else "{}",
                 "headers_json": source_row["headers_json"],
                 "body_template": source_row["body_template"],
                 "ip_param_name": source_row["ip_param_name"],
@@ -2336,27 +2348,27 @@ class ConfigStore:
             )
         offline_status = self._build_offline_geoip_status(
             db_path=row["offline_db_path"],
-            refresh_interval_hours=row["offline_refresh_interval_hours"],
-            last_sync_at=row["offline_last_sync_at"],
-            last_success_at=row["offline_last_success_at"],
-            last_sync_status=row["offline_last_sync_status"],
-            last_sync_message=row["offline_last_sync_message"],
+            refresh_interval_hours=row["offline_refresh_interval_hours"] if "offline_refresh_interval_hours" in row.keys() else 24,
+            last_sync_at=row["offline_last_sync_at"] if "offline_last_sync_at" in row.keys() else "",
+            last_success_at=row["offline_last_success_at"] if "offline_last_success_at" in row.keys() else "",
+            last_sync_status=row["offline_last_sync_status"] if "offline_last_sync_status" in row.keys() else "",
+            last_sync_message=row["offline_last_sync_message"] if "offline_last_sync_message" in row.keys() else "",
         )
         return {
             "enabled": bool(row["enabled"]),
-            "online_cache_ttl_seconds": max(0, int(row["online_cache_ttl_seconds"] or 0)),
+            "online_cache_ttl_seconds": max(0, int(row["online_cache_ttl_seconds"] or 0)) if "online_cache_ttl_seconds" in row.keys() else 120,
             "sources": sources,
             "offline": {
                 "enabled": bool(row["offline_enabled"]),
                 "db_path": row["offline_db_path"],
                 "locale": row["offline_locale"],
-                "download_url": row["offline_download_url"],
-                "download_headers_json": row["offline_download_headers_json"],
-                "refresh_interval_hours": row["offline_refresh_interval_hours"],
-                "last_sync_at": row["offline_last_sync_at"],
-                "last_sync_status": row["offline_last_sync_status"],
-                "last_sync_message": row["offline_last_sync_message"],
-                "last_success_at": row["offline_last_success_at"],
+                "download_url": row["offline_download_url"] if "offline_download_url" in row.keys() else "",
+                "download_headers_json": row["offline_download_headers_json"] if "offline_download_headers_json" in row.keys() else "{}",
+                "refresh_interval_hours": row["offline_refresh_interval_hours"] if "offline_refresh_interval_hours" in row.keys() else 24,
+                "last_sync_at": row["offline_last_sync_at"] if "offline_last_sync_at" in row.keys() else "",
+                "last_sync_status": row["offline_last_sync_status"] if "offline_last_sync_status" in row.keys() else "",
+                "last_sync_message": row["offline_last_sync_message"] if "offline_last_sync_message" in row.keys() else "",
+                "last_success_at": row["offline_last_success_at"] if "offline_last_success_at" in row.keys() else "",
                 "status": offline_status,
             },
         }
@@ -2627,15 +2639,15 @@ class ConfigStore:
             "request_method": row["request_method"],
             "request_path": row["request_path"],
             "request_query_string": row["request_query_string"],
-            "request_host": row["request_host"],
+            "request_host": row["request_host"] if "request_host" in row.keys() else "",
             "path_prefix": row["path_prefix"],
             "rule_id": row["rule_id"],
             "rule_name": row["rule_name"],
-            "rule_request_host": row["rule_request_host"],
+            "rule_request_host": row["rule_request_host"] if "rule_request_host" in row.keys() else "",
             "rule_source": row["rule_source"],
             "target_url": row["target_url"],
-            "redirect_location": row["redirect_location"],
-            "original_client_ip": row["original_client_ip"],
+            "redirect_location": row["redirect_location"] if "redirect_location" in row.keys() else "",
+            "original_client_ip": row["original_client_ip"] if "original_client_ip" in row.keys() else "",
             "client_ip": row["client_ip"],
             "region_matching_enabled": bool(row["region_matching_enabled"]),
             "geo_source": row["geo_source"],
@@ -2643,8 +2655,8 @@ class ConfigStore:
             "geo_country": row["geo_country"],
             "geo_region": row["geo_region"],
             "geo_city": row["geo_city"],
-            "configured_ip_whitelist": row["configured_ip_whitelist"],
-            "matched_ip_whitelist": row["matched_ip_whitelist"],
+            "configured_ip_whitelist": row["configured_ip_whitelist"] if "configured_ip_whitelist" in row.keys() else "",
+            "matched_ip_whitelist": row["matched_ip_whitelist"] if "matched_ip_whitelist" in row.keys() else "",
             "configured_regions": row["configured_regions"],
             "matched_region": row["matched_region"],
             "match_strategy": row["match_strategy"],
@@ -2831,44 +2843,53 @@ class ConfigStore:
         token = secrets.token_urlsafe(32)
         now = time.time()
         with self._lock:
-            conn = self._get_connection()
-            conn.execute(
-                """INSERT INTO email_block_tokens (token, ip, reason, created_at, expires_at, used)
-                   VALUES (?, ?, ?, ?, ?, 0)""",
-                (token, ip, reason, now, now + expires_in_seconds),
-            )
-            conn.commit()
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """INSERT INTO email_block_tokens (token, ip, reason, created_at, expires_at, used)
+                       VALUES (?, ?, ?, ?, ?, 0)""",
+                    (token, ip, reason, now, now + expires_in_seconds),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         return token
 
     def validate_block_token(self, token: str) -> Optional[Dict[str, Any]]:
         """验证token，返回有效信息或None（无效/过期/已使用）"""
         with self._lock:
-            conn = self._get_connection()
-            row = conn.execute(
-                "SELECT token, ip, reason, created_at, expires_at, used FROM email_block_tokens WHERE token = ?",
-                (token,),
-            ).fetchone()
-            if not row:
-                return None
-            if row["used"]:
-                return None
-            if time.time() > row["expires_at"]:
-                return None
-            return {
-                "token": row["token"],
-                "ip": row["ip"],
-                "reason": row["reason"],
-                "created_at": row["created_at"],
-                "expires_at": row["expires_at"],
-            }
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT token, ip, reason, created_at, expires_at, used FROM email_block_tokens WHERE token = ?",
+                    (token,),
+                ).fetchone()
+                if not row:
+                    return None
+                if row["used"]:
+                    return None
+                if time.time() > row["expires_at"]:
+                    return None
+                return {
+                    "token": row["token"],
+                    "ip": row["ip"],
+                    "reason": row["reason"],
+                    "created_at": row["created_at"],
+                    "expires_at": row["expires_at"],
+                }
+            finally:
+                conn.close()
 
     def use_block_token(self, token: str) -> bool:
         """标记token为已使用，返回是否成功"""
         with self._lock:
-            conn = self._get_connection()
-            result = conn.execute(
-                "UPDATE email_block_tokens SET used = 1 WHERE token = ? AND used = 0",
-                (token,),
-            )
-            conn.commit()
-            return result.rowcount > 0
+            conn = self._connect()
+            try:
+                result = conn.execute(
+                    "UPDATE email_block_tokens SET used = 1 WHERE token = ? AND used = 0",
+                    (token,),
+                )
+                conn.commit()
+                return result.rowcount > 0
+            finally:
+                conn.close()
