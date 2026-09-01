@@ -10,6 +10,10 @@ import { state } from './state.js';
 
 let cachedPublicKey = null;
 
+export function clearPublicKeyCache() {
+  cachedPublicKey = null;
+}
+
 export async function getPublicKey() {
   if (cachedPublicKey) return cachedPublicKey;
   try {
@@ -80,6 +84,7 @@ export async function apiFetch(url, options = {}) {
   }
 
   if (response.status === 401) {
+    clearPublicKeyCache();
     if (!url.includes("/_admin/api/auth/login")) {
       applyAuthState({
         enabled: true,
@@ -140,6 +145,7 @@ export async function submitLogin(state, showToast) {
     showToast("登录成功");
     return true;
   } catch (error) {
+    clearPublicKeyCache();
     setAuthError(error.message);
     showToast(error.message, true);
     return false;

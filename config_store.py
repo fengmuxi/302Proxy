@@ -351,266 +351,7 @@ class ConfigStore:
                 );
                 """
             )
-            self._migrate_route_groups_table(connection)
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "path_rewrite_pattern",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "path_rewrite_replacement",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_online_sources",
-                "query_params_json",
-                "TEXT NOT NULL DEFAULT '{}'",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "online_cache_ttl_seconds",
-                "INTEGER NOT NULL DEFAULT 120",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_download_url",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_download_headers_json",
-                "TEXT NOT NULL DEFAULT '{}'",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_refresh_interval_hours",
-                "INTEGER NOT NULL DEFAULT 24",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_last_sync_at",
-                "TEXT",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_last_sync_status",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_last_sync_message",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "geoip_settings",
-                "offline_last_success_at",
-                "TEXT",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "request_host",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "follow_redirects",
-                "INTEGER NOT NULL DEFAULT 1",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "ip_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_forward_rules_request_host
-                ON forward_rules(request_host)
-                """
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO route_log_settings (id, retention_days, last_pruned_at, updated_at)
-                VALUES (1, 30, NULL, ?)
-                """,
-                (utc_now(),),
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "redirect_location",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "original_client_ip",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "configured_ip_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "matched_ip_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "request_host",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_logs",
-                "rule_request_host",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_route_logs_request_host
-                ON route_logs(request_host)
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_route_logs_rule_request_host
-                ON route_logs(rule_request_host)
-                """
-            )
-            self._ensure_column(
-                connection,
-                "system_settings",
-                "ip_cache_enabled",
-                "INTEGER NOT NULL DEFAULT 0",
-            )
-            self._ensure_column(
-                connection,
-                "system_settings",
-                "ip_cache_ttl_seconds",
-                "INTEGER NOT NULL DEFAULT 300",
-            )
-            self._ensure_column(
-                connection,
-                "system_settings",
-                "ip_cache_max_entries",
-                "INTEGER NOT NULL DEFAULT 5000",
-            )
-            self._ensure_column(
-                connection,
-                "banned_ips",
-                "path_prefix",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            # 路由前缀的访问控制（IP白/黑名单、地区白/黑名单）
-            self._ensure_column(
-                connection,
-                "route_groups",
-                "access_ip_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_groups",
-                "ip_blacklist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_groups",
-                "region_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "route_groups",
-                "region_blacklist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            # 转发规则的访问控制（IP白/黑名单、地区白/黑名单）
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "access_ip_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "ip_blacklist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "region_whitelist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            self._ensure_column(
-                connection,
-                "forward_rules",
-                "region_blacklist",
-                "TEXT NOT NULL DEFAULT ''",
-            )
-            # 日志配置迁移：添加 retention_days，迁移旧数据
-            rows = connection.execute("PRAGMA table_info(system_settings)").fetchall()
-            existing_columns = {row["name"] for row in rows}
-            if "logging_retention_days" not in existing_columns:
-                connection.execute(
-                    "ALTER TABLE system_settings ADD COLUMN logging_retention_days INTEGER NOT NULL DEFAULT 30"
-                )
-                if "logging_backup_count" in existing_columns:
-                    connection.execute(
-                        "UPDATE system_settings SET logging_retention_days = logging_backup_count WHERE logging_retention_days = 30"
-                    )
-            # 自动封禁配置迁移
-            self._ensure_column(connection, "system_settings", "auto_ban_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "system_settings", "auto_ban_window_seconds", "INTEGER NOT NULL DEFAULT 60")
-            self._ensure_column(connection, "system_settings", "auto_ban_max_requests", "INTEGER NOT NULL DEFAULT 100")
-            self._ensure_column(connection, "system_settings", "auto_ban_ban_duration_seconds", "INTEGER NOT NULL DEFAULT 3600")
-            self._ensure_column(connection, "system_settings", "auto_ban_max_404", "INTEGER NOT NULL DEFAULT 20")
-            self._ensure_column(connection, "system_settings", "auto_ban_auto_ban_on_404", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(connection, "system_settings", "auto_ban_whitelist", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "auto_ban_email_on_ban", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "system_settings", "email_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "system_settings", "email_smtp_host", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_smtp_port", "INTEGER NOT NULL DEFAULT 465")
-            self._ensure_column(connection, "system_settings", "email_smtp_ssl", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column(connection, "system_settings", "email_sender", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_sender_name", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_password", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_recipients", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_block_link_base_url", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "email_alert_window_seconds", "INTEGER NOT NULL DEFAULT 60")
-            self._ensure_column(connection, "system_settings", "email_alert_max_requests", "INTEGER NOT NULL DEFAULT 80")
-            self._ensure_column(connection, "system_settings", "email_alert_max_404", "INTEGER NOT NULL DEFAULT 15")
-            self._ensure_column(connection, "system_settings", "email_alert_cooldown_minutes", "INTEGER NOT NULL DEFAULT 30")
-            # 请求追踪：添加 request_id 列
-            self._ensure_column(connection, "route_logs", "request_id", "TEXT NOT NULL DEFAULT ''")
-            # 安全增强：添加 session_secret 和 rsa_private_key 列
-            self._ensure_column(connection, "system_settings", "session_secret", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "system_settings", "rsa_private_key", "TEXT NOT NULL DEFAULT ''")
-            # 为旧数据库自动生成缺失的安全密钥
-            self._ensure_security_keys(connection)
+        self._run_migrations()
 
     def _ensure_column(
         self,
@@ -624,6 +365,34 @@ class ConfigStore:
         if column_name in existing_columns:
             return
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition_sql}")
+
+    def _run_migrations(self) -> None:
+        """Execute yoyo database migrations"""
+        from yoyo import read_migrations, get_backend
+
+        migrations_dir = Path(__file__).parent / "migrations"
+        if not migrations_dir.exists():
+            return
+
+        backend = get_backend(f"sqlite:///{self.db_path}")
+        migrations = read_migrations(str(migrations_dir))
+        if self._bootstrap_migrations_for_existing_db(backend, migrations):
+            return
+        backend.apply_migrations(migrations)
+
+    def _bootstrap_migrations_for_existing_db(self, backend, migrations) -> bool:
+        """Mark all migrations as applied for existing databases (without executing SQL).
+        Returns True if bootstrapping was performed (caller should skip apply)."""
+        with self._connect() as connection:
+            try:
+                count = connection.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0]
+            except Exception:
+                count = 0
+
+        if count > 0:
+            backend.mark_migrations(migrations)
+            return True
+        return False
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
@@ -753,7 +522,7 @@ class ConfigStore:
                     database_path, updated_at, session_secret, rsa_private_key
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
