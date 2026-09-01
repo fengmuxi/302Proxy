@@ -219,6 +219,13 @@ class IpResultCacheConfig:
 
 
 @dataclass
+class RequestDedupConfig:
+    enabled: bool = False
+    window_seconds: float = 2.0
+    max_cache_entries: int = 10000
+
+
+@dataclass
 class AutoBanConfig:
     enabled: bool = False
     window_seconds: int = 60
@@ -389,6 +396,7 @@ class Config:
     remote_config: RemoteConfigSettings = field(default_factory=RemoteConfigSettings)
     geoip: GeoIPSettings = field(default_factory=GeoIPSettings)
     ip_result_cache: IpResultCacheConfig = field(default_factory=IpResultCacheConfig)
+    request_dedup: RequestDedupConfig = field(default_factory=RequestDedupConfig)
     auto_ban: AutoBanConfig = field(default_factory=AutoBanConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     hop_by_hop_headers: List[str] = field(

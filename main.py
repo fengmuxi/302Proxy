@@ -41,6 +41,7 @@ from offline_geoip_sync import OfflineGeoIPSyncService
 from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
 from ip_result_cache import IpResultCache
 from ip_ban_manager import IpBanManager
+from request_dedup import RequestDedup, DedupConfig
 
 logger = logging.getLogger('proxy')
 
@@ -70,6 +71,13 @@ class ProxyServer:
             enabled=config.ip_result_cache.enabled,
             ttl_seconds=config.ip_result_cache.ttl_seconds,
             max_entries=config.ip_result_cache.max_entries,
+        )
+        self.request_dedup = RequestDedup(
+            config=DedupConfig(
+                enabled=config.request_dedup.enabled,
+                window_seconds=config.request_dedup.window_seconds,
+                max_cache_entries=config.request_dedup.max_cache_entries,
+            )
         )
         self.ip_ban_manager = IpBanManager()
         self.auto_ban_monitor = AutoBanMonitor(
@@ -111,6 +119,8 @@ class ProxyServer:
         self.app.router.add_get('/_admin/api/ban/stats', self.get_ban_stats)
         self.app.router.add_get('/_admin/api/auto-ban/stats', self.get_auto_ban_stats)
         self.app.router.add_get('/_admin/api/auto-ban/tracked', self.get_auto_ban_tracked)
+        self.app.router.add_get('/_admin/api/dedup/stats', self.get_dedup_stats)
+        self.app.router.add_post('/_admin/api/dedup/clear', self.clear_dedup_cache)
         self.app.router.add_get('/_block/{token}', self.block_token_page)
         self.app.router.add_get('/_block/{token}/info', self.block_token_info)
         self.app.router.add_post('/_block/{token}/confirm', self.block_token_confirm)
@@ -183,6 +193,17 @@ class ProxyServer:
             )
             self.request_handler.set_ip_cache(self.ip_result_cache)
             logger.info("请求结果缓存配置已更新: enabled=%s ttl=%ds max=%d", cache_cfg.enabled, cache_cfg.ttl_seconds, cache_cfg.max_entries)
+        dedup_cfg = self.config.request_dedup
+        if self.request_dedup.config.enabled != dedup_cfg.enabled or \
+           self.request_dedup.config.window_seconds != dedup_cfg.window_seconds or \
+           self.request_dedup.config.max_cache_entries != dedup_cfg.max_cache_entries:
+            self.request_dedup.config = DedupConfig(
+                enabled=dedup_cfg.enabled,
+                window_seconds=dedup_cfg.window_seconds,
+                max_cache_entries=dedup_cfg.max_cache_entries,
+            )
+            self.request_dedup.clear()
+            logger.info("请求去重配置已更新: enabled=%s window=%.1fs max=%d", dedup_cfg.enabled, dedup_cfg.window_seconds, dedup_cfg.max_cache_entries)
         self.auto_ban_monitor.update_config(self.config.auto_ban)
         self.auto_ban_monitor.update_email_config(self.config.email)
 
@@ -669,6 +690,31 @@ class ProxyServer:
             
             range_header = headers.get('Range')
 
+            # 请求去重检查：短时间内相同 IP + URL + Method + Range 的请求直接返回缓存
+            dedup_key_url = f"{scheme}://{headers.get('Host', '')}{path_decoded}"
+            if query_string:
+                dedup_key_url += f"?{query_string}"
+            cached_entry = await self.request_dedup.check(
+                client_ip=route_decision.client_ip if route_decision else client_host,
+                method=method,
+                url=dedup_key_url,
+                range_header=range_header or "",
+            )
+            if cached_entry is not None:
+                logger.debug("请求去重命中: %s %s", method, dedup_key_url)
+                self._record_route_log(
+                    request,
+                    route_decision=route_decision,
+                    upstream_status=cached_entry.status,
+                    cache_status="DEDUP",
+                    transport_mode="standard",
+                )
+                return web.Response(
+                    status=cached_entry.status,
+                    headers=cached_entry.headers,
+                    body=cached_entry.body,
+                )
+
             logger.debug(
                 "转发决策: 目标=%s 模式=%s Range=%s",
                 target_url, "streaming" if use_streaming_mode else "standard",
@@ -727,6 +773,17 @@ class ProxyServer:
                     response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
                     response_headers['X-Original-URL'] = redirect_info.original_url
                     response_headers['X-Final-URL'] = redirect_info.redirect_url
+
+                # 存储响应到去重缓存
+                await self.request_dedup.store(
+                    client_ip=route_decision.client_ip if route_decision else client_host,
+                    method=method,
+                    url=dedup_key_url,
+                    range_header=range_header or "",
+                    status=status,
+                    headers=dict(response_headers),
+                    body=response_body or b"",
+                )
 
                 return web.Response(
                     status=status,
@@ -982,6 +1039,33 @@ class ProxyServer:
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps({"items": tracked}, ensure_ascii=False).encode()
+        ))
+
+    async def get_dedup_stats(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
+        config = self.config.request_dedup
+        stats = {
+            "enabled": config.enabled,
+            "window_seconds": config.window_seconds,
+            "max_cache_entries": config.max_cache_entries,
+            "total_hits": self.request_dedup.total_hits,
+            "current_entries": len(self.request_dedup._cache),
+        }
+        return self._add_security_headers(web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(stats, ensure_ascii=False).encode()
+        ))
+
+    async def clear_dedup_cache(self, request: web.Request) -> web.Response:
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
+        self.request_dedup.clear()
+        return self._add_security_headers(web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({"message": "已清除请求去重缓存"}, ensure_ascii=False).encode()
         ))
     
     async def block_token_page(self, request: web.Request) -> web.Response:

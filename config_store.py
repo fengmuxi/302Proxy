@@ -22,6 +22,7 @@ from config import (
     OfflineGeoIPSettings,
     PrimaryGeoIPSettings,
     ProxyRule,
+    RequestDedupConfig,
     RouteGroupConfig,
     RemoteConfigSettings,
     SSLConfig,
@@ -1001,6 +1002,11 @@ class ConfigStore:
                 ttl_seconds=system_row["ip_cache_ttl_seconds"],
                 max_entries=system_row["ip_cache_max_entries"],
             )
+            config.request_dedup = RequestDedupConfig(
+                enabled=bool(system_row["dedup_enabled"]) if "dedup_enabled" in system_row.keys() else False,
+                window_seconds=float(system_row["dedup_window_seconds"]) if "dedup_window_seconds" in system_row.keys() else 2.0,
+                max_cache_entries=int(system_row["dedup_max_cache_entries"]) if "dedup_max_cache_entries" in system_row.keys() else 10000,
+            )
             config.auto_ban = AutoBanConfig(
                 enabled=bool(system_row["auto_ban_enabled"]),
                 window_seconds=system_row["auto_ban_window_seconds"],
@@ -1618,6 +1624,30 @@ class ConfigStore:
                 (int(enabled), ttl_seconds, max_entries, now),
             )
         return self.get_ip_cache_config()
+
+    def get_dedup_config(self) -> Dict[str, Any]:
+        config = self.load_runtime_config()
+        return {
+            "enabled": config.request_dedup.enabled,
+            "window_seconds": config.request_dedup.window_seconds,
+            "max_cache_entries": config.request_dedup.max_cache_entries,
+        }
+
+    def update_dedup_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        window_seconds = max(0.5, float(payload.get("window_seconds", 2.0) or 2.0))
+        max_cache_entries = max(100, int(payload.get("max_cache_entries", 10000) or 10000))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE system_settings
+                SET dedup_enabled = ?, dedup_window_seconds = ?, dedup_max_cache_entries = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (int(enabled), window_seconds, max_cache_entries, now),
+            )
+        return self.get_dedup_config()
 
     def get_auto_ban_config(self) -> Dict[str, Any]:
         config = self.load_runtime_config()

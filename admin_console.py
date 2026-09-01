@@ -71,6 +71,8 @@ class AdminConsole:
         app.router.add_get("/_admin/api/app-logs/content", self.get_app_log_content)
         app.router.add_get("/_admin/api/ip-cache-settings", self.get_ip_cache_settings)
         app.router.add_put("/_admin/api/ip-cache-settings", self.update_ip_cache_settings)
+        app.router.add_get("/_admin/api/dedup-settings", self.get_dedup_settings)
+        app.router.add_put("/_admin/api/dedup-settings", self.update_dedup_settings)
         app.router.add_get("/_admin/api/banned-ips", self.list_banned_ips)
         app.router.add_post("/_admin/api/banned-ips", self.add_banned_ip)
         app.router.add_delete("/_admin/api/banned-ips/{ip:.+}", self.remove_banned_ip)
@@ -497,6 +499,32 @@ class AdminConsole:
             else:
                 loop.run_until_complete(self.reload_callback())
         return {"message": "请求结果缓存配置已更新", **result}
+
+    async def get_dedup_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self._get_dedup_settings())
+
+    def _get_dedup_settings(self) -> Dict[str, Any]:
+        config = self.config_store.load_runtime_config()
+        return {
+            "enabled": config.request_dedup.enabled,
+            "window_seconds": config.request_dedup.window_seconds,
+            "max_cache_entries": config.request_dedup.max_cache_entries,
+        }
+
+    async def update_dedup_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_dedup_settings(payload))
+
+    def _update_dedup_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_dedup_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "请求去重配置已更新", **result}
 
     async def get_auto_ban_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self._get_auto_ban_settings())
