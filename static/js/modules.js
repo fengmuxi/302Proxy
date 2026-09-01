@@ -1573,6 +1573,7 @@ export async function loadAppLogContent(isAutoRefresh = false) {
     const newLines = lines.slice(lines.length - appendCount);
     const fragment = document.createDocumentFragment();
     for (let i = 0; i < newLines.length; i++) {
+      if (!newLines[i]) continue;
       const span = document.createElement("span");
       span.innerHTML = highlightLogLine(newLines[i]);
       fragment.appendChild(document.createElement("br"));
@@ -1588,7 +1589,8 @@ export async function loadAppLogContent(isAutoRefresh = false) {
   } else {
     const fragment = document.createDocumentFragment();
     for (let i = 0; i < lines.length; i++) {
-      if (i > 0) fragment.appendChild(document.createElement("br"));
+      if (!lines[i]) continue;
+      if (fragment.childNodes.length > 0) fragment.appendChild(document.createElement("br"));
       const span = document.createElement("span");
       span.innerHTML = highlightLogLine(lines[i]);
       fragment.appendChild(span);
