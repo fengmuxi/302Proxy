@@ -367,7 +367,17 @@ class ConfigStore:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition_sql}")
 
     def _run_migrations(self) -> None:
-        """Execute yoyo database migrations"""
+        """Execute yoyo database migrations for fresh databases only.
+        Existing databases already have the full schema from CREATE TABLE IF NOT EXISTS."""
+        with self._connect() as connection:
+            try:
+                count = connection.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0]
+            except Exception:
+                count = 0
+
+        if count > 0:
+            return
+
         from yoyo import read_migrations, get_backend
 
         migrations_dir = Path(__file__).parent / "migrations"
@@ -376,34 +386,7 @@ class ConfigStore:
 
         backend = get_backend(f"sqlite:///{self.db_path}")
         migrations = read_migrations(str(migrations_dir))
-        if self._bootstrap_migrations_for_existing_db(backend, migrations):
-            return
         backend.apply_migrations(migrations)
-
-    def _bootstrap_migrations_for_existing_db(self, backend, migrations) -> bool:
-        """Mark all migrations as applied for existing databases (without executing SQL).
-        Returns True if bootstrapping was performed (caller should skip apply)."""
-        with self._connect() as connection:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            try:
-                count = connection.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0]
-            except Exception:
-                count = 0
-
-        has_yoyo_table = "_yoyo_migration" in tables
-
-        if has_yoyo_table:
-            return False
-
-        if count > 0:
-            backend.mark_migrations(migrations)
-            return True
-        return False
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
