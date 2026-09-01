@@ -11,7 +11,13 @@
 ## 代码修改原则
 1. **最小变更**：只修改与需求直接相关的代码，不动无关逻辑
 2. **前后端同步**：涉及 UI 的字段变更必须同时更新前端（admin.html/admin.js/admin.css）和后端（config.py/config_store.py/proxy_core.py/main.py）
-3. **数据库兼容**：表结构变更需考虑已有数据迁移，新增列应允许 NULL 或有默认值
+3. **数据库兼容**：每次修改 schema 必须考虑旧数据迁移
+   - 新增列用 `_ensure_column()` 添加，不假设列存在
+   - 读取行数据时用 `"column_name" in row.keys()` 防御性检查，提供合理默认值
+   - `executescript` 迁移脚本开头先清理上次中断的残留（`DROP TABLE IF EXISTS`）
+   - 非原子迁移（多步 executescript）必须幂等——崩溃后可安全重试
+   - 改表时 `INSERT ... SELECT` 复制所有现有列（用 `COALESCE` 处理 nullable），不静默丢弃数据
+   - 提交前用旧版 DB 文件验证加载和读取正常
 4. **风格一致**：保持现有代码的命名和格式风格
 
 ## 核心模块职责

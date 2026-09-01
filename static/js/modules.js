@@ -19,7 +19,7 @@ import { apiFetch } from './api.js';
 import {
   els, openModal, closeModal,
   showToast,
-  renderDashboardMetrics, renderPagination,
+  renderDashboardMetrics, renderPagination, renderSummary,
 } from './components.js';
 
 // ============ 模块激活 ============
