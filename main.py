@@ -100,6 +100,7 @@ class ProxyServer:
     
     def _setup_routes(self):
         self.app.router.add_get('/_health', self.health_check)
+        self.app.router.add_get('/json/version', self.docker_version)
         self.app.router.add_get('/_admin/api/stats', self.get_stats)
         self.app.router.add_get('/_admin/api/ip-cache/stats', self.get_ip_cache_stats)
         self.app.router.add_post('/_admin/api/ip-cache/clear', self.clear_ip_cache)
@@ -818,6 +819,23 @@ class ProxyServer:
                 'timestamp': int(time.time()),
                 'route_group_count': len(self.config.route_groups),
                 'rule_count': len(self.config.proxy_rules)
+            }, ensure_ascii=False).encode()
+        ))
+    
+    async def docker_version(self, request: web.Request) -> web.Response:
+        return self._add_security_headers(web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps({
+                'ApiVersion': '1.43',
+                'Arch': 'amd64',
+                'BuildTime': '2024-01-01T00:00:00.000000000+00:00',
+                'GitCommit': 'abc1234',
+                'GoVersion': 'go1.21.0',
+                'KernelVersion': '5.15.0',
+                'MinAPIVersion': '1.12',
+                'Os': 'linux',
+                'Version': '24.0.5'
             }, ensure_ascii=False).encode()
         ))
     
