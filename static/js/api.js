@@ -25,19 +25,21 @@ export async function getPublicKey() {
 }
 
 export async function encryptPassword(password, publicKeyPem) {
+  if (!crypto?.subtle) return null;
+
   const pemHeader = "-----BEGIN PUBLIC KEY-----";
   const pemFooter = "-----END PUBLIC KEY-----";
   const pemContents = publicKeyPem
     .replace(pemHeader, "")
     .replace(pemFooter, "")
     .replace(/\s/g, "");
-  
+
   const binaryString = atob(pemContents);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  
+
   const publicKey = await crypto.subtle.importKey(
     "spki",
     bytes.buffer,
@@ -45,14 +47,14 @@ export async function encryptPassword(password, publicKeyPem) {
     false,
     ["encrypt"]
   );
-  
+
   const encoded = new TextEncoder().encode(password);
   const encrypted = await crypto.subtle.encrypt(
     { name: "RSA-OAEP" },
     publicKey,
     encoded
   );
-  
+
   return btoa(String.fromCharCode(...new Uint8Array(encrypted)));
 }
 
@@ -118,14 +120,19 @@ export async function submitLogin(state, showToast) {
   try {
     const publicKey = await getPublicKey();
     let encryptedPassword = password;
-    
+    let encrypted = false;
+
     if (publicKey) {
-      encryptedPassword = await encryptPassword(password, publicKey);
+      const result = await encryptPassword(password, publicKey);
+      if (result) {
+        encryptedPassword = result;
+        encrypted = true;
+      }
     }
 
     const data = await apiFetch("/_admin/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password: encryptedPassword }),
+      body: JSON.stringify({ username, password: encryptedPassword, encrypted }),
     });
     
     setAuthError("");
