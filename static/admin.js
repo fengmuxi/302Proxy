@@ -7,7 +7,7 @@ import { state } from './js/state.js';
 import {
   setValue, setChecked, getValue, getChecked,
   normalizeRequestHost, formatRequestHostLabel,
-  focusField,
+  focusField, findRouteGroup,
 } from './js/utils.js';
 import { apiFetch, loadAuthStatus, submitLogin, performLogout } from './js/api.js';
 import {
@@ -17,7 +17,7 @@ import {
   initTheme, applyTheme,
 } from './js/components.js';
 import {
-  activateModule, initHashRouting,
+  activateModule, setActiveModule, initHashRouting,
   loadDashboard,
   renderRouteGroups,
   resetRouteGroupForm, openPrefixEditor,
@@ -44,7 +44,6 @@ import {
   loadBackups, createBackup, downloadBackup,
   openRestoreModal, confirmRestoreBackup, deleteBackup, uploadAndRestore,
   getBanAutoRefreshConfig, saveBanAutoRefreshConfig, startBanAutoRefresh, stopBanAutoRefresh,
-  findRouteGroup,
 } from './js/modules.js';
 
 // ============ DOMContentLoaded 初始化 ============
@@ -811,9 +810,12 @@ window.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("auth-login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      await submitLogin(state, showToast);
-      await loadDashboard();
-      showToast("后台登录成功");
+      const ok = await submitLogin(state, showToast);
+      if (ok) {
+        await loadDashboard();
+        initHashRouting();
+        showToast("后台登录成功");
+      }
     } catch (error) {
       setAuthError(error.message);
     }
@@ -841,21 +843,6 @@ window.addEventListener("DOMContentLoaded", async () => {
 });
 
 // ============ 辅助函数（供入口文件内部使用） ============
-
-function setActiveModule(moduleName) {
-  state.activeModule = moduleName;
-  document.querySelectorAll(".module-btn").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.moduleTarget === moduleName);
-  });
-  document.querySelectorAll(".module-panel").forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.modulePanel === moduleName);
-  });
-  try {
-    const url = new URL(window.location.href);
-    url.hash = moduleName;
-    window.history.replaceState(null, "", url.toString());
-  } catch (_) {}
-}
 
 function updateAutoRefreshStatusUI() {
   const el = document.getElementById("log_auto_refresh_status");
