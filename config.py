@@ -240,6 +240,7 @@ class EmailConfig:
     sender_name: str = ""
     password: str = ""
     recipients: str = ""
+    block_link_base_url: str = ""
     alert_window_seconds: int = 60
     alert_max_requests: int = 80
     alert_max_404: int = 15
@@ -739,6 +740,7 @@ class Config:
                 sender_name=str(email_data.get("sender_name", config.email.sender_name) or ""),
                 password=str(email_data.get("password", config.email.password) or ""),
                 recipients=str(email_data.get("recipients", config.email.recipients) or ""),
+                block_link_base_url=str(email_data.get("block_link_base_url", config.email.block_link_base_url) or ""),
                 alert_window_seconds=max(10, int(email_data.get("alert_window_seconds", config.email.alert_window_seconds) or 60)),
                 alert_max_requests=max(1, int(email_data.get("alert_max_requests", config.email.alert_max_requests) or 80)),
                 alert_max_404=max(1, int(email_data.get("alert_max_404", config.email.alert_max_404) or 15)),

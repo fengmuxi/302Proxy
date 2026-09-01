@@ -129,13 +129,23 @@ class AutoBanMonitor:
     
     def _generate_block_link(self, ip: str, reason: str) -> Optional[str]:
         """生成封禁链接URL"""
-        if not self._base_url or not self._config_store:
+        if not self._config_store:
             return None
         
         try:
+            # 优先使用邮件配置中手动设置的域名，否则使用自动检测的base_url
+            base_url = ""
+            if self._email_notifier and self._email_notifier._config.block_link_base_url:
+                base_url = self._email_notifier._config.block_link_base_url.rstrip("/")
+            elif self._base_url:
+                base_url = self._base_url
+            
+            if not base_url:
+                return None
+            
             # 生成token，30分钟有效期
             token = self._config_store.create_block_token(ip, reason, expires_in_seconds=1800)
-            return f"{self._base_url}/_block/{token}"
+            return f"{base_url}/_block/{token}"
         except Exception as e:
             logger.error("生成封禁链接失败: %s", e)
             return None

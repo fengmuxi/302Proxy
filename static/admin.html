@@ -928,6 +928,11 @@
               <input id="email_recipients" type="text" placeholder="admin1@example.com,admin2@example.com" />
             </label>
             <p class="hint">多个收件邮箱用逗号分隔，系统会在检测到异常时向所有收件人发送邮件。</p>
+            <label>
+              <span>封禁链接域名（可选）</span>
+              <input id="email_block_link_base_url" type="text" placeholder="留空则自动检测，如 https://example.com" />
+            </label>
+            <p class="hint">邮件中封禁链接使用的域名。若服务部署在反向代理后，请填写对外访问地址（如 https://proxy.example.com），留空则自动使用服务器本地地址。</p>
 
             <div class="sub-card-head" style="margin-top: 16px;">
               <h3>提醒阈值</h3>
@@ -1434,6 +1439,6 @@
     </div>
   </div>
 
-  <script src="/_admin/static/admin.js?v=2026083102" defer></script>
+  <script type="module" src="/_admin/static/admin.js"></script>
 </body>
 </html>

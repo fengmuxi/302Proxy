@@ -543,6 +543,7 @@ class AdminConsole:
             "sender_name": config.email.sender_name,
             "password": config.email.password,
             "recipients": config.email.recipients,
+            "block_link_base_url": config.email.block_link_base_url,
             "alert_window_seconds": config.email.alert_window_seconds,
             "alert_max_requests": config.email.alert_max_requests,
             "alert_max_404": config.email.alert_max_404,

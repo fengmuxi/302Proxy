@@ -129,6 +129,7 @@ class ConfigStore:
                     email_sender_name TEXT NOT NULL DEFAULT '',
                     email_password TEXT NOT NULL DEFAULT '',
                     email_recipients TEXT NOT NULL DEFAULT '',
+                    email_block_link_base_url TEXT NOT NULL DEFAULT '',
                     email_alert_window_seconds INTEGER NOT NULL DEFAULT 60,
                     email_alert_max_requests INTEGER NOT NULL DEFAULT 80,
                     email_alert_max_404 INTEGER NOT NULL DEFAULT 15,
@@ -598,6 +599,7 @@ class ConfigStore:
             self._ensure_column(connection, "system_settings", "email_sender_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "system_settings", "email_password", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "system_settings", "email_recipients", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "system_settings", "email_block_link_base_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "system_settings", "email_alert_window_seconds", "INTEGER NOT NULL DEFAULT 60")
             self._ensure_column(connection, "system_settings", "email_alert_max_requests", "INTEGER NOT NULL DEFAULT 80")
             self._ensure_column(connection, "system_settings", "email_alert_max_404", "INTEGER NOT NULL DEFAULT 15")
@@ -1215,6 +1217,7 @@ class ConfigStore:
                 sender_name=system_row["email_sender_name"] if "email_sender_name" in system_row.keys() else "",
                 password=system_row["email_password"],
                 recipients=system_row["email_recipients"],
+                block_link_base_url=system_row["email_block_link_base_url"] if "email_block_link_base_url" in system_row.keys() else "",
                 alert_window_seconds=system_row["email_alert_window_seconds"],
                 alert_max_requests=system_row["email_alert_max_requests"],
                 alert_max_404=system_row["email_alert_max_404"],
@@ -1860,6 +1863,7 @@ class ConfigStore:
             "sender_name": config.email.sender_name,
             "password": config.email.password,
             "recipients": config.email.recipients,
+            "block_link_base_url": config.email.block_link_base_url,
             "alert_window_seconds": config.email.alert_window_seconds,
             "alert_max_requests": config.email.alert_max_requests,
             "alert_max_404": config.email.alert_max_404,
@@ -1876,6 +1880,7 @@ class ConfigStore:
         # 密码字段：如果payload中没有提供，则保持数据库中的原值
         password = str(payload.get("password", "") or "")
         recipients = str(payload.get("recipients", "") or "")
+        block_link_base_url = str(payload.get("block_link_base_url", "") or "")
         alert_window_seconds = max(10, int(payload.get("alert_window_seconds", 60) or 60))
         alert_max_requests = max(1, int(payload.get("alert_max_requests", 80) or 80))
         alert_max_404 = max(1, int(payload.get("alert_max_404", 15) or 15))
@@ -1893,13 +1898,14 @@ class ConfigStore:
                 UPDATE system_settings
                 SET email_enabled = ?, email_smtp_host = ?, email_smtp_port = ?,
                     email_smtp_ssl = ?, email_sender = ?, email_sender_name = ?,
-                    email_password = ?, email_recipients = ?, email_alert_window_seconds = ?,
+                    email_password = ?, email_recipients = ?, email_block_link_base_url = ?,
+                    email_alert_window_seconds = ?,
                     email_alert_max_requests = ?, email_alert_max_404 = ?, email_alert_cooldown_minutes = ?,
                     updated_at = ?
                 WHERE id = 1
                 """,
                 (int(enabled), smtp_host, smtp_port, int(smtp_ssl), sender, sender_name, password, recipients,
-                 alert_window_seconds, alert_max_requests, alert_max_404, alert_cooldown_minutes, now),
+                 block_link_base_url, alert_window_seconds, alert_max_requests, alert_max_404, alert_cooldown_minutes, now),
             )
         return self.get_email_config()
 

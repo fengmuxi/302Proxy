@@ -686,6 +686,7 @@ SMTP端口: {smtp_port}
 此邮件由 {system_name} 测试发送
 """
     else:
+        block_link_text = f"\n快速封禁:\n点击下方链接可直接封禁此IP（30分钟内有效，仅可使用一次）:\n{block_link_url}\n" if block_link_url else ""
         text_content = f"""
 {system_name} - IP请求异常提醒
 
@@ -696,7 +697,7 @@ IP地址: {ip}
 阈值限制: {threshold}
 监测窗口: {window_seconds}秒
 触发时间: {now}
-
+{block_link_text}
 处理建议:
 {"- 检查该IP是否为正常业务访问" if "请求频率" in alert_type else "- 检查该IP请求的资源是否存在"}
 {"- 如确认为恶意请求，建议手动封禁该IP" if "请求频率" in alert_type else "- 确认是否为扫描器或恶意爬虫"}
