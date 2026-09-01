@@ -18,10 +18,8 @@ import {
 import { apiFetch } from './api.js';
 import {
   els, openModal, closeModal,
-  showToast, showUrlTooltip, hideUrlTooltip, copyToClipboard,
-  setAuthError, applyAuthState,
-  initTheme, applyTheme,
-  renderDashboardMetrics, renderPagination, animateCounter, renderSummary,
+  showToast,
+  renderDashboardMetrics, renderPagination,
 } from './components.js';
 
 // ============ 模块激活 ============
@@ -90,18 +88,23 @@ export function setActiveModule(moduleName) {
   } catch (_) {}
 }
 
+let _hashRoutingInitialized = false;
+
 export function initHashRouting() {
   const VALID_MODULES = ["overview", "route-config", "logs", "app-logs", "geoip-online", "geoip-offline", "ip-ban-manager", "ip-cache-manager", "backup-manager"];
   const hash = window.location.hash.replace(/^#\/?/, "");
   if (hash && VALID_MODULES.includes(hash)) {
     activateModule(hash);
   }
-  window.addEventListener("hashchange", () => {
-    const newHash = window.location.hash.replace(/^#\/?/, "");
-    if (newHash && VALID_MODULES.includes(newHash) && newHash !== state.activeModule) {
-      activateModule(newHash);
-    }
-  });
+  if (!_hashRoutingInitialized) {
+    _hashRoutingInitialized = true;
+    window.addEventListener("hashchange", () => {
+      const newHash = window.location.hash.replace(/^#\/?/, "");
+      if (newHash && VALID_MODULES.includes(newHash) && newHash !== state.activeModule) {
+        activateModule(newHash);
+      }
+    });
+  }
 }
 
 // ============ 仪表板加载 ============

@@ -59,7 +59,6 @@ window.addEventListener("DOMContentLoaded", async () => {
   const savedAutoRefresh = getAutoRefreshConfig();
   setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
   setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
-  updateAutoRefreshStatusUI();
 
   const savedBanRefresh = getBanAutoRefreshConfig();
   setChecked("ban_auto_refresh_enabled", savedBanRefresh.enabled);
@@ -843,10 +842,3 @@ window.addEventListener("DOMContentLoaded", async () => {
 });
 
 // ============ 辅助函数（供入口文件内部使用） ============
-
-function updateAutoRefreshStatusUI() {
-  const el = document.getElementById("log_auto_refresh_status");
-  if (!el) return;
-  el.textContent = "";
-  el.className = "auto-refresh-status stopped";
-}
