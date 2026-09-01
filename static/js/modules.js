@@ -1489,18 +1489,23 @@ export function startAutoRefresh() {
 // ============ 应用日志 ============
 
 let _appLogAutoRefreshTimer = null;
+const APP_LOG_MAX_DOM_NODES = 600;
 
 export function highlightLogLine(line) {
   if (!line) return line;
   let safe = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const tsMatch = safe.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/);
-  if (tsMatch) safe = '<span class="log-ts">' + tsMatch[1] + '</span>' + safe.slice(tsMatch[1].length);
-  const reqMatch = safe.match(/\[([a-f0-9]{8,12})\]/);
-  if (reqMatch) safe = safe.replace(reqMatch[0], '<span class="log-reqid">' + reqMatch[0] + '</span>');
-  safe = safe.replace(/\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/g, '<span class="log-level-$1">$1</span>');
-  safe = safe.replace(/\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/g, '<span class="log-method">$1</span>');
-  safe = safe.replace(/\b([1-5]\d{2})\b/g, '<span class="log-status-$1">$1</span>');
-  safe = safe.replace(/\b(\d+\.?\d*ms)\b/, '<span class="log-duration">$1</span>');
+  safe = safe.replace(
+    /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/,
+    '<span class="log-ts">$1</span>',
+  );
+  safe = safe.replace(
+    /\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/g,
+    '<span class="log-level-$1">$1</span>',
+  );
+  safe = safe.replace(
+    /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\/\S*)\s+(\d{3})\s+([\d.]+ms)\b/g,
+    '<span class="log-method">$1</span> $2 <span class="log-status-$3">$3</span> <span class="log-duration">$4</span>',
+  );
   return safe;
 }
 
@@ -1542,33 +1547,57 @@ export async function loadAppLogContent(isAutoRefresh = false) {
   if (keyword) params.set("keyword", keyword);
   const tailLines = getValue("app-log-tail-lines") || "100";
   params.set("tail", tailLines);
-  
+
   const contentEl = document.getElementById("app-log-content");
   if (!contentEl) return;
-  
+
   const data = await apiFetch(`/_admin/api/app-logs/content?${params.toString()}`);
   if (!data) return;
-  
+
   const fileInfoEl = document.getElementById("app-log-file-info");
   const lineInfoEl = document.getElementById("app-log-line-info");
   const raw = data.content || "";
-  
+
   if (!raw) {
     contentEl.textContent = "(无内容)";
+    state.logLastLineCount = 0;
     return;
   }
-  
+
   const lines = raw.split("\n");
-  const fragment = document.createDocumentFragment();
-  for (let i = 0; i < lines.length; i++) {
-    if (i > 0) fragment.appendChild(document.createElement("br"));
-    const span = document.createElement("span");
-    span.innerHTML = highlightLogLine(lines[i]);
-    fragment.appendChild(span);
+  const newTotal = data.total_lines || lines.length;
+  const prevTotal = state.logLastLineCount || 0;
+
+  if (isAutoRefresh && newTotal > prevTotal && prevTotal > 0 && !keyword) {
+    const appendCount = Math.min(newTotal - prevTotal, lines.length);
+    const newLines = lines.slice(lines.length - appendCount);
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < newLines.length; i++) {
+      const span = document.createElement("span");
+      span.innerHTML = highlightLogLine(newLines[i]);
+      fragment.appendChild(document.createElement("br"));
+      fragment.appendChild(span);
+    }
+    contentEl.appendChild(fragment);
+    state.logLastLineCount = newTotal;
+
+    const allChildren = contentEl.childNodes;
+    while (allChildren.length > APP_LOG_MAX_DOM_NODES) {
+      contentEl.removeChild(allChildren[0]);
+    }
+  } else {
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) fragment.appendChild(document.createElement("br"));
+      const span = document.createElement("span");
+      span.innerHTML = highlightLogLine(lines[i]);
+      fragment.appendChild(span);
+    }
+    contentEl.innerHTML = "";
+    contentEl.appendChild(fragment);
+    state.logLastLineCount = newTotal;
   }
-  contentEl.innerHTML = "";
-  contentEl.appendChild(fragment);
-  
+
   if (fileInfoEl) fileInfoEl.textContent = `文件: ${data.file || state.appLogFile || "-"}`;
   if (lineInfoEl) {
     const matched = data.matched_lines != null ? data.matched_lines : data.total_lines;
@@ -1576,7 +1605,7 @@ export async function loadAppLogContent(isAutoRefresh = false) {
       ? `匹配: ${matched} / 总计: ${data.total_lines} 行`
       : `共 ${data.total_lines} 行`;
   }
-  
+
   if (state.logAutoScroll) {
     contentEl.scrollTop = contentEl.scrollHeight;
   }
@@ -1611,9 +1640,14 @@ export function initLogScrollDetection() {
   const contentEl = document.getElementById("app-log-content");
   if (!contentEl || contentEl._scrollListenerAdded) return;
   contentEl._scrollListenerAdded = true;
+  let scrollTimer = null;
   contentEl.addEventListener("scroll", () => {
-    const isAtBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < 50;
-    state.logAutoScroll = isAtBottom;
+    if (scrollTimer !== null) return;
+    scrollTimer = setTimeout(() => {
+      scrollTimer = null;
+      const isAtBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight < 50;
+      state.logAutoScroll = isAtBottom;
+    }, 100);
   });
 }
 
