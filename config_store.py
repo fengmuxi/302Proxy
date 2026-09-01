@@ -384,10 +384,21 @@ class ConfigStore:
         """Mark all migrations as applied for existing databases (without executing SQL).
         Returns True if bootstrapping was performed (caller should skip apply)."""
         with self._connect() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
             try:
                 count = connection.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0]
             except Exception:
                 count = 0
+
+        has_yoyo_table = "_yoyo_migration" in tables
+
+        if has_yoyo_table:
+            return False
 
         if count > 0:
             backend.mark_migrations(migrations)
