@@ -16,6 +16,7 @@ class DedupConfig:
     enabled: bool = False
     window_seconds: float = 2.0
     max_cache_entries: int = 10000
+    max_body_bytes: int = 1024 * 1024
 
 
 @dataclass
@@ -41,16 +42,18 @@ class RequestDedup:
         return f"{client_ip}|{method}|{url}|{range_header}"
 
     def _evict_expired(self, now: float) -> None:
+        # 普通 dict 保持插入序，头部即最老；从头部弹出过期项即可，O(过期数)
         cutoff = now - self.config.window_seconds
-        expired = [k for k, v in self._cache.items() if v.timestamp < cutoff]
-        for k in expired:
-            del self._cache[k]
+        while self._cache:
+            key, entry = next(iter(self._cache.items()))
+            if entry.timestamp >= cutoff:
+                break
+            del self._cache[key]
 
     def _evict_oldest(self) -> None:
-        if len(self._cache) <= self.config.max_cache_entries:
-            return
-        oldest_key = min(self._cache, key=lambda k: self._cache[k].timestamp)
-        del self._cache[oldest_key]
+        # 此前每次 store 都 O(n) 找最小时间戳；按插入序直接弹头部
+        while len(self._cache) > self.config.max_cache_entries:
+            del self._cache[next(iter(self._cache))]
 
     async def check(
         self,
@@ -88,6 +91,11 @@ class RequestDedup:
         if not self.config.enabled:
             return
         if method not in ("GET", "HEAD"):
+            return
+        # 错误响应与超大响应体不入缓存：缓存 500 会放大故障，缓存大 body 会撑爆内存
+        if status >= 400:
+            return
+        if len(body) > self.config.max_body_bytes:
             return
 
         key = self._make_key(client_ip, method, url, range_header)

@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import ipaddress
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -17,6 +18,16 @@ from ip_ban_manager import IpBanManager
 
 
 logger = logging.getLogger("proxy")
+
+
+def _retry_delay(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
+    """指数退避 + 抖动。
+
+    固定 1 秒重试会让多个并发失败请求在同一时刻同时回源，把本已吃紧的上游
+    彻底打垮；加入抖动可以把重试打散。
+    """
+    delay = min(base * (2 ** max(attempt - 1, 0)), cap)
+    return delay * (0.5 + random.random() * 0.5)
 
 
 # ===== 404 错误页面渲染（未匹配代理规则）=====
@@ -215,9 +226,15 @@ class RedirectHandler:
         timeout: int = 30,
         stream_timeout: int = 3600,
         follow_redirects: bool = True,
+        verify_ssl: bool = True,
+        session_provider=None,
     ):
         self.max_redirects = max_redirects
         self.follow_redirects_enabled = follow_redirects
+        self.verify_ssl = verify_ssl
+        # 自建 session 会随响应一起逃逸出方法作用域，永远等不到 close；
+        # 改为由外部提供共享 session，彻底消除泄漏面
+        self._session_provider = session_provider
         self.timeout = aiohttp.ClientTimeout(total=timeout, connect=timeout)
         self.stream_timeout = aiohttp.ClientTimeout(
             total=stream_timeout,
@@ -257,14 +274,21 @@ class RedirectHandler:
         redirect_chain = []
         current_url = url
         redirect_count = 0
-        own_session = session is None
         response: Optional[aiohttp.ClientResponse] = None
 
-        if own_session:
-            session = aiohttp.ClientSession(timeout=self.stream_timeout if streaming else self.timeout)
+        if session is None:
+            if self._session_provider is None:
+                raise ValueError("RedirectHandler 缺少 session，且未配置 session_provider")
+            session = await self._session_provider()
+
+        # 规则级超时此前从未传给 request，rule.timeout 是死配置；
+        # 这里显式传入，standard 走 timeout，streaming 走 stream_timeout
+        request_timeout = self.stream_timeout if streaming else self.timeout
+        # ssl=None 表示沿用默认校验，ssl=False 才是关闭校验
+        ssl_mode = None if self.verify_ssl else False
 
         try:
-            while redirect_count <= self.max_redirects:
+            while redirect_count < self.max_redirects:
                 request_headers = headers.copy() if headers else {}
                 request_body = None if method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"} else body
                 response = await session.request(
@@ -273,7 +297,8 @@ class RedirectHandler:
                     headers=request_headers,
                     data=request_body,
                     allow_redirects=False,
-                    ssl=False,
+                    timeout=request_timeout,
+                    ssl=ssl_mode,
                 )
 
                 if response.status not in self.REDIRECT_STATUS_CODES or not self.follow_redirects_enabled:
@@ -326,9 +351,15 @@ class RedirectHandler:
                 redirect_count=redirect_count,
                 redirect_chain=redirect_chain,
             )
-        finally:
-            if own_session and response is None:
-                await session.close()
+        except asyncio.CancelledError:
+            # 客户端断开导致的取消同样要归还连接
+            if response is not None and not response.closed:
+                response.release()
+            raise
+        except Exception:
+            if response is not None and not response.closed:
+                response.release()
+            raise
 
 
 class ProxyRequestHandler:
@@ -339,20 +370,40 @@ class ProxyRequestHandler:
         self.ip_cache = ip_cache
         self.ip_ban_manager = ip_ban_manager
         self._session: Optional[aiohttp.ClientSession] = None
+        self._stream_session: Optional[aiohttp.ClientSession] = None
+        self._rule_index: Optional[Dict[str, List[ProxyRule]]] = None
+        self._rule_index_signature: Optional[Tuple[int, int]] = None
         self._last_cache_status = "BYPASS"
         self._refresh_redirect_handler()
 
     def _refresh_redirect_handler(self) -> None:
+        # session_provider 保证 RedirectHandler 永远使用共享会话，不自建
         self.redirect_handler = RedirectHandler(
             max_redirects=self.config.max_redirects,
             timeout=self.config.default_timeout,
             stream_timeout=self.config.streaming.stream_timeout,
             follow_redirects=self.config.follow_redirects,
+            verify_ssl=self.config.verify_upstream_ssl,
+            session_provider=self.get_session,
         )
 
-    def update_config(self, config: Config) -> None:
+    def _connection_signature(self) -> Tuple[int, int, int, int]:
+        standard_limit, stream_limit = self._split_connection_limits()
+        return (
+            standard_limit,
+            stream_limit,
+            self.config.server.max_connections_per_host,
+            self.config.default_timeout,
+        )
+
+    async def update_config(self, config: Config) -> None:
+        """热更新配置。连接池参数变化时重建会话，否则改了不生效。"""
+        previous_signature = self._connection_signature()
         self.config = config
         self._refresh_redirect_handler()
+        if self._connection_signature() != previous_signature:
+            logger.info("上游连接池参数已变更，将在下次请求时重建会话")
+            await self.close()
 
     def set_ip_cache(self, ip_cache: Optional[IpResultCache]) -> None:
         self.ip_cache = ip_cache
@@ -363,25 +414,68 @@ class ProxyRequestHandler:
     def get_last_cache_status(self) -> str:
         return getattr(self, '_last_cache_status', 'BYPASS')
 
+    def _build_connector(self, limit: int, limit_per_host: int) -> aiohttp.TCPConnector:
+        # enable_cleanup_closed 自 aiohttp 3.9 起已废弃且无效果，不再传入；
+        # ttl_dns_cache 避免每个新连接都重新解析上游域名
+        return aiohttp.TCPConnector(
+            limit=limit,
+            limit_per_host=limit_per_host,
+            ttl_dns_cache=300,
+            force_close=False,
+        )
+
+    def _split_connection_limits(self) -> Tuple[int, int]:
+        """把 max_connections 拆给 standard / streaming 两个池。
+
+        长视频流会长时间占用连接，与短请求共用同一个池时会出现队头阻塞：
+        池子被慢流占满后，普通请求只能排队等待。按 2:8 拆分并各自保底 50。
+        """
+        total = max(int(self.config.server.max_connections or 0), 100)
+        standard = max(total // 5, 50)
+        streaming = max(total - standard, 50)
+        return standard, streaming
+
     async def get_session(self) -> aiohttp.ClientSession:
+        """标准（非流式）请求与 GeoIP 查询共用的会话。"""
         if self._session is None or self._session.closed:
+            standard_limit, _ = self._split_connection_limits()
+            timeout = aiohttp.ClientTimeout(
+                total=self.config.default_timeout,
+                connect=self.config.default_timeout,
+                sock_read=self.config.default_timeout,
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=self._build_connector(
+                    limit=standard_limit,
+                    limit_per_host=min(self.config.server.max_connections_per_host, standard_limit),
+                ),
+            )
+        return self._session
+
+    async def get_stream_session(self) -> aiohttp.ClientSession:
+        """流式请求专用会话，与 standard 物理隔离，避免长流占满连接池。"""
+        if self._stream_session is None or self._stream_session.closed:
+            _, stream_limit = self._split_connection_limits()
             timeout = aiohttp.ClientTimeout(
                 total=self.config.streaming.stream_timeout,
                 connect=self.config.default_timeout,
                 sock_read=self.config.streaming.read_timeout,
             )
-            connector = aiohttp.TCPConnector(
-                limit=self.config.server.max_connections,
-                limit_per_host=self.config.server.max_connections_per_host,
-                enable_cleanup_closed=True,
-                force_close=False,
+            self._stream_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=self._build_connector(
+                    limit=stream_limit,
+                    limit_per_host=min(self.config.server.max_connections_per_host, stream_limit),
+                ),
             )
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        return self._session
+        return self._stream_session
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+        if self._stream_session and not self._stream_session.closed:
+            await self._stream_session.close()
 
     def _get_header_value(self, headers: Dict[str, str], header_name: str) -> str:
         lowered = header_name.lower()
@@ -430,12 +524,48 @@ class ProxyRequestHandler:
         request_host = self._get_header_value(headers, "Host")
         return self._extract_first_host_value(request_host)
 
+    @staticmethod
+    def _bucket_key(prefix: str) -> str:
+        """取路径前缀的首段作为分桶键；根前缀（""、"/"）归入空桶。"""
+        if not prefix or prefix == "/":
+            return ""
+        return prefix.strip("/").split("/", 1)[0]
+
+    def _ensure_rule_index(self) -> Dict[str, List[ProxyRule]]:
+        """构建 path_prefix 首段分桶索引。
+
+        配置对象只在 reload 时整体替换，因此用 (id(config), 规则数) 作为廉价指纹；
+        指纹不变则复用索引，避免每请求重建。
+        """
+        signature = (id(self.config), len(self.config.proxy_rules))
+        if self._rule_index is not None and self._rule_index_signature == signature:
+            return self._rule_index
+
+        index: Dict[str, List[ProxyRule]] = {}
+        for rule in self.config.proxy_rules:
+            if not rule.enabled:
+                continue
+            index.setdefault(self._bucket_key(rule.path_prefix), []).append(rule)
+        for bucket in index.values():
+            bucket.sort(key=lambda item: (-item.priority, item.rule_id or 0))
+
+        self._rule_index = index
+        self._rule_index_signature = signature
+        return index
+
     def find_matching_rules(self, path: str, request_host: str = "") -> List[ProxyRule]:
         request_hosts = set(split_request_hosts(request_host))
         matches: List[Tuple[ProxyRule, bool]] = []
 
-        for rule in self.config.proxy_rules:
-            if not rule.enabled or not path.startswith(rule.path_prefix):
+        # 只检查首段命中的桶与根桶，把 O(规则总数) 降为 O(同前缀规则数)
+        index = self._ensure_rule_index()
+        path_bucket = self._bucket_key(path)
+        candidates: List[ProxyRule] = list(index.get(path_bucket, ()))
+        if path_bucket:
+            candidates.extend(index.get("", ()))
+
+        for rule in candidates:
+            if not path.startswith(rule.path_prefix):
                 continue
             rule_hosts = split_request_hosts(rule.request_host)
             if rule_hosts:
@@ -483,7 +613,12 @@ class ProxyRequestHandler:
                 effective_path = path
 
         if rule.strip_prefix:
-            remaining_path = effective_path[len(rule.path_prefix):]
+            # 正则改写可能已把前缀一并处理掉（如 ^/play/ -> /video/），
+            # 此时按原前缀长度硬切会错位，必须先确认前缀仍然存在
+            if effective_path.startswith(rule.path_prefix):
+                remaining_path = effective_path[len(rule.path_prefix):]
+            else:
+                remaining_path = effective_path
             if not remaining_path.startswith("/"):
                 remaining_path = "/" + remaining_path
             new_path = parsed_target.path + remaining_path
@@ -493,6 +628,47 @@ class ProxyRequestHandler:
         encoded_path = quote(new_path, safe="/")
         base_url = f"{parsed_target.scheme}://{parsed_target.netloc}{encoded_path}"
         return f"{base_url}?{query_string}" if query_string else base_url
+
+    def _apply_range_headers(
+        self,
+        filtered_headers: Dict[str, str],
+        upstream_headers: Dict[str, str],
+        status: int,
+    ) -> None:
+        """按上游真实能力下发 Accept-Ranges。
+
+        此前无条件写入 `Accept-Ranges: bytes`，上游不支持 Range 时播放器会持续
+        发起分片请求、每次却拿回全量 200，造成拖动卡顿与数倍流量放大。
+        """
+        if not self.config.streaming.enable_range_support:
+            filtered_headers.pop("Accept-Ranges", None)
+            return
+        if "Accept-Ranges" in filtered_headers:
+            return
+        upstream_accepts = str(upstream_headers.get("Accept-Ranges", "")).lower()
+        if status == 206 or "bytes" in upstream_accepts or "Content-Range" in upstream_headers:
+            filtered_headers["Accept-Ranges"] = "bytes"
+
+    def _ssl_mode(self) -> Optional[bool]:
+        """ssl=None 沿用默认证书校验，ssl=False 才是关闭校验。"""
+        return None if self.config.verify_upstream_ssl else False
+
+    def _should_stream_by_content(self, response_headers: Dict[str, str], status: int) -> bool:
+        """标准模式下按响应头判断是否应升级为流式。
+
+        规则未开启 enable_streaming 时，几百 MB 的视频会被 read() 整个读进内存，
+        这里复用 is_streaming_content 在读取响应体之前完成判定。
+        """
+        if not self.config.streaming.enabled or status in (204, 304):
+            return False
+        raw_length = response_headers.get("Content-Length")
+        content_length: Optional[int] = None
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                content_length = None
+        return self.is_streaming_content(response_headers, content_length)
 
     def filter_headers(self, headers: Dict[str, str], is_request: bool = True) -> Dict[str, str]:
         filtered = {}
@@ -540,32 +716,59 @@ class ProxyRequestHandler:
 
         return False
 
-    def extract_client_ip(self, headers: Dict[str, str], client_host: str) -> str:
-        candidates: List[str] = []
-        for header_name in ("CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"):
-            raw_value = headers.get(header_name, "")
-            if not raw_value:
-                continue
-            for part in raw_value.split(","):
-                candidate = part.strip()
-                if candidate:
-                    candidates.append(candidate)
-
-        if client_host:
-            candidates.append(client_host)
-
-        parsed_candidates = []
-        for candidate in candidates:
+    def _is_trusted_peer(self, address: str) -> bool:
+        """判断直连来源是否属于可信代理网段。"""
+        if not address:
+            return False
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        for network_text in self.config.trusted_proxy_networks:
             try:
-                parsed_candidates.append(ipaddress.ip_address(candidate))
+                if parsed in ipaddress.ip_network(network_text, strict=False):
+                    return True
+            except ValueError:
+                logger.warning("忽略无效的可信代理网段配置: %s", network_text)
+                continue
+        return False
+
+    def extract_client_ip(self, headers: Dict[str, str], client_host: str) -> str:
+        """确定真实客户端 IP。
+
+        此前无条件信任 X-Forwarded-For 并取最左侧地址，而最左侧恰恰是客户端
+        可以随意伪造的位置 —— 一条请求头即可绕过 IP 黑白名单、地区过滤与封禁。
+
+        修复后：只有直连来源位于可信代理网段时才解析转发头，并且**从右往左**
+        取第一个不可信地址（右侧由己方代理逐跳追加，左侧才是攻击者可控的）。
+        """
+        if not self.config.trust_forward_headers or not self._is_trusted_peer(client_host):
+            return client_host
+
+        # X-Real-IP / CF-Connecting-IP 由单跳代理写入，默认不信任；
+        # 仅当部署结构中确由前置代理覆盖时才开启 trust_upstream_ip_headers
+        if self.config.trust_upstream_ip_headers:
+            for header_name in ("CF-Connecting-IP", "X-Real-IP"):
+                raw_value = headers.get(header_name, "").strip()
+                if not raw_value:
+                    continue
+                candidate = raw_value.split(",")[0].strip()
+                try:
+                    return str(ipaddress.ip_address(candidate))
+                except ValueError:
+                    continue
+
+        raw_xff = headers.get("X-Forwarded-For", "")
+        chain = [part.strip() for part in raw_xff.split(",") if part.strip()]
+        for candidate in reversed(chain):
+            try:
+                parsed = ipaddress.ip_address(candidate)
             except ValueError:
                 continue
+            if not self._is_trusted_peer(str(parsed)):
+                return str(parsed)
 
-        for candidate in parsed_candidates:
-            if getattr(candidate, "is_global", False):
-                return str(candidate)
-
-        return str(parsed_candidates[0]) if parsed_candidates else client_host
+        return client_host
 
     def _normalize_location(self, value: Optional[str]) -> str:
         return "".join((value or "").strip().lower().split())
@@ -833,19 +1036,6 @@ class ProxyRequestHandler:
                     block_reason=reason,
                 )
 
-        # 判断是否需要解析 geo_location：地区匹配开启 或 路由前缀/任意候选规则配了地区白/黑名单
-        group_has_region_whitelist = bool(route_group and route_group.normalized_region_whitelist())
-        group_has_region_blacklist = bool(route_group and route_group.normalized_region_blacklist())
-        any_rule_has_region_whitelist = any(rule.normalized_region_whitelist() for rule in candidates)
-        any_rule_has_region_blacklist = any(rule.normalized_region_blacklist() for rule in candidates)
-        need_geo_resolution = (
-            region_matching_enabled
-            or group_has_region_whitelist
-            or group_has_region_blacklist
-            or any_rule_has_region_whitelist
-            or any_rule_has_region_blacklist
-        )
-
         whitelist_candidates = [rule for rule in candidates if rule.normalized_ip_whitelist()]
         regional_candidates = [rule for rule in candidates if rule.normalized_regions() and not rule.is_default]
         default_rule = self._default_candidate(candidates)
@@ -863,7 +1053,9 @@ class ProxyRequestHandler:
 
         if selected_rule is None and region_matching_enabled:
             if regional_candidates and self.geo_resolver:
-                geo_location = await self.geo_resolver.resolve(client_ip, self.config.geoip)
+                # 前缀级访问控制可能已经解析过，避免同一请求内重复查询 GeoIP
+                if geo_location is None:
+                    geo_location = await self.geo_resolver.resolve(client_ip, self.config.geoip)
                 if geo_location:
                     online_geo_cache_hit = (
                         geo_location.online_cache_hit
@@ -1025,7 +1217,8 @@ class ProxyRequestHandler:
         target_url = route_decision.target_url
         client_ip = route_decision.client_ip or client_host
 
-        session = await self.get_session()
+        session = await self.get_stream_session()
+        ssl_mode = self._ssl_mode()
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
@@ -1060,24 +1253,25 @@ class ProxyRequestHandler:
                             client_ip, target_url, cached.final_url,
                         )
                     try:
+                        # 流式传输不能设 total 上限，否则长视频会在 rule.timeout 秒被切断；
+                        # 改用 sock_read 做停滞保护
                         direct_timeout = aiohttp.ClientTimeout(
-                            total=rule.timeout,
+                            total=None,
                             connect=rule.timeout,
-                            sock_read=self.config.streaming.stream_timeout,
+                            sock_read=self.config.streaming.read_timeout,
                         )
                         async with session.get(
                             cached.final_url,
                             headers=request_headers,
                             allow_redirects=False,
                             timeout=direct_timeout,
-                            ssl=False,
+                            ssl=ssl_mode,
                         ) as direct_response:
                             if direct_response.status in (200, 206):
                                 resp_headers = dict(direct_response.headers)
                                 filtered_headers = self.filter_headers(resp_headers, is_request=False)
                                 self._apply_route_headers(filtered_headers, route_decision)
-                                if "Accept-Ranges" not in filtered_headers:
-                                    filtered_headers["Accept-Ranges"] = "bytes"
+                                self._apply_range_headers(filtered_headers, resp_headers, direct_response.status)
                                 content_length = None
                                 if "Content-Length" in resp_headers:
                                     try:
@@ -1103,11 +1297,14 @@ class ProxyRequestHandler:
             timeout=rule.timeout,
             stream_timeout=self.config.streaming.stream_timeout,
             follow_redirects=rule.follow_redirects,
+            verify_ssl=self.config.verify_upstream_ssl,
+            session_provider=self.get_stream_session,
         )
 
         retry_count = 0
         last_error = None
         last_error_type = None
+        response: Optional[aiohttp.ClientResponse] = None
 
         while retry_count < rule.retry_times:
             try:
@@ -1141,6 +1338,7 @@ class ProxyRequestHandler:
                 response_headers = dict(response.headers)
                 filtered_headers = self.filter_headers(response_headers, is_request=False)
                 self._apply_route_headers(filtered_headers, route_decision)
+                self._apply_range_headers(filtered_headers, response_headers, response.status)
 
                 content_length = None
                 if "Content-Length" in response_headers:
@@ -1148,9 +1346,6 @@ class ProxyRequestHandler:
                         content_length = int(response_headers["Content-Length"])
                     except ValueError:
                         content_length = None
-
-                if "Accept-Ranges" not in filtered_headers:
-                    filtered_headers["Accept-Ranges"] = "bytes"
 
                 final_url = str(response.url) if response.url else target_url
                 if self.ip_cache and response.status in (200, 206):
@@ -1184,6 +1379,11 @@ class ProxyRequestHandler:
                 last_error = str(exc)
                 last_error_type = type(exc).__name__
 
+            # 本轮已拿到响应却在处理阶段失败时必须归还连接，否则每次重试泄漏一条连接
+            if response is not None and not response.closed:
+                response.release()
+                response = None
+
             retry_count += 1
             logger.warning(
                 "流式上游重试 %s/%s %s 由于 %s: %s",
@@ -1193,7 +1393,8 @@ class ProxyRequestHandler:
                 last_error_type,
                 last_error,
             )
-            await asyncio.sleep(1)
+            if retry_count < rule.retry_times:
+                await asyncio.sleep(_retry_delay(retry_count))
 
         async def error_stream():
             yield _build_500_bytes("上游重试耗尽")
@@ -1234,6 +1435,7 @@ class ProxyRequestHandler:
         client_ip = route_decision.client_ip or client_host
 
         session = await self.get_session()
+        ssl_mode = self._ssl_mode()
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
@@ -1268,11 +1470,14 @@ class ProxyRequestHandler:
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
             follow_redirects=rule.follow_redirects,
+            verify_ssl=self.config.verify_upstream_ssl,
+            session_provider=self.get_session,
         )
 
         retry_count = 0
         last_error = None
         last_error_type = None
+        response: Optional[aiohttp.ClientResponse] = None
 
         while retry_count < rule.retry_times:
             try:
@@ -1295,6 +1500,26 @@ class ProxyRequestHandler:
                     return 500, {"Content-Type": "text/html; charset=utf-8"}, error_body, redirect_info, route_decision
 
                 response_headers = dict(response.headers)
+
+                # 规则未开启流式时，若上游返回的是大文件/媒体内容，仍不能整包读进内存，
+                # 这里升级为流式通道传输
+                if self._should_stream_by_content(response_headers, response.status):
+                    filtered_headers = self.filter_headers(response_headers, is_request=False)
+                    self._apply_route_headers(filtered_headers, route_decision)
+                    self._apply_range_headers(filtered_headers, response_headers, response.status)
+                    logger.debug(
+                        "标准模式响应超阈值，升级为流式: 状态=%s 目标=%s",
+                        response.status, target_url,
+                    )
+                    return StreamingResponse(
+                        status=response.status,
+                        headers=filtered_headers,
+                        body_stream=self.stream_response(response, self.config.streaming.chunk_size),
+                        redirect_info=redirect_info,
+                        route_decision=route_decision,
+                        cache_status=self._last_cache_status,
+                    )
+
                 filtered_headers = self.filter_headers(response_headers, is_request=False)
                 self._apply_route_headers(filtered_headers, route_decision)
                 response_body = await response.read()
@@ -1324,6 +1549,11 @@ class ProxyRequestHandler:
                 last_error = str(exc)
                 last_error_type = type(exc).__name__
 
+            # 本轮已拿到响应却在处理阶段失败时必须归还连接，否则每次重试泄漏一条连接
+            if response is not None and not response.closed:
+                response.release()
+                response = None
+
             retry_count += 1
             logger.warning(
                 "上游重试 %s/%s %s 由于 %s: %s",
@@ -1333,7 +1563,8 @@ class ProxyRequestHandler:
                 last_error_type,
                 last_error,
             )
-            await asyncio.sleep(1)
+            if retry_count < rule.retry_times:
+                await asyncio.sleep(_retry_delay(retry_count))
 
         error_body = _build_500_bytes("上游重试耗尽")
         return 500, {"Content-Type": "text/html; charset=utf-8"}, error_body, None, route_decision
@@ -1370,6 +1601,17 @@ class ProxyStats:
                 self.streaming_requests += 1
             if bytes_count:
                 self.total_bytes += bytes_count
+
+    async def record_bytes(self, bytes_count: int) -> None:
+        """只累加传输字节数，不增加请求计数。
+
+        此前流式分支在 finally 里再调一次 record_request，使 total_requests
+        每次请求被 +2，QPS、失败率、流式占比全部失真。
+        """
+        if not bytes_count:
+            return
+        async with self._lock:
+            self.total_bytes += bytes_count
 
     def get_stats(self) -> Dict[str, float]:
         uptime = max(time.time() - self.start_time, 0)
