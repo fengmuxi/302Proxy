@@ -1188,7 +1188,6 @@ class ProxyServer:
             logger.info(f"  流超时: {self.config.streaming.stream_timeout} 秒")
             logger.info(f"  读取超时: {self.config.streaming.read_timeout} 秒")
             logger.info(f"  写入超时: {self.config.streaming.write_timeout} 秒")
-            logger.info(f"  缓冲区大小: {format_bytes(self.config.streaming.buffer_size)}")
             logger.info(f"  范围支持: {'启用' if self.config.streaming.enable_range_support else '禁用'}")
             logger.info(f"  最大请求体大小: {format_bytes(self.config.streaming.max_request_body_size) if self.config.streaming.max_request_body_size else '无限制'}")
         
@@ -1349,6 +1348,17 @@ class ProxyServer:
     def run(self):
         self.app.on_startup.append(self.on_startup)
         self.app.on_shutdown.append(self.on_shutdown)
+
+        # server.workers 此前是死配置（web.run_app 单进程）。这里明确语义：
+        # 封禁/IP黑名单/去重/IP结果缓存/GeoIP在线缓存都是进程内存态，多进程各自独立
+        # 会导致封禁失效，因此进程内始终单 worker；横向扩容请用容器编排或 gunicorn。
+        workers = int(self.config.server.workers or 1)
+        if workers > 1:
+            logger.warning(
+                "server.workers=%d 但进程内仅运行单 worker（内存态封禁/缓存不共享）。"
+                "横向扩容请用容器编排（docker compose --scale / k8s replicas）或 gunicorn。",
+                workers,
+            )
         
         if self.config.ssl.enabled:
             ssl_context = None

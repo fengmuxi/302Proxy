@@ -166,6 +166,7 @@ class ProxyRule:
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8080
+    # 进程内始终单 worker（封禁/去重/缓存为内存态，多进程不共享）；横向扩容用容器编排或 gunicorn
     workers: int = 1
     keepalive_timeout: int = 75
     max_connections: int = 1000
@@ -204,7 +205,9 @@ class StreamingConfig:
     large_file_threshold: int = 10 * 1024 * 1024
     stream_timeout: int = 3600
     read_timeout: int = 300
+    # 已接入：下游写超时保护（_send_streaming_response），防止慢客户端拖垮协程与内存
     write_timeout: int = 300
+    # deprecated：aiohttp 无下游写缓冲概念，与 chunk_size 语义重复，保留仅为兼容旧配置
     buffer_size: int = 64 * 1024
     enable_range_support: bool = True
     max_request_body_size: int = 0
@@ -390,6 +393,20 @@ class Config:
     max_redirects: int = 10
     follow_redirects: bool = True
     trust_forward_headers: bool = True
+    # 上游证书校验。关闭后上游 HTTPS 可被中间人劫持，仅在自签证书场景下临时关闭
+    verify_upstream_ssl: bool = True
+    # 是否信任 X-Real-IP / CF-Connecting-IP。只有明确由前置代理覆盖时才应开启
+    trust_upstream_ip_headers: bool = False
+    # 可信代理网段：只有直连来源位于这些网段时，才解析 X-Forwarded-For
+    trusted_proxy_networks: List[str] = field(
+        default_factory=lambda: [
+            "127.0.0.1/32",
+            "::1/128",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ]
+    )
     database_path: str = DEFAULT_DB_PATH
     region_matching_enabled: bool = False
     route_groups: List[RouteGroupConfig] = field(default_factory=list)
@@ -405,6 +422,7 @@ class Config:
             "Keep-Alive",
             "Proxy-Authenticate",
             "Proxy-Authorization",
+            "Proxy-Connection",
             "TE",
             "Trailers",
             "Transfer-Encoding",
@@ -529,6 +547,19 @@ class Config:
             data.get("trust_forward_headers"),
             config.trust_forward_headers,
         )
+        config.verify_upstream_ssl = coerce_bool(
+            data.get("verify_upstream_ssl"),
+            config.verify_upstream_ssl,
+        )
+        config.trust_upstream_ip_headers = coerce_bool(
+            data.get("trust_upstream_ip_headers"),
+            config.trust_upstream_ip_headers,
+        )
+        networks_data = data.get("trusted_proxy_networks")
+        if isinstance(networks_data, (list, tuple)):
+            parsed_networks = [str(item).strip() for item in networks_data if str(item).strip()]
+            if parsed_networks:
+                config.trusted_proxy_networks = parsed_networks
 
         database_data = data.get("database", {})
         if isinstance(database_data, dict):
