@@ -105,6 +105,8 @@ class ProxyServer:
         self.app = web.Application(client_max_size=config.streaming.max_request_body_size)
         self._setup_routes()
         self._setup_middleware()
+        if not self.config.verify_upstream_ssl:
+            logger.warning("上游 HTTPS 证书校验已关闭（verify_upstream_ssl=false），存在中间人劫持风险")
     
     def _setup_routes(self):
         self.app.router.add_get('/_health', self.health_check)
@@ -147,7 +149,7 @@ class ProxyServer:
             token = set_request_id(request_id)
             request["_request_id"] = request_id
             start_time = time.perf_counter()
-            client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote or ""
+            client_ip = self.request_handler.extract_client_ip(dict(request.headers), request.remote or "")
             user_agent = request.headers.get("User-Agent", "")
             full_url = request.path
             if request.query_string:
@@ -163,7 +165,11 @@ class ProxyServer:
                 if client_ip:
                     # 排除内部接口，不进行自动封禁监控
                     if not request.path.startswith("/_"):
-                        await self.auto_ban_monitor.record_request(client_ip, response.status)
+                        # 只有"未匹配规则"的 404 才计入封禁阈值，上游 404 不误伤正常用户
+                        await self.auto_ban_monitor.record_request(
+                            client_ip, response.status,
+                            route_miss=bool(request.get("_route_miss")),
+                        )
                 return response
             except Exception as e:
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -181,7 +187,7 @@ class ProxyServer:
     async def reload_runtime_config(self) -> None:
         self.config = self.config_store.load_runtime_config()
         self.geo_resolver.set_online_cache_ttl_seconds(self.config.geoip.online_cache_ttl_seconds, reset_existing=True)
-        self.request_handler.update_config(self.config)
+        await self.request_handler.update_config(self.config)
         cache_cfg = self.config.ip_result_cache
         if self.ip_result_cache.enabled != cache_cfg.enabled or \
            self.ip_result_cache.ttl_seconds != cache_cfg.ttl_seconds or \
@@ -263,8 +269,12 @@ class ProxyServer:
 
     async def _render_403_page(self, reason: str) -> web.Response:
         """渲染 403 错误页面"""
+        import html as html_module
         from pathlib import Path
-        
+
+        # reason 可能包含第三方 GeoIP 返回的文本，必须转义防止 XSS
+        safe_reason = html_module.escape(reason or "")
+
         # 读取 403.html 模板
         static_dir = Path(__file__).parent / "static"
         error_page_path = static_dir / "403.html"
@@ -280,7 +290,7 @@ class ProxyServer:
                 )
                 html_content = html_content.replace(
                     '<div class="error-reason-text" id="error-reason-text">-</div>',
-                    f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                    f'<div class="error-reason-text" id="error-reason-text">{safe_reason}</div>'
                 )
             else:
                 # 回退到简单的 HTML
@@ -332,7 +342,10 @@ class ProxyServer:
 
     async def _render_404_page(self, reason: str = "") -> web.Response:
         """渲染 404 错误页面"""
+        import html as html_module
         from pathlib import Path
+
+        safe_reason = html_module.escape(reason or "")
 
         static_dir = Path(__file__).parent / "static"
         error_page_path = static_dir / "404.html"
@@ -347,7 +360,7 @@ class ProxyServer:
                 )
                 html_content = html_content.replace(
                     '<div class="error-reason-text" id="error-reason-text">-</div>',
-                    f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                    f'<div class="error-reason-text" id="error-reason-text">{safe_reason}</div>'
                 )
             else:
                 html_content = self._fallback_404_html(reason)
@@ -391,7 +404,10 @@ class ProxyServer:
 
     async def _render_500_page(self, reason: str = "") -> web.Response:
         """渲染 500 错误页面，隐藏内部异常细节，仅展示通用原因分类"""
+        import html as html_module
         from pathlib import Path
+
+        safe_reason = html_module.escape(reason or "")
 
         static_dir = Path(__file__).parent / "static"
         error_page_path = static_dir / "500.html"
@@ -407,7 +423,7 @@ class ProxyServer:
                     )
                     html_content = html_content.replace(
                         '<div class="error-reason-text" id="error-reason-text">-</div>',
-                        f'<div class="error-reason-text" id="error-reason-text">{reason}</div>'
+                        f'<div class="error-reason-text" id="error-reason-text">{safe_reason}</div>'
                     )
             else:
                 html_content = self._fallback_500_html(reason)
@@ -495,117 +511,94 @@ class ProxyServer:
             return redirect_info.redirect_url
         return ""
 
-    def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> None:
-        try:
-            geo_location = route_decision.geo_location if route_decision else None
-            geo_source = geo_location.source if geo_location else ""
-            request_headers = {str(key): str(value) for key, value in request.headers.items()}
-            request_host = (
-                route_decision.request_host
+    def _build_route_log_payload(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> Dict[str, Any]:
+        """构建路由日志载荷（纯 CPU，不含 I/O）。"""
+        geo_location = route_decision.geo_location if route_decision else None
+        geo_source = geo_location.source if geo_location else ""
+        request_headers = {str(key): str(value) for key, value in request.headers.items()}
+        request_host = (
+            route_decision.request_host
+            if route_decision
+            else self.request_handler.extract_request_host(request_headers)
+        )
+        if not request_host:
+            request_host = normalize_request_host(request.host or "")
+        if (
+            geo_location
+            and geo_location.online_cache_hit
+            and str(geo_source).startswith("online:")
+        ):
+            geo_source = f"{geo_source}|cache_hit"
+        payload = {
+            "request_id": request.get("_request_id", ""),
+            "request_method": request.method,
+            "request_path": request.path,
+            "request_query_string": request.query_string,
+            "request_host": request_host,
+            "path_prefix": route_decision.rule.path_prefix if route_decision else "",
+            "rule_id": route_decision.rule.rule_id if route_decision else None,
+            "rule_name": route_decision.rule.name if route_decision else "",
+            "rule_request_host": (
+                route_decision.rule_request_host
                 if route_decision
-                else self.request_handler.extract_request_host(request_headers)
+                else ""
+            ),
+            "rule_source": route_decision.rule.source if route_decision else "",
+            "target_url": route_decision.target_url if route_decision else "",
+            "original_client_ip": request.remote or "",
+            "client_ip": route_decision.client_ip if route_decision else (request.remote or ""),
+            "region_matching_enabled": route_decision.region_matching_enabled if route_decision else False,
+            "geo_source": geo_source,
+            "geo_summary": geo_location.summary if geo_location else "",
+            "geo_country": geo_location.country if geo_location else "",
+            "geo_region": geo_location.region if geo_location else "",
+            "geo_city": geo_location.city if geo_location else "",
+            "configured_ip_whitelist": route_decision.rule.ip_whitelist if route_decision else "",
+            "matched_ip_whitelist": route_decision.matched_ip_whitelist if route_decision else "",
+            "configured_regions": route_decision.rule.region_filters if route_decision else "",
+            "matched_region": route_decision.matched_region if route_decision else "",
+            "match_strategy": route_decision.match_strategy if route_decision else "no_route",
+            "match_detail": route_decision.match_detail if route_decision else "no_matching_rule_found",
+            "upstream_status": upstream_status,
+            "cache_status": cache_status,
+            "redirect_count": redirect_info.redirect_count if redirect_info else 0,
+            "redirect_location": self._extract_redirect_location(redirect_info),
+            "transport_mode": transport_mode,
+            "operation_duration_ms": self._request_duration_ms(request),
+            "result_status": self._infer_route_log_result_status(
+                route_decision=route_decision,
+                upstream_status=upstream_status,
+                cache_status=cache_status,
+                error_message=error_message,
+            ),
+            "error_message": error_message,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        return payload
+
+    async def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> None:
+        """记录路由日志。
+
+        insert_route_log 内部是同步 sqlite3 写盘，此前直接在事件循环里执行，
+        每个请求都要阻塞整站一次；这里改为丢进线程池，落盘失败只记日志不影响代理。
+        """
+        try:
+            payload = self._build_route_log_payload(
+                request,
+                route_decision=route_decision,
+                upstream_status=upstream_status,
+                cache_status=cache_status,
+                redirect_info=redirect_info,
+                transport_mode=transport_mode,
+                error_message=error_message,
             )
-            if not request_host:
-                request_host = normalize_request_host(request.host or "")
-            if (
-                geo_location
-                and geo_location.online_cache_hit
-                and str(geo_source).startswith("online:")
-            ):
-                geo_source = f"{geo_source}|cache_hit"
-            payload = {
-                "request_id": request.get("_request_id", ""),
-                "request_method": request.method,
-                "request_path": request.path,
-                "request_query_string": request.query_string,
-                "request_host": request_host,
-                "path_prefix": route_decision.rule.path_prefix if route_decision else "",
-                "rule_id": route_decision.rule.rule_id if route_decision else None,
-                "rule_name": route_decision.rule.name if route_decision else "",
-                "rule_request_host": (
-                    route_decision.rule_request_host
-                    if route_decision
-                    else ""
-                ),
-                "rule_source": route_decision.rule.source if route_decision else "",
-                "target_url": route_decision.target_url if route_decision else "",
-                "original_client_ip": request.remote or "",
-                "client_ip": route_decision.client_ip if route_decision else (request.remote or ""),
-                "region_matching_enabled": route_decision.region_matching_enabled if route_decision else False,
-                "geo_source": geo_source,
-                "geo_summary": geo_location.summary if geo_location else "",
-                "geo_country": geo_location.country if geo_location else "",
-                "geo_region": geo_location.region if geo_location else "",
-                "geo_city": geo_location.city if geo_location else "",
-                "configured_ip_whitelist": route_decision.rule.ip_whitelist if route_decision else "",
-                "matched_ip_whitelist": route_decision.matched_ip_whitelist if route_decision else "",
-                "configured_regions": route_decision.rule.region_filters if route_decision else "",
-                "matched_region": route_decision.matched_region if route_decision else "",
-                "match_strategy": route_decision.match_strategy if route_decision else "no_route",
-                "match_detail": route_decision.match_detail if route_decision else "no_matching_rule_found",
-                "upstream_status": upstream_status,
-                "cache_status": cache_status,
-                "redirect_count": redirect_info.redirect_count if redirect_info else 0,
-                "redirect_location": self._extract_redirect_location(redirect_info),
-                "transport_mode": transport_mode,
-                "operation_duration_ms": self._request_duration_ms(request),
-                "result_status": self._infer_route_log_result_status(
-                    route_decision=route_decision,
-                    upstream_status=upstream_status,
-                    cache_status=cache_status,
-                    error_message=error_message,
-                ),
-                "error_message": error_message,
-                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }
-            self.config_store.insert_route_log(payload)
+        except Exception as exc:
+            logger.warning("构建路由日志失败: %s", exc)
+            return
+        try:
+            await asyncio.to_thread(self.config_store.insert_route_log, payload)
         except Exception as exc:
             logger.warning("记录路由日志失败: %s", exc)
-
-    def should_use_streaming(self, headers: Dict[str, str], content_length: int = None) -> bool:
-        if not self.config.streaming.enabled:
-            return False
-        
-        content_type = headers.get('Content-Type', '').lower()
-        
-        streaming_types = [
-            'video/',
-            'audio/',
-            'application/octet-stream',
-            'application/x-mpegurl',
-            'application/vnd.apple.mpegurl',
-            'application/dash+xml',
-            'multipart/'
-        ]
-        
-        for stream_type in streaming_types:
-            if stream_type in content_type:
-                return True
-        
-        transfer_encoding = headers.get('Transfer-Encoding', '').lower()
-        if 'chunked' in transfer_encoding:
-            return True
-        
-        if content_length is not None and content_length > self.config.streaming.large_file_threshold:
-            return True
-        
-        return False
-    
-    def _parse_content_range(self, content_range: Optional[str]) -> Optional[Tuple[int, int, int]]:
-        if not content_range:
-            return None
-
-        match = re.match(r'^bytes\s+(\d+)-(\d+)/(\d+)$', content_range.strip(), re.IGNORECASE)
-        if not match:
-            return None
-
-        start_byte = int(match.group(1))
-        end_byte = int(match.group(2))
-        total_size = int(match.group(3))
-        if start_byte > end_byte or total_size <= 0:
-            return None
-
-        return start_byte, end_byte, total_size
 
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse:
         route_decision = None
@@ -616,7 +609,9 @@ class ProxyServer:
             query_string = request.query_string
             path_decoded = request.path
             headers = dict(request.headers)
-            body = await request.read()
+            body = None
+            if method not in ("GET", "HEAD", "OPTIONS", "DELETE", "TRACE"):
+                body = await request.read()
             client_host = request.remote or ''
             scheme = request.scheme
 
@@ -637,6 +632,7 @@ class ProxyServer:
                 )
             else:
                 logger.warning("无匹配路由: %s %s", method, raw_path)
+                request["_route_miss"] = True
                 return await self._render_404_page("未找到匹配的代理规则")
 
             # 黑白名单拦截检查：命中黑名单或不在白名单内时跳转到 403 页面
@@ -647,7 +643,7 @@ class ProxyServer:
                     route_decision.client_ip, path_decoded,
                     route_decision.match_strategy, block_reason,
                 )
-                self._record_route_log(
+                await self._record_route_log(
                     request,
                     route_decision=route_decision,
                     upstream_status=403,
@@ -673,7 +669,7 @@ class ProxyServer:
                         route_decision.client_ip, path_decoded, scope,
                         ban_entry.reason or "未指定",
                     )
-                    self._record_route_log(
+                    await self._record_route_log(
                         request,
                         route_decision=route_decision,
                         upstream_status=403,
@@ -702,7 +698,7 @@ class ProxyServer:
             )
             if cached_entry is not None:
                 logger.debug("请求去重命中: %s %s", method, dedup_key_url)
-                self._record_route_log(
+                await self._record_route_log(
                     request,
                     route_decision=route_decision,
                     upstream_status=cached_entry.status,
@@ -737,7 +733,7 @@ class ProxyServer:
                 logger.debug("流式响应: 状态=%s 缓存=%s", streaming_response.status, actual_cache_status)
                 return await self._send_streaming_response(request, streaming_response, cache_status=actual_cache_status)
             else:
-                status, response_headers, response_body, redirect_info, route_decision = await self.request_handler.handle_request(
+                result = await self.request_handler.handle_request(
                     method=method,
                     path=path_decoded,
                     headers=headers,
@@ -748,6 +744,14 @@ class ProxyServer:
                     route_decision=route_decision,
                 )
 
+                # 上游返回大文件/媒体内容时，handle_request 会自动升级为流式
+                if isinstance(result, StreamingResponse):
+                    return await self._send_streaming_response(
+                        request, result,
+                        cache_status=result.cache_status or self.request_handler.get_last_cache_status(),
+                    )
+
+                status, response_headers, response_body, redirect_info, route_decision = result
                 redirect_count = redirect_info.redirect_count if redirect_info else 0
                 cache_status = self.request_handler.get_last_cache_status()
                 logger.debug(
@@ -760,7 +764,7 @@ class ProxyServer:
                     redirect_count=redirect_info.redirect_count if redirect_info else 0,
                     failed=status >= 400
                 )
-                self._record_route_log(
+                await self._record_route_log(
                     request,
                     route_decision=route_decision,
                     upstream_status=status,
@@ -771,8 +775,6 @@ class ProxyServer:
                 
                 if redirect_info and redirect_info.redirect_count > 0:
                     response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
-                    response_headers['X-Original-URL'] = redirect_info.original_url
-                    response_headers['X-Final-URL'] = redirect_info.redirect_url
 
                 # 存储响应到去重缓存
                 await self.request_dedup.store(
@@ -794,7 +796,7 @@ class ProxyServer:
         except Exception as e:
             logger.exception(f"处理请求时发生错误: {e}")
             await self.stats.record_request(failed=True)
-            self._record_route_log(
+            await self._record_route_log(
                 request,
                 route_decision=route_decision,
                 upstream_status=500,
@@ -855,8 +857,8 @@ class ProxyServer:
                 logger.error(f"流传输响应时发生错误：{e}")
                 raise
         finally:
-            await self.stats.record_request(bytes_count=bytes_transferred)
-            self._record_route_log(
+            await self.stats.record_bytes(bytes_transferred)
+            await self._record_route_log(
                 request,
                 route_decision=streaming_response.route_decision,
                 upstream_status=streaming_response.status,

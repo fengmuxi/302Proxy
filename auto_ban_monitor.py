@@ -69,7 +69,7 @@ class AutoBanMonitor:
     def is_whitelisted(self, ip: str) -> bool:
         return ip in self._whitelist
 
-    async def record_request(self, ip: str, status_code: int) -> None:
+    async def record_request(self, ip: str, status_code: int, route_miss: bool = False) -> None:
         if not self.config.enabled or self.is_whitelisted(ip):
             return
         async with self._lock:
@@ -77,10 +77,14 @@ class AutoBanMonitor:
             stats = self._stats[ip]
             stats.timestamps.append(now)
             self._total_requests += 1
-            if status_code == 404 and self.config.auto_ban_on_404:
+            # 只有"未匹配规则"的 404 才计入封禁阈值；上游返回的 404 是正常业务行为，
+            # 不能据此封禁客户端
+            if status_code == 404 and route_miss and self.config.auto_ban_on_404:
                 stats.error_404_count += 1
                 stats.last_404_time = now
-            await self._check_and_ban(ip, stats, now)
+
+        # 判定与告警放到锁外执行，避免持锁期间 await 邮件发送把所有请求串行化
+        await self._check_and_ban(ip, stats, now)
 
     async def _check_and_ban(self, ip: str, stats: IpRequestStats, now: float) -> None:
         window_start = now - self.config.window_seconds
