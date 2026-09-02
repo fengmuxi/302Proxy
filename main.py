@@ -820,22 +820,37 @@ class ProxyServer:
         
         if redirect_info and redirect_info.redirect_count > 0:
             response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
-            response_headers['X-Original-URL'] = redirect_info.original_url
-            response_headers['X-Final-URL'] = redirect_info.redirect_url
         
+        headers_for_response = dict(response_headers)
+        # 上游虚报 Content-Length 会让 aiohttp 在写完时抛 ContentLengthError；
+        # 除 206（分片长度由 Content-Range 严格界定、播放器必需）外一律交给 chunked
+        if streaming_response.status != 206:
+            headers_for_response.pop("Content-Length", None)
+
         response = web.StreamResponse(
             status=streaming_response.status,
-            headers=response_headers
+            headers=headers_for_response
         )
         
         await response.prepare(request)
         
         bytes_transferred = 0
+        write_timeout = self.config.streaming.write_timeout
         try:
             async for chunk in streaming_response.body_stream:
                 try:
-                    await response.write(chunk)
+                    # write_timeout 此前是死配置；这里接入为下游写超时，防止客户端
+                    # 停止消费导致 response.write 永久阻塞、协程与内存被慢客户端拖垮
+                    if write_timeout and write_timeout > 0:
+                        await asyncio.wait_for(response.write(chunk), timeout=write_timeout)
+                    else:
+                        await response.write(chunk)
                     bytes_transferred += len(chunk)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"写入客户端超时({write_timeout}s)，断开慢速客户端，已传输 {format_bytes(bytes_transferred)}"
+                    )
+                    break
                 except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
                     logger.info(f"客户端断开连接: {type(e).__name__}, 已传输 {format_bytes(bytes_transferred)}")
                     break
