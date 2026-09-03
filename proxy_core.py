@@ -505,6 +505,7 @@ class ProxyRequestHandler:
             )
             self._stream_session = aiohttp.ClientSession(
                 timeout=timeout,
+                auto_decompress=False,
                 connector=self._build_connector(
                     limit=stream_limit,
                     limit_per_host=min(self.config.server.max_connections_per_host, stream_limit),
@@ -725,6 +726,13 @@ class ProxyRequestHandler:
         for key, value in headers.items():
             if key.lower() not in hop_by_hop:
                 filtered[key] = value
+        if is_request:
+            # 媒体代理要求上游返回原始字节流：aiohttp 默认自动附加
+            # Accept-Encoding: gzip，部分上游会对音视频响应做 gzip 压缩，
+            # 导致 Content-Length（压缩态）与实际转发字节不一致、客户端解压失败。
+            # 显式请求 identity 编码；即使上游无视该头仍返回 gzip，
+            # 流式会话的 auto_decompress=False 也能保证字节透传一致。
+            filtered["Accept-Encoding"] = "identity"
         return filtered
 
     def add_forward_headers(self, headers: Dict[str, str], client_host: str, scheme: str) -> Dict[str, str]:
@@ -1468,8 +1476,11 @@ class ProxyRequestHandler:
                             total_raw = retry_response.headers.get("Content-Length")
                             total = int(total_raw) if total_raw and total_raw.strip().isdigit() else None
                             parsed = self._parse_byte_range(range_header)
-                            if total is None or parsed is None:
-                                # 无法获知总长或区间无法解析，退化为直接转发 200 全量
+                            # 上游若对全量响应做了压缩编码，字节偏移裁剪会落在压缩流上产生
+                            # 乱码；此时放弃裁剪，直接转发 200 全量（透传压缩字节，头与体一致）
+                            if total is None or parsed is None or "Content-Encoding" in retry_response.headers:
+                                # 无法获知总长 / 区间无法解析 / 上游压缩了全量响应，
+                                # 退化为直接转发 200 全量（auto_decompress=False 保证字节透传一致）
                                 response.close()
                                 response = retry_response
                                 redirect_info = retry_info
@@ -1492,7 +1503,10 @@ class ProxyRequestHandler:
                                     content_length = end - start + 1
                                     filtered_headers = self.filter_headers(dict(retry_response.headers), is_request=False)
                                     self._apply_route_headers(filtered_headers, route_decision)
-                                    filtered_headers.pop("Accept-Ranges", None)
+                                    # 裁剪产物为 identity 明文字节，压缩标记必须清除；
+                                    # 我们本身支持 Range，显式声明 bytes
+                                    filtered_headers.pop("Content-Encoding", None)
+                                    filtered_headers["Accept-Ranges"] = "bytes"
                                     filtered_headers["Content-Range"] = f"bytes {start}-{end}/{total}"
                                     filtered_headers["Content-Length"] = str(content_length)
                                     response.close()
