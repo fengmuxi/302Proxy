@@ -1570,7 +1570,11 @@ class ProxyRequestHandler:
         if self.ip_cache:
             cached = await self.ip_cache.get(client_ip, target_url)
             if cached is not None:
-                if cached.result_type == "redirect":
+                # 缓存键只有 (client_ip, target_url)，不含 follow_redirects，而两类结果
+                # 语义相反：redirect 表示「已把 302 直接回给客户端」，只在 follow_redirects=False
+                # 时成立；streaming 表示「已跟随重定向拿到 final_url」，只在 True 时成立。
+                # 规则切换后若复用反语义的旧缓存，会绕过 follow_redirects 配置，这里按当前值收口。
+                if cached.result_type == "redirect" and not rule.follow_redirects:
                     logger.info(
                             "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                             client_ip, target_url, cached.redirect_url,
@@ -1591,7 +1595,7 @@ class ProxyRequestHandler:
                         route_decision=route_decision,
                         cache_status="HIT_REDIRECT",
                     )
-                elif cached.result_type == "streaming" and cached.final_url:
+                elif cached.result_type == "streaming" and cached.final_url and rule.follow_redirects:
                     logger.info(
                             "请求结果缓存命中(流式): IP=%s 目标=%s 最终URL=%s",
                             client_ip, target_url, cached.final_url,
@@ -1929,7 +1933,9 @@ class ProxyRequestHandler:
 
         if self.ip_cache:
             cached = await self.ip_cache.get(client_ip, target_url)
-            if cached is not None and cached.result_type == "redirect" and cached.redirect_url:
+            # redirect 缓存语义是「已把 302 直接回给客户端」，仅在 follow_redirects=False
+            # 时成立；True 时复用会绕过跟随重定向，必须按当前值收口。
+            if cached is not None and cached.result_type == "redirect" and cached.redirect_url and not rule.follow_redirects:
                 logger.info(
                         "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                         client_ip, target_url, cached.redirect_url,
