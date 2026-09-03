@@ -1,108 +1,103 @@
 /**
- * modules.js - 业务逻辑模块
- * 包含：路由管理、规则管理、GeoIP、封禁、日志、备份等所有业务功能
+ * modules.js - 业务逻辑模块（原型 6 页版）
+ * 页面：概览 / 路由 / 安全 / IP定位 / 日志 / 系统
+ * 所有弹窗改用 schema 驱动的 openFormModal，抽屉用 openDrawer，全部走真实 API。
  */
 
 import { state } from './state.js';
 import {
   setValue, setChecked, getValue, getChecked,
   getNonNegativeIntValue, getPositiveIntValue,
-  setText, focusField, scrollToElement,
+  setText, focusField,
   escapeHtml, formatDateTime, formatRemainTime, formatBytes,
   normalizeRequestHost, formatRequestHostLabel,
-  isSameRouteGroup, findRouteGroup, toIsoDateTime,
-  formatTypeLabel, formatMatchStrategy, formatResultStatus,
-  formatCacheStatus, formatMatchDetail, formatRouteLogRequestHost,
-  formatRouteLogRuleRequestHost,
+  findRouteGroup, toIsoDateTime,
+  formatMatchStrategy, formatResultStatus, formatCacheStatus, formatMatchDetail,
+  formatRouteLogRequestHost, formatRouteLogRuleRequestHost,
 } from './utils.js';
 import { apiFetch } from './api.js';
 import {
-  els, openModal, closeModal,
-  showToast,
-  renderDashboardMetrics, renderPagination, renderSummary,
+  showToast, renderPagination, openFormModal, openConfirm, closeModal,
+  openDrawer, closeDrawer, syncSelect,
 } from './components.js';
 
-// ============ 模块激活 ============
+const esc = (v) => escapeHtml(v == null ? "" : String(v));
 
-export function activateModule(target) {
-  if (!target) return;
-  setActiveModule(target);
-  if (target === "logs") {
-    refreshRouteLogModule().catch((error) => {
-      showToast(error.message, true);
-    });
-    if (getChecked("log_auto_refresh_enabled")) {
-      startAutoRefresh();
-    }
-  } else {
-    stopAutoRefresh();
-  }
-  if (target === "app-logs") {
-    refreshAppLogModule().catch((error) => {
-      showToast(error.message, true);
-    });
-    if (getChecked("app-log-auto-refresh")) {
-      startAppLogAutoRefresh();
-    }
-  } else {
-    stopAppLogAutoRefresh();
-  }
-  if (target !== "ip-ban-manager") {
-    stopBanAutoRefresh();
-  }
-  if (target === "ip-cache-manager") {
-    loadIpCacheSettings();
-    loadIpCacheStats();
-  }
-  if (target === "ip-ban-manager") {
-    loadBannedIpList();
-    loadAutoBanSettings();
-    loadAutoBanStats();
-    if (getChecked("ban_auto_refresh_enabled")) {
-      startBanAutoRefresh();
-    }
-  }
-  if (target === "email-manager") {
-    loadEmailSettings();
-  }
-  if (target === "backup-manager") {
-    loadBackups();
-  }
-  if (target === "overview") {
-    renderDashboardMetrics(state, false);
-  }
-}
+// ============ 页面激活 / 导航 ============
 
-export function setActiveModule(moduleName) {
-  state.activeModule = moduleName;
-  document.querySelectorAll(".module-btn").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.moduleTarget === moduleName);
+const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system"];
+
+export function setActivePage(page) {
+  state.activeModule = page;
+  document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
+    item.classList.toggle("active", item.dataset.page === page);
   });
-  document.querySelectorAll(".module-panel").forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.modulePanel === moduleName);
+  document.querySelectorAll(".page").forEach((p) => {
+    p.hidden = p.id !== `page-${page}`;
   });
+  const crumb = document.getElementById("breadcrumb");
+  const labels = {
+    overview: "系统概览", routing: "路由配置", security: "安全与封禁",
+    geo: "IP 定位", logs: "日志与审计", system: "系统设置",
+  };
+  if (crumb) crumb.innerHTML = `${esc(labels[page] || "")} / <b>${esc(labels[page] || "")}</b>`;
   try {
     const url = new URL(window.location.href);
-    url.hash = moduleName;
+    url.hash = page;
     window.history.replaceState(null, "", url.toString());
   } catch (_) {}
 }
 
-let _hashRoutingInitialized = false;
+export function activatePage(page) {
+  if (!page || !VALID_PAGES.includes(page)) return;
+  setActivePage(page);
+  stopAutoRefresh();
+  stopAppLogAutoRefresh();
+  stopBanAutoRefresh();
 
+  switch (page) {
+    case "overview":
+      renderOverview().catch(() => {});
+      break;
+    case "routing":
+      refreshRouting();
+      break;
+    case "security":
+      loadBannedIpList();
+      loadAutoBanSettings();
+      loadAutoBanStats();
+      if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
+      break;
+    case "geo":
+      refreshGeo();
+      break;
+    case "logs":
+      refreshRouteLogModule().catch((e) => showToast(e.message, true));
+      refreshAppLogModule().catch((e) => showToast(e.message, true));
+      if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
+      break;
+    case "system":
+      loadIpCacheSettings();
+      loadIpCacheStats();
+      loadDedupSettings();
+      loadDedupStats();
+      loadEmailSettings();
+      loadBackups();
+      break;
+  }
+}
+
+let _hashRoutingInitialized = false;
 export function initHashRouting() {
-  const VALID_MODULES = ["overview", "route-config", "logs", "app-logs", "geoip-online", "geoip-offline", "ip-ban-manager", "ip-cache-manager", "backup-manager"];
   const hash = window.location.hash.replace(/^#\/?/, "");
-  if (hash && VALID_MODULES.includes(hash)) {
-    activateModule(hash);
+  if (hash && VALID_PAGES.includes(hash) && hash !== state.activeModule) {
+    activatePage(hash);
   }
   if (!_hashRoutingInitialized) {
     _hashRoutingInitialized = true;
     window.addEventListener("hashchange", () => {
-      const newHash = window.location.hash.replace(/^#\/?/, "");
-      if (newHash && VALID_MODULES.includes(newHash) && newHash !== state.activeModule) {
-        activateModule(newHash);
-      }
+      const h = window.location.hash.replace(/^#\/?/, "");
+      if (h && VALID_PAGES.includes(h) && h !== state.activeModule) activatePage(h);
     });
   }
 }
@@ -119,356 +114,352 @@ export async function loadDashboard() {
   state.bannedIps = bansData.items || [];
   state.logFiles = logsData.items || [];
   state.backups = backupsData.items || [];
-  renderSummary(data.summary || {});
-  renderRules(data.rules || []);
-  renderRouteGroups(data.route_groups || []);
+  state.routeLogSettings = data.route_log_settings || null;
+
+  const groups = data.route_groups || [];
+  const rules = data.rules || [];
+  setText("navCountRouting", String(groups.length));
+  setText("navCountSecurity", String(state.bannedIps.length));
+
+  renderRules(rules);
+  renderRouteGroups(groups);
   fillGeoConfig(data.geoip || {});
-  renderDashboardMetrics(state);
+  renderRouteLogSettings(data.route_log_settings || { retention_days: 30 });
+  renderOverview().catch(() => {});
 }
 
-// ============ 路由组管理 ============
+// 导航进入时按需重新拉取，保证多端/多会话数据一致性
+export async function refreshRouting() {
+  try {
+    const data = await apiFetch("/_admin/api/bootstrap");
+    const groups = data.route_groups || [];
+    const rules = data.rules || [];
+    setText("navCountRouting", String(groups.length));
+    renderRouteGroups(groups);
+    renderRules(rules);
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+export async function refreshGeo() {
+  try {
+    const data = await apiFetch("/_admin/api/geoip");
+    fillGeoConfig(data || {});
+    renderGeoSources();
+  } catch (e) {
+    showToast(e.message, true);
+  }
+}
+
+// ============ 概览 ============
+
+function formatDuration(seconds) {
+  seconds = Math.max(0, Math.floor(seconds || 0));
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const parts = [];
+  if (d) parts.push(`${d}天`);
+  if (h) parts.push(`${h}小时`);
+  if (m) parts.push(`${m}分`);
+  if (!parts.length) parts.push(`${seconds}秒`);
+  return parts.slice(0, 2).join("");
+}
+
+function relativeTime(ts) {
+  if (!ts) return "未知";
+  const diff = Math.max(0, Date.now() / 1000 - ts);
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return `${Math.floor(diff / 86400)} 天前`;
+}
+
+function renderTrendSvg(series) {
+  const container = document.getElementById("trendChart");
+  if (!container) return;
+  const counts = series.counts || [];
+  const redirects = series.redirects || [];
+  const failed = series.failed || [];
+  const n = Math.max(counts.length, 1);
+  const W = 680, H = 210, padL = 6, padR = 6, padT = 14, padB = 22;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const stepX = innerW / (n - 1);
+  const maxValue = Math.max(1, ...counts, ...redirects, ...failed);
+  const yOf = (v) => padT + innerH - (maxValue > 0 ? (v / maxValue) * innerH : 0);
+  const pathOf = (arr, closeArea) => {
+    if (!arr.length) return { line: "", area: "" };
+    let line = "";
+    let area = closeArea ? `M ${padL} ${padT + innerH}` : "";
+    arr.forEach((v, i) => {
+      const x = padL + i * stepX;
+      const y = yOf(v);
+      line += `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)} `;
+      if (closeArea) area += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+    });
+    if (closeArea) area += ` L ${(padL + (arr.length - 1) * stepX).toFixed(1)} ${padT + innerH} Z`;
+    return { line, area };
+  };
+  const { line, area } = pathOf(counts, true);
+  const lineRedirect = pathOf(redirects, false).line;
+  const lineFailed = pathOf(failed, false).line;
+  let grid = "";
+  for (let g = 1; g <= 3; g++) {
+    const y = padT + (innerH * g) / 4;
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 4"/>`;
+  }
+  let labels = "";
+  [0, 6, 12, 18, 23].forEach((i) => {
+    const x = padL + i * stepX;
+    const hoursAgo = n - 1 - i;
+    const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+    labels += `<text x="${x.toFixed(1)}" y="${H - 6}" fill="var(--text-3)" font-size="10" text-anchor="${anchor}">${hoursAgo === 0 ? "现在" : "-" + hoursAgo + "h"}</text>`;
+  });
+  const lastX = padL + (n - 1) * stepX;
+  const lastY = yOf(counts[n - 1] || 0);
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px">
+      <defs>
+        <linearGradient id="ovTrendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.22"/>
+          <stop offset="100%" stop-color="var(--brand)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      ${grid}
+      <path d="${area}" fill="url(#ovTrendFill)"/>
+      <path d="${line}" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${lineRedirect}" fill="none" stroke="var(--info)" stroke-width="1.5" stroke-dasharray="4 3" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${lineFailed}" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="2 3" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="var(--brand)" stroke="var(--surface)" stroke-width="1.5"/>
+      ${labels}
+    </svg>`;
+}
+
+export async function renderOverview() {
+  const [stats, overviewResp, cacheResp] = await Promise.all([
+    apiFetch("/_admin/api/stats").catch(() => null),
+    apiFetch("/_admin/api/overview-stats").catch(() => null),
+    apiFetch("/_admin/api/ip-cache/stats").catch(() => null),
+  ]);
+
+  const st = stats || {};
+  const ov = overviewResp || {};
+
+  // KPI：「今日请求」取聚合接口的今日计数（本地时区 0 点起），累计数进副标题
+  const todayRequests = ov.requests_today ?? 0;
+  const totalAll = ov.requests_total ?? st.total_requests ?? 0;
+  const redirect = st.redirected_requests || 0;
+  const failed = st.failed_requests || 0;
+
+  setText("kpiTotal", todayRequests.toLocaleString("en-US"));
+  const totalDelta = document.getElementById("kpiTotalDelta");
+  if (totalDelta) totalDelta.textContent = `累计 ${totalAll.toLocaleString("en-US")} 次请求`;
+  setText("kpiRedirect", redirect.toLocaleString("en-US"));
+  setText("kpiFailed", failed.toLocaleString("en-US"));
+
+  // 平均延迟：由 /_admin/api/overview-stats 对近 24h 全量日志 SQL 聚合
+  //（此前前端取最近 500 条日志自行均值，覆盖不足且 created_at 为 ISO 字符串无法分桶）
+  const avgLatency = ov.avg_latency_ms ?? null;
+  const latencyEl = document.getElementById("kpiLatency");
+  if (latencyEl) {
+    latencyEl.innerHTML = avgLatency == null
+      ? "—"
+      : `${avgLatency.toFixed(0)}<small style="font-size:13px;font-weight:500;color:var(--text-3)"> ms</small>`;
+  }
+  const latencyDelta = document.getElementById("kpiLatencyDelta");
+  if (latencyDelta) {
+    latencyDelta.textContent = avgLatency == null
+      ? "近 24 小时暂无请求样本"
+      : `近 24 小时 · ${ov.latency_sample_count ?? 0} 个样本`;
+  }
+
+  // 趋势三序列（总请求 / 302 跟随 / 失败拦截），24 个整点桶
+  const hours = Array.isArray(ov.hours) ? ov.hours : [];
+  renderTrendSvg({
+    counts: hours.map((h) => h.count || 0),
+    redirects: hours.map((h) => h.redirects || 0),
+    failed: hours.map((h) => h.failed || 0),
+  });
+
+  // 服务健康
+  const healthBody = document.getElementById("healthBody");
+  const healthPill = document.getElementById("healthPill");
+  if (healthBody) {
+    const uptime = formatDuration(st.uptime_seconds || 0);
+    const cacheHit = cacheResp ? (cacheResp.hit_rate || "0%") : "—";
+    const bans = (state.bannedIps || []).length;
+    const geo = state.geoSources || [];
+    const geoEnabled = geo.filter((g) => g && g.enabled).length;
+    const hitNum = cacheResp ? parseFloat(cacheResp.hit_rate) : 100;
+    const rows = [
+      { label: "运行时长", val: uptime, status: "ok" },
+      { label: "缓存命中率", val: cacheHit, status: hitNum < 50 ? "warn" : "ok" },
+      { label: "封禁 IP 数", val: String(bans), status: bans > 0 ? "warn" : "ok" },
+      { label: "在线定位源", val: `${geoEnabled}/${geo.length}`, status: geoEnabled > 0 ? "ok" : "bad" },
+    ];
+    healthBody.innerHTML = rows.map((r) => `
+      <div class="kv"><div class="k">${esc(r.label)}</div><div class="val">${esc(r.val)}</div></div>`).join("");
+    if (healthPill) {
+      const bad = rows.some((r) => r.status === "bad");
+      const warn = rows.some((r) => r.status === "warn");
+      healthPill.className = "pill " + (bad ? "pill-danger" : warn ? "pill-warn" : "pill-ok");
+      healthPill.textContent = bad ? "异常" : warn ? "注意" : "正常";
+    }
+  }
+
+  // 近期拦截事件
+  const blocksBody = document.getElementById("blocksBody");
+  if (blocksBody) {
+    const bans = (state.bannedIps || []).slice()
+      .sort((a, b) => (b.banned_at || 0) - (a.banned_at || 0)).slice(0, 5);
+    if (!bans.length) {
+      blocksBody.innerHTML = `<li class="empty" style="padding:20px 0">当前没有已封禁的 IP。</li>`;
+    } else {
+      blocksBody.innerHTML = bans.map((b) => {
+        const exp = b.permanent ? "永久" : (b.expire_at ? `至 ${formatDateTime(new Date(b.expire_at * 1000).toISOString())}` : "临时");
+        return `<li>
+          <div class="src-icon" style="background:var(--danger-soft);color:var(--danger-text)">禁</div>
+          <div style="min-width:0">
+            <div><strong>${esc(b.ip)}</strong></div>
+            <div class="hint">${relativeTime(b.banned_at)} · ${esc(exp)}</div>
+            <div class="hint">${esc(b.reason || "未填写原因")}</div>
+          </div>
+        </li>`;
+      }).join("");
+    }
+  }
+
+  // 待办与风险
+  const risksBody = document.getElementById("risksBody");
+  if (risksBody) {
+    const nowSec = Date.now() / 1000;
+    const risks = [];
+    const bans = state.bannedIps || [];
+    const expiring = bans.filter((b) => !b.permanent && b.expire_at && (b.expire_at - nowSec) < 86400 && (b.expire_at - nowSec) > 0);
+    if (expiring.length) risks.push({ level: "warn", text: `<strong>${expiring.length}</strong> 个临时封禁将在 24 小时内到期。` });
+    const hitNum = cacheResp ? parseFloat(cacheResp.hit_rate) : 100;
+    if (cacheResp && hitNum < 50) risks.push({ level: "warn", text: `请求结果缓存命中率偏低（${cacheResp.hit_rate}）。` });
+    if (!state.routeGroups || !state.routeGroups.length) risks.push({ level: "warn", text: `尚未配置任何<strong>路由组</strong>，代理不会转发任何请求。` });
+    else if (!state.rules || !state.rules.length) risks.push({ level: "warn", text: `路由组已配置，但<strong>转发规则为空</strong>，请补充规则。` });
+    const geo = state.geoSources || [];
+    if (!geo.length) risks.push({ level: "warn", text: `未配置任何<strong>在线定位源</strong>，离线库将作为唯一回退。` });
+    if (!risks.length) risks.push({ level: "ok", text: `当前未发现显著风险，系统运行正常。` });
+    risksBody.innerHTML = risks.map((r) => {
+      const ic = r.level === "ok"
+        ? `<span class="pill pill-ok">✓</span>`
+        : `<span class="pill ${r.level === "warn" ? "pill-warn" : "pill-danger"}">!</span>`;
+      return `<li style="align-items:center">${ic}<div style="min-width:0">${r.text}</div></li>`;
+    }).join("");
+  }
+}
+
+// ============ 路由组 ============
 
 export function getRulesForGroup(pathPrefix, requestHost = "") {
   const normalizedHost = normalizeRequestHost(requestHost);
   return state.rules
-    .filter(
-      (rule) =>
-        rule.path_prefix === pathPrefix &&
-        normalizeRequestHost(rule.request_host) === normalizedHost,
-    )
-    .sort((left, right) => {
-      if (Number(right.is_default) !== Number(left.is_default)) {
-        return Number(right.is_default) - Number(left.is_default);
-      }
-      if (right.priority !== left.priority) {
-        return right.priority - left.priority;
-      }
-      return (left.id || 0) - (right.id || 0);
-    });
+    .filter((r) => r.path_prefix === pathPrefix && normalizeRequestHost(r.request_host) === normalizedHost)
+    .sort((a, b) => (Number(b.is_default) - Number(a.is_default)) || (b.priority - a.priority) || ((a.id || 0) - (b.id || 0)));
 }
 
-export function renderRouteGroupOptions() {
-  els.routeGroupOptions.innerHTML = "";
+export function renderRouteGroups(groups) {
+  state.routeGroups = groups || [];
+  const tbody = document.getElementById("groupBody");
+  setText("groupCountPill", `${state.routeGroups.length} 个`);
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (!state.routeGroups.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty" style="padding:26px 0">还没有路由组，点击右上角「新建路由组」创建。</td></tr>`;
+    return;
+  }
   state.routeGroups.forEach((group) => {
-    const option = document.createElement("option");
-    option.value = group.path_prefix;
-    option.label = `${group.path_prefix} [域名: ${formatRequestHostLabel(
-      normalizeRequestHost(group.request_host),
-    )}]`;
-    els.routeGroupOptions.appendChild(option);
+    const hostLabel = formatRequestHostLabel(normalizeRequestHost(group.request_host));
+    const rules = getRulesForGroup(group.path_prefix, group.request_host);
+    const defaultCount = rules.filter((r) => r.is_default).length;
+    const enabledCount = rules.filter((r) => r.enabled).length;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><code class="mono">${esc(group.path_prefix)}</code></td>
+      <td>${esc(hostLabel)}</td>
+      <td>
+        <div class="switch ${group.region_matching_enabled ? "on" : ""}" data-action="toggle-group-region" data-path-prefix="${esc(group.path_prefix)}" data-request-host="${esc(normalizeRequestHost(group.request_host))}" role="switch" title="地区匹配开关"></div>
+      </td>
+      <td>${defaultCount ? `<span class="pill pill-brand">${defaultCount} 默认</span>` : '<span class="text-muted">—</span>'}</td>
+      <td>${enabledCount}/${rules.length} 启用</td>
+      <td>
+        <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+          <button class="btn btn-sm" data-action="create-rule-for-group" data-path-prefix="${esc(group.path_prefix)}" data-request-host="${esc(normalizeRequestHost(group.request_host))}">新增规则</button>
+          <button class="btn btn-sm" data-action="edit-group" data-path-prefix="${esc(group.path_prefix)}" data-request-host="${esc(normalizeRequestHost(group.request_host))}">编辑</button>
+          <button class="btn btn-sm btn-danger" data-action="delete-group" data-path-prefix="${esc(group.path_prefix)}" data-request-host="${esc(normalizeRequestHost(group.request_host))}">删除</button>
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
   });
 }
 
-export function matchRouteFilter(keyword, status, isDefault, group, rules) {
-  const kw = String(keyword || "").trim().toLowerCase();
-  if (kw) {
-    const groupHost = normalizeRequestHost(group.request_host);
-    const hostLabel = formatRequestHostLabel(groupHost).toLowerCase();
-    const groupNotes = String(group.notes || "").toLowerCase();
-    const prefixMatch = String(group.path_prefix || "").toLowerCase().includes(kw);
-    const hostMatch = hostLabel.includes(kw);
-    const groupNotesMatch = groupNotes.includes(kw);
-    const ruleMatch = rules.some((rule) => {
-      return [
-        rule.name, rule.target_url, rule.ip_whitelist, rule.region_filters, rule.notes,
-        rule.request_host,
-      ].some((field) => String(field || "").toLowerCase().includes(kw));
-    });
-    if (!(prefixMatch || hostMatch || groupNotesMatch || ruleMatch)) {
-      return false;
-    }
-  }
+const GROUP_SCHEMA = [
+  { key: "path_prefix", label: "路径前缀", type: "text", required: true, placeholder: "/play" },
+  { key: "request_host", label: "请求主机（域名）", type: "text", placeholder: "example.com（留空匹配所有）" },
+  { key: "access_ip_whitelist", label: "访问控制 IP 白名单", type: "text", placeholder: "1.2.3.4, 5.6.7.0/24" },
+  { key: "ip_blacklist", label: "访问控制 IP 黑名单", type: "text" },
+  { key: "region_whitelist", label: "地区白名单", type: "text", placeholder: "CN, HK" },
+  { key: "region_blacklist", label: "地区黑名单", type: "text" },
+  { key: "notes", label: "备注", type: "text" },
+  { key: "region_matching_enabled", label: "地区匹配", type: "switch", hint: "该前缀下所有规则按地区过滤命中" },
+];
 
-  if (status === "enabled" && !rules.some((r) => r.enabled)) return false;
-  if (status === "disabled" && !rules.some((r) => !r.enabled)) return false;
+export function openRouteGroupModal(group) {
+  const isEdit = Boolean(group);
+  const values = group ? {
+    path_prefix: group.path_prefix,
+    request_host: normalizeRequestHost(group.request_host),
+    access_ip_whitelist: group.access_ip_whitelist || "",
+    ip_blacklist: group.ip_blacklist || "",
+    region_whitelist: group.region_whitelist || "",
+    region_blacklist: group.region_blacklist || "",
+    notes: group.notes || "",
+    region_matching_enabled: Boolean(group.region_matching_enabled),
+  } : { region_matching_enabled: true };
 
-  if (isDefault === "yes" && !rules.some((r) => r.is_default)) return false;
-  if (isDefault === "no" && !rules.some((r) => !r.is_default)) return false;
-
-  return true;
-}
-
-export function renderRouteGroups(routeGroups) {
-  state.routeGroups = routeGroups;
-  renderRouteGroupOptions();
-
-  const container = document.getElementById("route-group-cards");
-  container.innerHTML = "";
-
-  const { keyword, status, isDefault } = state.routeFilter;
-  const filteredGroups = routeGroups.map((group) => {
-    const normalizedGroupHost = normalizeRequestHost(group.request_host);
-    const groupRules = getRulesForGroup(group.path_prefix, normalizedGroupHost);
-    return { group, groupRules };
-  }).filter(({ group, groupRules }) => matchRouteFilter(keyword, status, isDefault, group, groupRules));
-
-  const summaryEl = document.getElementById("route-filter-summary");
-  if (summaryEl) {
-    const totalGroups = routeGroups.length;
-    const totalRules = routeGroups.reduce((acc, g) => {
-      const normalizedGroupHost = normalizeRequestHost(g.request_host);
-      return acc + getRulesForGroup(g.path_prefix, normalizedGroupHost).length;
-    }, 0);
-    const filteredRules = filteredGroups.reduce((acc, item) => acc + item.groupRules.length, 0);
-    const hasFilter = Boolean(keyword || status || isDefault);
-    if (hasFilter) {
-      summaryEl.textContent = `共 ${totalGroups} 个前缀 / ${totalRules} 条规则，当前匹配 ${filteredGroups.length} 个前缀 / ${filteredRules} 条规则`;
-    } else {
-      summaryEl.textContent = `共 ${totalGroups} 个前缀 / ${totalRules} 条规则`;
-    }
-  }
-
-  if (!routeGroups.length) {
-    container.innerHTML = `
-      <div class="empty-group-state">
-        <p>还没有路径前缀。先在右侧新增一个前缀，再为它添加转发规则。</p>
-      </div>
-    `;
-    return;
-  }
-
-  if (!filteredGroups.length) {
-    container.innerHTML = `
-      <div class="empty-group-state">
-        <p>没有匹配当前查询条件的前缀或规则。</p>
-      </div>
-    `;
-    return;
-  }
-
-  filteredGroups.forEach(({ group, groupRules }) => {
-    const normalizedGroupHost = normalizeRequestHost(group.request_host);
-    const hostLabel = formatRequestHostLabel(normalizedGroupHost);
-    const statChips = `
-      <div class="prefix-card-stats">
-        <span class="stat-chip">规则 ${group.rule_count ?? groupRules.length}</span>
-        <span class="stat-chip">默认 ${group.default_rule_count ?? groupRules.filter((rule) => rule.is_default).length}</span>
-        <span class="stat-chip">启用 ${group.enabled_rule_count ?? groupRules.filter((rule) => rule.enabled).length}</span>
-      </div>
-    `;
-
-    const rulesMarkup = groupRules.length
-      ? `
-        <div class="rule-list-wrap prefix-card-rules">
-          <table class="rules-table compact-table">
-            <thead>
-              <tr>
-                <th>规则</th>
-                <th>目标地址</th>
-                <th>请求域名</th>
-                <th>白名单IP</th>
-                <th>地区过滤</th>
-                <th>优先级</th>
-                <th>超时(秒)</th>
-                <th>备注</th>
-                <th>正则匹配</th>
-                <th>状态</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${groupRules
-                .map((rule) => {
-                  const statusBadges = [
-                    rule.is_default ? '<span class="badge badge-default">默认</span>' : "",
-                  ].join("");
-                  const requestHost = normalizeRequestHost(rule.request_host);
-                  const hostLabel = formatRequestHostLabel(requestHost);
-                  const ipWhitelist = rule.ip_whitelist || "";
-                  const regionFilters = rule.region_filters || "";
-                  const notesText = rule.notes || "";
-                  const rewritePattern = rule.path_rewrite_pattern || "";
-                  const rewriteReplacement = rule.path_rewrite_replacement || "";
-                  const hasRewrite = Boolean(rewritePattern);
-                  const rewriteTitle = hasRewrite
-                    ? `模式: ${rewritePattern}\n替换: ${rewriteReplacement || "(空)"}`
-                    : "";
-                  const rewriteCell = hasRewrite
-                    ? `<div class="rewrite-cell"><code class="rewrite-pattern" title="${escapeHtml(rewritePattern)}">${escapeHtml(rewritePattern)}</code><code class="rewrite-replacement" title="${escapeHtml(rewriteReplacement)}">→ ${escapeHtml(rewriteReplacement || "(空)")}</code></div>`
-                    : `<span class="text-muted">-</span>`;
-                  return `
-                    <tr>
-                      <td data-label="规则">
-                        <strong>${escapeHtml(rule.name || "(未命名规则)")}</strong>
-                        <div>${statusBadges}</div>
-                      </td>
-                      <td data-label="目标地址" class="cell-truncate" title="${escapeHtml(rule.target_url)}">${escapeHtml(rule.target_url)}</td>
-                      <td data-label="请求域名" class="cell-truncate" title="${escapeHtml(hostLabel)}">${escapeHtml(hostLabel)}</td>
-                      <td data-label="白名单IP" class="cell-truncate" title="${escapeHtml(ipWhitelist)}">${ipWhitelist ? escapeHtml(ipWhitelist) : "-"}</td>
-                      <td data-label="地区过滤" class="cell-truncate" title="${escapeHtml(regionFilters)}">${regionFilters ? escapeHtml(regionFilters) : "默认"}</td>
-                      <td data-label="优先级">${rule.priority ?? 0}</td>
-                      <td data-label="超时(秒)">${rule.timeout ?? 30}</td>
-                      <td data-label="备注" class="cell-notes" title="${escapeHtml(notesText)}">${notesText ? escapeHtml(notesText) : "-"}</td>
-                      <td data-label="正则匹配" class="cell-rewrite" title="${escapeHtml(rewriteTitle)}">${rewriteCell}</td>
-                      <td data-label="状态">
-                        <div class="rule-status-tags">
-                          <button class="toggle-status-btn ${rule.enabled ? "on" : "off"}" data-action="toggle-rule-from-group" data-id="${rule.id}" type="button" title="${rule.enabled ? "点击禁用" : "点击启用"}">
-                            <span class="toggle-status-dot"></span>
-                            <span class="toggle-status-text">${rule.enabled ? "启用" : "禁用"}</span>
-                          </button>
-                          <button class="toggle-tag ${rule.strip_prefix ? "on" : "off"}" data-action="toggle-rule-field" data-field="strip_prefix" data-id="${rule.id}" type="button" title="${rule.strip_prefix ? "点击关闭去前缀" : "点击开启去前缀"}">
-                            <span class="toggle-tag-dot"></span>去前缀
-                          </button>
-                          <button class="toggle-tag ${rule.follow_redirects !== false ? "on" : "off"}" data-action="toggle-rule-field" data-field="follow_redirects" data-id="${rule.id}" type="button" title="${rule.follow_redirects !== false ? "点击关闭跟随重定向" : "点击开启跟随重定向"}">
-                            <span class="toggle-tag-dot"></span>跟随重定向
-                          </button>
-                          <button class="toggle-tag ${rule.enable_streaming ? "on" : "off"}" data-action="toggle-rule-field" data-field="enable_streaming" data-id="${rule.id}" type="button" title="${rule.enable_streaming ? "点击关闭流式转发" : "点击开启流式转发"}">
-                            <span class="toggle-tag-dot"></span>流式转发
-                          </button>
-                        </div>
-                      </td>
-                      <td data-label="操作">
-                        <div class="table-actions">
-                          <button class="table-btn" data-action="edit-rule-from-group" data-id="${rule.id}" type="button">编辑规则</button>
-                          <button class="table-btn delete" data-action="delete-rule-from-group" data-id="${rule.id}" type="button">删除规则</button>
-                        </div>
-                      </td>
-                    </tr>
-                  `;
-                })
-                .join("")}
-            </tbody>
-          </table>
-        </div>
-      `
-      : `
-        <div class="empty-group-state inline-empty-state">
-          <p>这个前缀下还没有转发规则。</p>
-        </div>
-      `;
-
-    const card = document.createElement("article");
-    card.className = "prefix-card";
-    const groupAccessChips = [];
-    if (group.access_ip_whitelist) {
-      groupAccessChips.push(`<span class="access-chip access-chip-ip-whitelist" title="访问控制 IP白名单: ${escapeHtml(group.access_ip_whitelist)}">IP白: ${escapeHtml(group.access_ip_whitelist)}</span>`);
-    }
-    if (group.ip_blacklist) {
-      groupAccessChips.push(`<span class="access-chip access-chip-ip-blacklist" title="访问控制 IP黑名单: ${escapeHtml(group.ip_blacklist)}">IP黑: ${escapeHtml(group.ip_blacklist)}</span>`);
-    }
-    if (group.region_whitelist) {
-      groupAccessChips.push(`<span class="access-chip access-chip-region-whitelist" title="访问控制 地区白名单: ${escapeHtml(group.region_whitelist)}">地区白: ${escapeHtml(group.region_whitelist)}</span>`);
-    }
-    if (group.region_blacklist) {
-      groupAccessChips.push(`<span class="access-chip access-chip-region-blacklist" title="访问控制 地区黑名单: ${escapeHtml(group.region_blacklist)}">地区黑: ${escapeHtml(group.region_blacklist)}</span>`);
-    }
-    const groupAccessHtml = groupAccessChips.length ? `<p class="hint">${groupAccessChips.join(" ")}</p>` : "";
-    card.innerHTML = `
-      <div class="prefix-card-head">
-        <div class="prefix-card-title">
-          <h3>${escapeHtml(group.path_prefix)}</h3>
-          <p class="hint">域名: <code>${escapeHtml(hostLabel)}</code></p>
-          <p class="hint">${escapeHtml(group.notes || "未填写备注")}</p>
-          ${groupAccessHtml}
-          ${statChips}
-        </div>
-        <div class="table-actions">
-          <button class="table-btn" data-action="create-rule-for-group" data-path-prefix="${escapeHtml(group.path_prefix)}" data-request-host="${escapeHtml(normalizedGroupHost)}" type="button">新增规则</button>
-          <button class="table-btn" data-action="edit-group" data-path-prefix="${escapeHtml(group.path_prefix)}" data-request-host="${escapeHtml(normalizedGroupHost)}" type="button">编辑前缀</button>
-          <button class="table-btn delete" data-action="delete-group" data-path-prefix="${escapeHtml(group.path_prefix)}" data-request-host="${escapeHtml(normalizedGroupHost)}" type="button">删除前缀</button>
-        </div>
-      </div>
-      <div class="prefix-card-toggle">
-        <div>
-          <strong>地区匹配开关</strong>
-          <p class="hint">这里控制 ${escapeHtml(group.path_prefix)} 这个前缀下所有规则是否按地区过滤命中。</p>
-        </div>
-        <label class="switch-inline">
-          <input
-            data-action="toggle-group-region" data-path-prefix="${escapeHtml(group.path_prefix)}" data-request-host="${escapeHtml(normalizedGroupHost)}"
-            type="checkbox"
-            ${group.region_matching_enabled ? "checked" : ""}
-          />
-          <span>${group.region_matching_enabled ? "已开启" : "已关闭"}</span>
-        </label>
-      </div>
-      ${rulesMarkup}
-      <div class="prefix-card-footer">
-        <button class="ghost-btn" data-action="create-rule-for-group" data-path-prefix="${escapeHtml(group.path_prefix)}" data-request-host="${escapeHtml(normalizedGroupHost)}" type="button">给这个前缀新增转发规则</button>
-      </div>
-    `;
-    container.appendChild(card);
+  openFormModal({
+    title: isEdit ? `编辑路径前缀 ${group.path_prefix}` : "新建路由组",
+    sub: isEdit ? `域名 ${formatRequestHostLabel(normalizeRequestHost(group.request_host))}` : "创建一个路径前缀，再为其添加转发规则",
+    schema: GROUP_SCHEMA,
+    values,
+    validate: (out) => {
+      if (!String(out.path_prefix || "").trim()) return "路径前缀不能为空";
+      return null;
+    },
+    onSave: async (out) => {
+      const payload = {
+        old_path_prefix: isEdit ? group.path_prefix : "",
+        old_request_host: isEdit ? normalizeRequestHost(group.request_host) : "",
+        path_prefix: String(out.path_prefix || "").trim(),
+        request_host: normalizeRequestHost(out.request_host),
+        access_ip_whitelist: out.access_ip_whitelist || "",
+        ip_blacklist: out.ip_blacklist || "",
+        region_whitelist: out.region_whitelist || "",
+        region_blacklist: out.region_blacklist || "",
+        notes: out.notes || "",
+        region_matching_enabled: Boolean(out.region_matching_enabled),
+      };
+      if (isEdit) {
+        await apiFetch("/_admin/api/route-groups", { method: "PUT", body: JSON.stringify(payload) });
+        showToast("路径前缀已更新。");
+      } else {
+        await apiFetch("/_admin/api/route-groups", { method: "POST", body: JSON.stringify(payload) });
+        showToast("路径前缀已创建。");
+      }
+      await loadDashboard();
+    },
   });
-}
-
-export function resetRouteGroupForm() {
-  setValue("route_group_old_path_prefix", "");
-  setValue("route_group_old_request_host", "");
-  setValue("route_group_path_prefix", "");
-  setValue("route_group_request_host", "");
-  setValue("route_group_access_ip_whitelist", "");
-  setValue("route_group_ip_blacklist", "");
-  setValue("route_group_region_whitelist", "");
-  setValue("route_group_region_blacklist", "");
-  setValue("route_group_notes", "");
-  document.getElementById("route-group-form-title").textContent = "新增路径前缀";
-}
-
-export function fillRouteGroupForm(group) {
-  setValue("route_group_old_path_prefix", group.path_prefix);
-  setValue("route_group_old_request_host", normalizeRequestHost(group.request_host));
-  setValue("route_group_path_prefix", group.path_prefix);
-  setValue("route_group_request_host", normalizeRequestHost(group.request_host));
-  setValue("route_group_access_ip_whitelist", group.access_ip_whitelist || "");
-  setValue("route_group_ip_blacklist", group.ip_blacklist || "");
-  setValue("route_group_region_whitelist", group.region_whitelist || "");
-  setValue("route_group_region_blacklist", group.region_blacklist || "");
-  setValue("route_group_notes", group.notes || "");
-  const hostLabel = formatRequestHostLabel(normalizeRequestHost(group.request_host));
-  document.getElementById("route-group-form-title").textContent = `编辑路径前缀 ${group.path_prefix} @ ${hostLabel}`;
-}
-
-export function openPrefixEditor(pathPrefix, requestHost) {
-  const group = findRouteGroup(pathPrefix, requestHost, state);
-  if (!group) return;
-  fillRouteGroupForm(group);
-  document.getElementById("route-group-form-title").textContent = `编辑路径前缀 ${pathPrefix}`;
-  openModal("prefix-modal");
-}
-
-export function collectRouteGroupForm() {
-  return {
-    old_path_prefix: getValue("route_group_old_path_prefix"),
-    old_request_host: normalizeRequestHost(getValue("route_group_old_request_host")),
-    path_prefix: getValue("route_group_path_prefix"),
-    request_host: normalizeRequestHost(getValue("route_group_request_host")),
-    access_ip_whitelist: getValue("route_group_access_ip_whitelist"),
-    ip_blacklist: getValue("route_group_ip_blacklist"),
-    region_whitelist: getValue("route_group_region_whitelist"),
-    region_blacklist: getValue("route_group_region_blacklist"),
-    notes: getValue("route_group_notes"),
-  };
-}
-
-export async function submitRouteGroup() {
-  const payload = collectRouteGroupForm();
-  try {
-    if (payload.old_path_prefix) {
-      await apiFetch("/_admin/api/route-groups", {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      showToast("路径前缀已更新。");
-    } else {
-      await apiFetch("/_admin/api/route-groups", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      showToast("路径前缀已创建。");
-    }
-    resetRouteGroupForm();
-    await loadDashboard();
-  } catch (error) {
-    showToast(error.message, true);
-  }
 }
 
 export async function updateGroupRegionSwitch(pathPrefix, requestHost, enabled) {
   const group = findRouteGroup(pathPrefix, requestHost, state);
-  if (!group) {
-    throw new Error(`未找到路径前缀 ${pathPrefix} @ ${formatRequestHostLabel(requestHost)}`);
-  }
-
+  if (!group) throw new Error(`未找到路径前缀 ${pathPrefix}`);
   await apiFetch("/_admin/api/route-groups", {
     method: "PUT",
     body: JSON.stringify({
@@ -482,278 +473,288 @@ export async function updateGroupRegionSwitch(pathPrefix, requestHost, enabled) 
   });
 }
 
-// ============ 规则管理 ============
+// ============ 规则 ============
+
+export function populateRuleHostFilter(rules) {
+  const select = document.getElementById("ruleHost");
+  if (!select) return;
+  const hosts = [];
+  (rules || []).forEach((r) => {
+    const h = normalizeRequestHost(r.request_host);
+    if (h && !hosts.includes(h)) hosts.push(h);
+  });
+  hosts.sort();
+  const current = select.value;
+  select.innerHTML = '<option value="">全部主机</option>' +
+    hosts.map((h) => `<option value="${esc(h)}">${esc(formatRequestHostLabel(h))}</option>`).join("");
+  if (current && hosts.includes(current)) select.value = current;
+  syncSelect(select);
+}
 
 export function renderRules(rules) {
-  state.rules = rules;
-  const tbody = document.getElementById("rules-table-body");
+  state.rules = rules || [];
+  populateRuleHostFilter(state.rules);
+  const tbody = document.getElementById("rulesBody");
   if (!tbody) return;
-  tbody.innerHTML = "";
 
-  if (!rules.length) {
-    tbody.innerHTML = '<tr><td colspan="6">暂无转发规则，请先新增规则。</td></tr>';
+  const keyword = String(getValue("ruleSearch") || "").trim().toLowerCase();
+  const status = getValue("ruleFilter") || "";
+  const host = getValue("ruleHost") || "";
+
+  const filtered = state.rules.filter((rule) => {
+    const requestHost = normalizeRequestHost(rule.request_host);
+    const hostLabel = formatRequestHostLabel(requestHost);
+    if (keyword) {
+      const haystack = [
+        rule.name, rule.path_prefix, rule.target_url, rule.notes,
+        rule.region_filters, rule.ip_whitelist, rule.access_ip_whitelist,
+        rule.path_rewrite_pattern, rule.path_rewrite_replacement, hostLabel,
+      ].map((v) => String(v || "")).join(" ").toLowerCase();
+      if (!haystack.includes(keyword)) return false;
+    }
+    if (status === "enabled" && !rule.enabled) return false;
+    if (status === "disabled" && rule.enabled) return false;
+    if (status === "default" && !rule.is_default) return false;
+    if (host && host !== requestHost) return false;
+    return true;
+  });
+
+  const summaryEl = document.getElementById("rulesSummary");
+  if (summaryEl) {
+    const total = state.rules.length;
+    summaryEl.textContent = (keyword || status || host)
+      ? `共 ${total} 条规则，当前匹配 ${filtered.length} 条`
+      : `共 ${total} 条转发规则`;
+  }
+
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="empty" style="padding:26px 0">${state.rules.length ? "没有匹配当前查询条件的规则。" : "暂无转发规则，请先新增规则。"}</td></tr>`;
     return;
   }
 
-  rules.forEach((rule) => {
-    const tr = document.createElement("tr");
+  filtered.forEach((rule) => {
     const requestHost = normalizeRequestHost(rule.request_host);
-    const statusBadges = [
-      rule.is_default ? '<span class="badge badge-default">默认</span>' : "",
-    ].join("");
-    const conditions = [];
-    if (rule.ip_whitelist) {
-      conditions.push(`IP白(路由): ${escapeHtml(rule.ip_whitelist)}`);
-    }
-    if (rule.region_filters) {
-      conditions.push(`地区条件: ${escapeHtml(rule.region_filters)}`);
-    }
-    if (rule.access_ip_whitelist) {
-      conditions.push(`IP白(访问): ${escapeHtml(rule.access_ip_whitelist)}`);
-    }
-    if (rule.ip_blacklist) {
-      conditions.push(`IP黑: ${escapeHtml(rule.ip_blacklist)}`);
-    }
-    if (rule.region_whitelist) {
-      conditions.push(`地区白: ${escapeHtml(rule.region_whitelist)}`);
-    }
-    if (rule.region_blacklist) {
-      conditions.push(`地区黑: ${escapeHtml(rule.region_blacklist)}`);
-    }
-    const conditionsText = conditions.length ? conditions.join("\n") : "默认";
-
+    const hostLabel = formatRequestHostLabel(requestHost);
+    const rewritePattern = rule.path_rewrite_pattern || "";
+    const hasRewrite = Boolean(rewritePattern);
+    const rewriteCell = hasRewrite
+      ? `<code class="mono" title="${esc(rewritePattern)}">${esc(rewritePattern)}</code>`
+      : '<span class="text-muted">—</span>';
+    const regionText = rule.region_filters || "";
+    const tr = document.createElement("tr");
+    tr.dataset.ruleId = rule.id;
+    tr.className = "clickable";
     tr.innerHTML = `
+      <td class="mono">${rule.id}</td>
+      <td><strong>${esc(rule.name || "(未命名规则)")}</strong><div class="hint">${esc(rule.path_prefix)} · ${esc(hostLabel)}</div></td>
+      <td class="cell-truncate" title="${esc(rule.target_url)}">${esc(rule.target_url)}</td>
+      <td class="cell-truncate">${rewriteCell}</td>
+      <td class="cell-truncate" title="${esc(regionText)}">${regionText ? esc(regionText) : '<span class="text-muted">默认</span>'}</td>
+      <td>${rule.priority ?? 0}</td>
+      <td>${rule.enable_streaming ? '<span class="pill pill-ok">开</span>' : '<span class="pill pill-neutral">关</span>'}</td>
+      <td><div class="switch ${rule.enabled ? "on" : ""}" data-action="toggle-rule" data-id="${rule.id}" role="switch" title="点击切换启用状态"></div></td>
+      <td>${rule.is_default ? '<span class="pill pill-brand">默认</span>' : '<span class="text-muted">—</span>'}</td>
       <td>
-        <strong>${escapeHtml(rule.name || "(未命名规则)")}</strong>
-        <div>${statusBadges}</div>
-      </td>
-      <td title="${escapeHtml(rule.path_prefix + (requestHost ? "\n域名: " + formatRequestHostLabel(requestHost) : ""))}">
-        <div>${escapeHtml(rule.path_prefix)}</div>
-        <div class="hint">域名: ${escapeHtml(formatRequestHostLabel(requestHost))}</div>
-      </td>
-      <td title="${escapeHtml(rule.target_url)}">${escapeHtml(rule.target_url)}</td>
-      <td title="${escapeHtml(conditionsText)}">${conditions.length ? conditions.join("<br>") : "默认"}</td>
-      <td>
-        <button class="toggle-status-btn ${rule.enabled ? "on" : "off"}" data-action="toggle-rule" data-id="${rule.id}" type="button" title="${rule.enabled ? "点击禁用" : "点击启用"}">
-          <span class="toggle-status-dot"></span>
-          <span class="toggle-status-text">${rule.enabled ? "启用" : "禁用"}</span>
-        </button>
-      </td>
-      <td>
-        <div class="table-actions">
-          <button class="table-btn" data-action="edit-rule" data-id="${rule.id}" type="button">编辑</button>
-          <button class="table-btn delete" data-action="delete-rule" data-id="${rule.id}" type="button">删除</button>
+        <div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+          <button class="btn btn-sm" data-action="edit-rule" data-id="${rule.id}">编辑</button>
+          <button class="btn btn-sm btn-danger" data-action="delete-rule" data-id="${rule.id}">删除</button>
         </div>
-      </td>
-    `;
+      </td>`;
     tbody.appendChild(tr);
   });
 }
 
-export function resetRuleForm() {
-  setValue("rule_id", "");
-  setValue("rule_name", "");
-  setValue("rule_path_prefix", "");
-  setValue("rule_request_host", "");
-  setValue("rule_target_url", "");
-  setValue("rule_ip_whitelist", "");
-  setValue("rule_region_filters", "");
-  setValue("rule_access_ip_whitelist", "");
-  setValue("rule_ip_blacklist", "");
-  setValue("rule_region_whitelist", "");
-  setValue("rule_region_blacklist", "");
-  setValue("rule_priority", "0");
-  setValue("rule_timeout", "30");
-  setValue("rule_max_redirects", "10");
-  setValue("rule_retry_times", "3");
-  setValue("rule_notes", "");
-  setValue("rule_path_rewrite_pattern", "");
-  setValue("rule_path_rewrite_replacement", "");
-  setChecked("rule_enabled", true);
-  setChecked("rule_is_default", false);
-  setChecked("rule_strip_prefix", false);
-  setChecked("rule_follow_redirects", true);
-  setChecked("rule_enable_streaming", true);
-  document.getElementById("rule-form-title").textContent = "新增规则";
+const RULE_SCHEMA = [
+  { key: "name", label: "规则名称", type: "text", required: true, placeholder: "示例流媒体" },
+  { key: "target_url", label: "目标地址", type: "text", required: true, placeholder: "https://target.example.com" },
+  { key: "priority", label: "优先级", type: "number", default: 0 },
+  { key: "timeout", label: "超时（秒）", type: "number", default: 30 },
+  { key: "max_redirects", label: "最大重定向", type: "number", default: 10 },
+  { key: "retry_times", label: "重试次数", type: "number", default: 3 },
+  { key: "path_rewrite_pattern", label: "正则重写·匹配", type: "text", placeholder: "^(.*)$" },
+  { key: "path_rewrite_replacement", label: "正则重写·替换", type: "text", placeholder: "/new$1" },
+  { key: "ip_whitelist", label: "IP 白名单（路由）", type: "text" },
+  { key: "region_filters", label: "地区条件", type: "text", placeholder: "CN,HK" },
+  { key: "access_ip_whitelist", label: "访问控制 IP 白", type: "text" },
+  { key: "ip_blacklist", label: "访问控制 IP 黑", type: "text" },
+  { key: "region_whitelist", label: "地区白名单", type: "text" },
+  { key: "region_blacklist", label: "地区黑名单", type: "text" },
+  { key: "notes", label: "备注", type: "text" },
+  { key: "enabled", label: "启用", type: "switch" },
+  { key: "is_default", label: "默认规则", type: "switch" },
+  { key: "strip_prefix", label: "去前缀", type: "switch" },
+  { key: "follow_redirects", label: "跟随重定向", type: "switch" },
+  { key: "enable_streaming", label: "流式转发", type: "switch" },
+];
+
+function buildRuleGroupOptions(groups) {
+  return (groups || []).map((g) => {
+    const host = normalizeRequestHost(g.request_host);
+    return {
+      path_prefix: g.path_prefix,
+      request_host: host,
+      label: host ? `${g.path_prefix} · ${formatRequestHostLabel(host)}` : `${g.path_prefix} · 全部主机`,
+    };
+  });
 }
 
-export function fillRuleForm(rule) {
-  setValue("rule_id", rule.id);
-  setValue("rule_name", rule.name || "");
-  setValue("rule_path_prefix", rule.path_prefix || "");
-  setValue("rule_request_host", normalizeRequestHost(rule.request_host));
-  setValue("rule_target_url", rule.target_url || "");
-  setValue("rule_ip_whitelist", rule.ip_whitelist || "");
-  setValue("rule_region_filters", rule.region_filters || "");
-  setValue("rule_access_ip_whitelist", rule.access_ip_whitelist || "");
-  setValue("rule_ip_blacklist", rule.ip_blacklist || "");
-  setValue("rule_region_whitelist", rule.region_whitelist || "");
-  setValue("rule_region_blacklist", rule.region_blacklist || "");
-  setValue("rule_priority", rule.priority ?? 0);
-  setValue("rule_timeout", rule.timeout ?? 30);
-  setValue("rule_max_redirects", rule.max_redirects ?? 10);
-  setValue("rule_retry_times", rule.retry_times ?? 3);
-  setValue("rule_notes", rule.notes || "");
-  setValue("rule_path_rewrite_pattern", rule.path_rewrite_pattern || "");
-  setValue("rule_path_rewrite_replacement", rule.path_rewrite_replacement || "");
-  setChecked("rule_enabled", rule.enabled);
-  setChecked("rule_is_default", rule.is_default);
-  setChecked("rule_strip_prefix", rule.strip_prefix);
-  setChecked("rule_follow_redirects", rule.follow_redirects !== false);
-  setChecked("rule_enable_streaming", rule.enable_streaming);
-  document.getElementById("rule-form-title").textContent = `编辑规则 #${rule.id}`;
-}
+export function openRuleModal(rule, presetGroup = null) {
+  const isEdit = Boolean(rule);
+  const groupOptions = buildRuleGroupOptions(state.routeGroups);
+  if (!groupOptions.length) {
+    showToast("请先创建路由组，再为其添加转发规则。", true);
+    return;
+  }
 
-export function collectRuleForm() {
-  return {
-    id: getValue("rule_id") || undefined,
-    name: getValue("rule_name"),
-    path_prefix: getValue("rule_path_prefix"),
-    request_host: normalizeRequestHost(getValue("rule_request_host")),
-    target_url: getValue("rule_target_url"),
-    ip_whitelist: getValue("rule_ip_whitelist"),
-    region_filters: getValue("rule_region_filters"),
-    access_ip_whitelist: getValue("rule_access_ip_whitelist"),
-    ip_blacklist: getValue("rule_ip_blacklist"),
-    region_whitelist: getValue("rule_region_whitelist"),
-    region_blacklist: getValue("rule_region_blacklist"),
-    priority: Number(getValue("rule_priority") || 0),
-    timeout: Number(getValue("rule_timeout") || 30),
-    max_redirects: Number(getValue("rule_max_redirects") || 10),
-    retry_times: Number(getValue("rule_retry_times") || 3),
-    notes: getValue("rule_notes"),
-    path_rewrite_pattern: getValue("rule_path_rewrite_pattern"),
-    path_rewrite_replacement: getValue("rule_path_rewrite_replacement"),
-    enabled: getChecked("rule_enabled"),
-    is_default: getChecked("rule_is_default"),
-    strip_prefix: getChecked("rule_strip_prefix"),
-    follow_redirects: getChecked("rule_follow_redirects"),
-    enable_streaming: getChecked("rule_enable_streaming"),
+  // 确定默认选中的路由组
+  let selectedIndex = 0;
+  if (isEdit) {
+    const idx = groupOptions.findIndex((o) => o.path_prefix === rule.path_prefix && o.request_host === normalizeRequestHost(rule.request_host));
+    if (idx >= 0) selectedIndex = idx;
+  } else if (presetGroup) {
+    const idx = groupOptions.findIndex((o) => o.path_prefix === presetGroup.path_prefix && o.request_host === normalizeRequestHost(presetGroup.request_host));
+    if (idx >= 0) selectedIndex = idx;
+  }
+
+  const schema = [
+    { key: "route_group", label: "所属路由组", type: "select", required: true, options: groupOptions.map((o, i) => ({ value: String(i), label: o.label })) },
+    ...RULE_SCHEMA,
+  ];
+
+  const values = rule ? {
+    route_group: String(selectedIndex),
+    name: rule.name, target_url: rule.target_url, priority: rule.priority ?? 0, timeout: rule.timeout ?? 30,
+    max_redirects: rule.max_redirects ?? 10, retry_times: rule.retry_times ?? 3,
+    path_rewrite_pattern: rule.path_rewrite_pattern || "", path_rewrite_replacement: rule.path_rewrite_replacement || "",
+    ip_whitelist: rule.ip_whitelist || "", region_filters: rule.region_filters || "",
+    access_ip_whitelist: rule.access_ip_whitelist || "", ip_blacklist: rule.ip_blacklist || "",
+    region_whitelist: rule.region_whitelist || "", region_blacklist: rule.region_blacklist || "",
+    notes: rule.notes || "", enabled: Boolean(rule.enabled), is_default: Boolean(rule.is_default),
+    strip_prefix: Boolean(rule.strip_prefix), follow_redirects: rule.follow_redirects !== false,
+    enable_streaming: Boolean(rule.enable_streaming),
+  } : {
+    route_group: String(selectedIndex),
+    priority: 0, timeout: 30, max_redirects: 10, retry_times: 3,
+    enabled: true, is_default: false, strip_prefix: false, follow_redirects: true, enable_streaming: true,
   };
+
+  openFormModal({
+    title: isEdit ? `编辑规则 #${rule.id}` : "新建规则",
+    schema,
+    values,
+    size: 720,
+    validate: (out) => {
+      if (!String(out.name || "").trim()) return "规则名称不能为空";
+      if (out.route_group === "" || out.route_group == null) return "请选择所属路由组";
+      if (!String(out.target_url || "").trim()) return "目标地址不能为空";
+      return null;
+    },
+    onSave: async (out) => {
+      const gi = groupOptions[Number(out.route_group)] || groupOptions[0];
+      const payload = {
+        name: out.name, path_prefix: gi.path_prefix, request_host: gi.request_host,
+        target_url: out.target_url, ip_whitelist: out.ip_whitelist || "", region_filters: out.region_filters || "",
+        access_ip_whitelist: out.access_ip_whitelist || "", ip_blacklist: out.ip_blacklist || "",
+        region_whitelist: out.region_whitelist || "", region_blacklist: out.region_blacklist || "",
+        priority: Number(out.priority ?? 0), timeout: Number(out.timeout ?? 30),
+        max_redirects: Number(out.max_redirects ?? 10), retry_times: Number(out.retry_times ?? 3),
+        notes: out.notes || "", path_rewrite_pattern: out.path_rewrite_pattern || "",
+        path_rewrite_replacement: out.path_rewrite_replacement || "",
+        enabled: Boolean(out.enabled), is_default: Boolean(out.is_default),
+        strip_prefix: Boolean(out.strip_prefix), follow_redirects: Boolean(out.follow_redirects),
+        enable_streaming: Boolean(out.enable_streaming),
+      };
+      if (isEdit) {
+        await apiFetch(`/_admin/api/rules/${rule.id}`, { method: "PUT", body: JSON.stringify(payload) });
+        showToast("规则已更新。");
+      } else {
+        await apiFetch("/_admin/api/rules", { method: "POST", body: JSON.stringify(payload) });
+        showToast("规则已创建。");
+      }
+      await loadDashboard();
+    },
+  });
 }
 
 export function prepareRuleForGroup(pathPrefix, requestHost = "") {
-  resetRuleForm();
-  setValue("rule_path_prefix", pathPrefix);
-  setValue("rule_request_host", normalizeRequestHost(requestHost));
-  document.getElementById("rule-form-title").textContent = "新增规则";
-  openModal("rule-modal");
-  focusField("rule_name");
-}
-
-export function openRuleEditor(ruleId) {
-  const id = Number(ruleId);
-  const rule = state.rules.find(r => r.id === id);
-  if (!rule) return;
-  fillRuleForm(rule);
-  document.getElementById("rule-form-title").textContent = `编辑规则 #${rule.id}`;
-  openModal("rule-modal");
-}
-
-export async function submitRule() {
-  const payload = collectRuleForm();
-  const ruleId = payload.id;
-  delete payload.id;
-
-  try {
-    if (ruleId) {
-      await apiFetch(`/_admin/api/rules/${ruleId}`, {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      showToast("规则已更新。");
-    } else {
-      await apiFetch("/_admin/api/rules", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      showToast("规则已创建。");
-    }
-    resetRuleForm();
-    await loadDashboard();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  openRuleModal(null, { path_prefix: pathPrefix, request_host: requestHost });
 }
 
 export async function removeRule(ruleId) {
-  if (!window.confirm(`确认删除规则 #${ruleId} 吗？`)) {
-    return;
-  }
-  try {
-    await apiFetch(`/_admin/api/rules/${ruleId}`, { method: "DELETE" });
-    resetRuleForm();
-    await loadDashboard();
-    showToast("规则已删除。");
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  openConfirm({
+    title: "删除规则",
+    message: `确认删除规则 #${ruleId} 吗？此操作不可撤销。`,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/rules/${ruleId}`, { method: "DELETE" });
+        await loadDashboard();
+        showToast("规则已删除。");
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
 }
 
 export async function toggleRule(ruleId, enabled) {
   try {
-    await apiFetch(`/_admin/api/rules/${ruleId}`, {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    });
+    await apiFetch(`/_admin/api/rules/${ruleId}`, { method: "PUT", body: JSON.stringify({ enabled }) });
     await loadDashboard();
     showToast(enabled ? "规则已启用。" : "规则已禁用。");
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  } catch (e) { showToast(e.message, true); }
 }
 
-const RULE_FIELD_LABELS = {
-  strip_prefix: "去前缀",
-  follow_redirects: "跟随重定向",
-  enable_streaming: "流式转发",
-};
-
-export async function toggleRuleField(ruleId, field, nextValue) {
-  const label = RULE_FIELD_LABELS[field] || field;
-  try {
-    await apiFetch(`/_admin/api/rules/${ruleId}`, {
-      method: "PUT",
-      body: JSON.stringify({ [field]: nextValue }),
-    });
-    await loadDashboard();
-    showToast(`${label}已${nextValue ? "开启" : "关闭"}。`);
-  } catch (error) {
-    showToast(error.message, true);
+export function openRuleDrawer(ruleId) {
+  const rule = state.rules.find((r) => r.id === Number(ruleId));
+  if (!rule) return;
+  const hostLabel = formatRequestHostLabel(normalizeRequestHost(rule.request_host));
+  const bool = (v) => (v ? '<span class="pill pill-ok">开</span>' : '<span class="pill pill-neutral">关</span>');
+  const cell = (v) => (v ? esc(String(v)) : '<span class="text-muted">—</span>');
+  const kv = (k, v) => `<div class="kv"><div class="k">${esc(k)}</div><div class="val">${v}</div></div>`;
+  const title = document.getElementById("drawerTitle");
+  const body = document.getElementById("drawerBody");
+  if (title) title.textContent = `规则 #${rule.id}`;
+  if (body) {
+    body.innerHTML = `
+      <div class="section-h">基础信息</div>
+      ${kv("规则名称", cell(rule.name))}
+      ${kv("备注", cell(rule.notes))}
+      <div class="section-h" style="margin-top:16px">路由匹配</div>
+      ${kv("路径前缀", `<code class="mono">${esc(rule.path_prefix || "")}</code>`)}
+      ${kv("请求域名", cell(hostLabel))}
+      ${kv("目标地址", rule.target_url ? `<a class="drawer-link" href="${esc(rule.target_url)}" target="_blank" rel="noopener">${esc(rule.target_url)}</a>` : cell(rule.target_url))}
+      ${kv("优先级", cell(rule.priority ?? 0))}
+      ${kv("默认规则", bool(rule.is_default))}
+      ${kv("启用状态", bool(rule.enabled))}
+      <div class="section-h" style="margin-top:16px">请求处理</div>
+      ${kv("超时(秒)", cell(rule.timeout ?? 30))}
+      ${kv("最大重定向", cell(rule.max_redirects ?? 10))}
+      ${kv("重试次数", cell(rule.retry_times ?? 3))}
+      ${kv("去前缀", bool(rule.strip_prefix))}
+      ${kv("跟随重定向", bool(rule.follow_redirects !== false))}
+      ${kv("流式转发", bool(rule.enable_streaming))}
+      ${kv("正则模式", cell(rule.path_rewrite_pattern))}
+      ${kv("正则替换", cell(rule.path_rewrite_replacement))}
+      <div class="section-h" style="margin-top:16px">访问控制</div>
+      ${kv("IP 白名单(路由)", cell(rule.ip_whitelist))}
+      ${kv("地区条件", cell(rule.region_filters))}
+      ${kv("访问控制 IP 白", cell(rule.access_ip_whitelist))}
+      ${kv("访问控制 IP 黑", cell(rule.ip_blacklist))}
+      ${kv("地区白名单", cell(rule.region_whitelist))}
+      ${kv("地区黑名单", cell(rule.region_blacklist))}
+    `;
   }
+  openDrawer();
 }
 
-// ============ GeoIP 配置 ============
+// ============ GeoIP ============
+
+let _geoConfig = { enabled: false, online_cache_ttl_seconds: 120, sources: [], offline: {} };
 
 export function bindGeoNumericInputSafety() {
-  const bindInput = (id, sanitizer) => {
-    const input = document.getElementById(id);
-    if (!input) return;
-    input.addEventListener("wheel", (event) => {
-      if (document.activeElement === input) {
-        event.preventDefault();
-        input.blur();
-      }
-    }, { passive: false });
-    input.addEventListener("change", () => {
-      sanitizer();
-    });
-    input.addEventListener("blur", () => {
-      sanitizer();
-    });
-  };
-
-  bindInput("geo_online_cache_ttl_seconds", () => {
-    setValue("geo_online_cache_ttl_seconds", getNonNegativeIntValue("geo_online_cache_ttl_seconds", 120));
-  });
-  bindInput("geo_offline_refresh_interval_hours", () => {
-    setValue("geo_offline_refresh_interval_hours", getPositiveIntValue("geo_offline_refresh_interval_hours", 24));
-  });
+  // 新版改用 schema 弹窗，无需绑定静态 input；保留空实现以兼容旧调用
 }
 
 export function fillGeoConfig(geo) {
-  setChecked("geo_enabled", geo.enabled);
-  setValue("geo_online_cache_ttl_seconds", Math.max(0, Number.parseInt(String(geo.online_cache_ttl_seconds ?? 120), 10) || 120));
+  _geoConfig = geo || {};
   state.geoSources = Array.isArray(geo.sources)
     ? geo.sources.map((item, index) => ({
         id: item.id ?? `source-${index}`,
@@ -778,417 +779,322 @@ export function fillGeoConfig(geo) {
       }))
     : [];
   renderGeoSources();
-  resetGeoSourceForm();
-  resetGeoSourceTestResult();
-
-  setChecked("geo_offline_enabled", geo.offline?.enabled);
-  setValue("geo_offline_db_path", geo.offline?.db_path || "");
-  setValue("geo_offline_locale", geo.offline?.locale || "zh-CN");
-  setValue("geo_offline_download_url", geo.offline?.download_url || "");
-  setValue("geo_offline_download_headers_json", geo.offline?.download_headers_json || "{}");
-  setValue("geo_offline_refresh_interval_hours", Math.max(1, Number.parseInt(String(geo.offline?.refresh_interval_hours ?? 24), 10) || 24));
   renderOfflineStatus(geo.offline || {});
-  resetOfflineGeoTestResult();
+  renderGeoCache();
 }
 
 export function renderGeoSources() {
-  const tbody = document.getElementById("geo-sources-table-body");
-  tbody.innerHTML = "";
-
+  const body = document.getElementById("geoSourceBody");
+  if (!body) return;
   if (!state.geoSources.length) {
-    tbody.innerHTML = '<tr><td colspan="6">暂无在线定位源，将直接使用离线库或默认规则。</td></tr>';
+    body.innerHTML = `<div class="empty">暂无在线定位源，点击「新增源」添加，或直接使用离线库。</div>`;
     return;
   }
-
-  state.geoSources.forEach((source, index) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td data-label="名称"><strong>${escapeHtml(source.name || `source-${index + 1}`)}</strong></td>
-      <td data-label="地址">${escapeHtml(source.url)}</td>
-      <td data-label="权重">${source.weight}</td>
-      <td data-label="方式">${escapeHtml(source.method)} / ${escapeHtml(source.request_location)}</td>
-      <td data-label="状态">
-        <button class="toggle-status-btn ${source.enabled ? "on" : "off"}" data-action="toggle-geo-source" data-index="${index}" type="button" title="${source.enabled ? "点击禁用" : "点击启用"}">
-          <span class="toggle-status-dot"></span>
-          <span class="toggle-status-text">${source.enabled ? "启用" : "停用"}</span>
-        </button>
-      </td>
-      <td data-label="操作">
-        <div class="table-actions">
-          <button class="table-btn" data-action="test-geo-source" data-index="${index}" type="button">测试</button>
-          <button class="table-btn" data-action="edit-geo-source" data-index="${index}" type="button">编辑</button>
-          <button class="table-btn delete" data-action="delete-geo-source" data-index="${index}" type="button">删除</button>
+  body.innerHTML = state.geoSources.map((s, i) => `
+    <div class="src-row">
+      <div class="src-icon"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+      <div style="min-width:0;flex:1">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <strong>${esc(s.name || `source-${i + 1}`)}</strong>
+          <span class="pill ${s.enabled ? "pill-ok" : "pill-neutral"}">${s.enabled ? "启用" : "停用"}</span>
+          <span class="hint">权重 ${s.weight} · ${esc(s.method)}/${esc(s.request_location)}</span>
         </div>
-      </td>
-    `;
-    tbody.appendChild(tr);
+        <div class="hint" style="word-break:break-all">${esc(s.url)}</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <div class="switch ${s.enabled ? "on" : ""}" data-action="toggle-geo-source" data-index="${i}" role="switch" title="启用/停用"></div>
+        <button class="btn btn-sm" data-action="test-geo-source" data-index="${i}">测试</button>
+        <button class="btn btn-sm" data-action="edit-geo-source" data-index="${i}">编辑</button>
+        <button class="btn btn-sm btn-danger" data-action="delete-geo-source" data-index="${i}">删除</button>
+      </div>
+    </div>`).join("");
+}
+
+const GEO_SOURCE_SCHEMA = [
+  { key: "name", label: "名称", type: "text", required: true, placeholder: "示例定位源" },
+  { key: "url", label: "接口地址", type: "text", required: true, placeholder: "https://geo.example.com/lookup" },
+  { key: "weight", label: "权重", type: "number", default: 1 },
+  { key: "priority", label: "优先级", type: "number", default: 0 },
+  { key: "method", label: "请求方式", type: "select", options: [{ value: "GET", label: "GET" }, { value: "POST", label: "POST" }] },
+  { key: "request_location", label: "参数位置", type: "select", options: [{ value: "query", label: "query" }, { value: "body", label: "body" }] },
+  { key: "body_format", label: "请求体格式", type: "select", options: [{ value: "json", label: "json" }, { value: "form", label: "form" }] },
+  { key: "ip_param_name", label: "IP 参数名", type: "text", default: "ip" },
+  { key: "timeout", label: "超时（秒）", type: "number", default: 3 },
+  { key: "country_path", label: "国家字段路径", type: "text", default: "country" },
+  { key: "region_path", label: "地区字段路径", type: "text", default: "region" },
+  { key: "city_path", label: "城市字段路径", type: "text", default: "city" },
+  { key: "full_path", label: "汇总字段路径", type: "text" },
+  { key: "query_params_json", label: "附加 query 参数 (JSON)", type: "json", default: "{}" },
+  { key: "headers_json", label: "附加请求头 (JSON)", type: "json", default: "{}" },
+  { key: "body_template", label: "请求体模板", type: "textarea" },
+  { key: "notes", label: "备注", type: "text" },
+  { key: "enabled", label: "启用", type: "switch" },
+];
+
+export function openGeoSourceModal(source, index) {
+  const isEdit = source != null;
+  const values = source ? { ...source, enabled: Boolean(source.enabled) } : {
+    weight: 1, priority: 0, method: "GET", request_location: "query", body_format: "json",
+    ip_param_name: "ip", timeout: 3, country_path: "country", region_path: "region", city_path: "city",
+    query_params_json: "{}", headers_json: "{}", enabled: true,
+  };
+  openFormModal({
+    title: isEdit ? `编辑在线源 ${source.name || `#${index + 1}`}` : "新增在线定位源",
+    schema: GEO_SOURCE_SCHEMA,
+    values,
+    size: 720,
+    validate: (out) => {
+      if (!String(out.name || "").trim()) return "名称不能为空";
+      if (!String(out.url || "").trim()) return "接口地址不能为空";
+      return null;
+    },
+    onSave: async (out) => {
+      const payload = {
+        name: out.name, enabled: Boolean(out.enabled), weight: Number(out.weight ?? 1),
+        url: out.url, method: out.method, request_location: out.request_location,
+        body_format: out.body_format, query_params_json: out.query_params_json || "{}",
+        headers_json: out.headers_json || "{}", body_template: out.body_template || "",
+        ip_param_name: out.ip_param_name || "ip", timeout: Number(out.timeout ?? 3),
+        country_path: out.country_path, region_path: out.region_path, city_path: out.city_path,
+        full_path: out.full_path || "", priority: Number(out.priority ?? 0), notes: out.notes || "",
+      };
+      const prev = state.geoSources.map((s) => ({ ...s }));
+      if (isEdit) state.geoSources[index] = { ...state.geoSources[index], ...payload };
+      else state.geoSources.push(payload);
+      renderGeoSources();
+      try {
+        await persistGeoSettings(isEdit ? "在线源已更新。" : "在线源已新增。");
+      } catch (e) {
+        state.geoSources = prev;
+        renderGeoSources();
+        throw e;
+      }
+    },
   });
 }
 
-export function resetGeoSourceForm() {
-  setValue("geo_source_id", "");
-  setValue("geo_source_name", "");
-  setValue("geo_source_url", "");
-  setValue("geo_source_weight", "1");
-  setValue("geo_source_priority", "0");
-  setValue("geo_source_method", "GET");
-  setValue("geo_source_request_location", "query");
-  setValue("geo_source_body_format", "json");
-  setValue("geo_source_query_params_json", "{}");
-  setValue("geo_source_headers_json", "{}");
-  setValue("geo_source_body_template", "");
-  setValue("geo_source_ip_param_name", "ip");
-  setValue("geo_source_timeout", "3");
-  setValue("geo_source_country_path", "country");
-  setValue("geo_source_region_path", "region");
-  setValue("geo_source_city_path", "city");
-  setValue("geo_source_full_path", "");
-  setValue("geo_source_notes", "");
-  setChecked("geo_source_enabled", true);
-  document.getElementById("geo-source-form-title").textContent = "新增在线源";
-  resetGeoSourceTestResult();
-}
-
-export function fillGeoSourceForm(source, index) {
-  setValue("geo_source_id", index);
-  setValue("geo_source_name", source.name || "");
-  setValue("geo_source_url", source.url || "");
-  setValue("geo_source_weight", source.weight ?? 1);
-  setValue("geo_source_priority", source.priority ?? 0);
-  setValue("geo_source_method", source.method || "GET");
-  setValue("geo_source_request_location", source.request_location || "query");
-  setValue("geo_source_body_format", source.body_format || "json");
-  setValue("geo_source_query_params_json", source.query_params_json || "{}");
-  setValue("geo_source_headers_json", source.headers_json || "{}");
-  setValue("geo_source_body_template", source.body_template || "");
-  setValue("geo_source_ip_param_name", source.ip_param_name || "ip");
-  setValue("geo_source_timeout", source.timeout ?? 3);
-  setValue("geo_source_country_path", source.country_path || "country");
-  setValue("geo_source_region_path", source.region_path || "region");
-  setValue("geo_source_city_path", source.city_path || "city");
-  setValue("geo_source_full_path", source.full_path || "");
-  setValue("geo_source_notes", source.notes || "");
-  setChecked("geo_source_enabled", source.enabled);
-  document.getElementById("geo-source-form-title").textContent = `编辑在线源 #${index + 1}`;
-  resetGeoSourceTestResult();
-}
-
-export function collectGeoSourceForm() {
-  return {
-    name: getValue("geo_source_name"),
-    enabled: getChecked("geo_source_enabled"),
-    weight: Number(getValue("geo_source_weight") || 1),
-    url: getValue("geo_source_url"),
-    method: getValue("geo_source_method"),
-    request_location: getValue("geo_source_request_location"),
-    body_format: getValue("geo_source_body_format"),
-    query_params_json: getValue("geo_source_query_params_json"),
-    headers_json: getValue("geo_source_headers_json"),
-    body_template: getValue("geo_source_body_template"),
-    ip_param_name: getValue("geo_source_ip_param_name"),
-    timeout: Number(getValue("geo_source_timeout") || 3),
-    country_path: getValue("geo_source_country_path"),
-    region_path: getValue("geo_source_region_path"),
-    city_path: getValue("geo_source_city_path"),
-    full_path: getValue("geo_source_full_path"),
-    priority: Number(getValue("geo_source_priority") || 0),
-    notes: getValue("geo_source_notes"),
-  };
-}
-
-export function resetGeoSourceTestResult(message = "输入测试 IP 后，可查看测试结果和区域信息。") {
-  const container = document.getElementById("geo-source-test-result");
-  container.classList.add("is-empty");
-  container.innerHTML = `<p class="test-result-placeholder">${escapeHtml(message)}</p>`;
-}
-
-export function formatTestRawPayload(payload) {
-  if (payload === undefined || payload === null) {
-    return "";
-  }
-  if (typeof payload === "string") {
-    return payload;
-  }
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return String(payload);
-  }
-}
-
-export function renderGeoSourceTestResult(result) {
-  const container = document.getElementById("geo-source-test-result");
-  const location = result.location || {};
-  const sourceName = result.provider || "-";
-  const testIp = location.ip || getValue("geo_source_test_ip").trim() || "-";
-  const statusText = result.success ? "测试成功" : "测试失败";
-  const statusClass = result.success ? "success" : "failed";
-  const upstreamResponse = result.upstream_response || {};
-  const upstreamPayload =
-    upstreamResponse.payload !== undefined ? upstreamResponse.payload : location.raw;
-  const upstreamPayloadText = formatTestRawPayload(upstreamPayload);
-  const rawJson =
-    upstreamPayloadText
-      ? `
-        <details class="test-result-raw">
-          <summary>查看接口原始返回</summary>
-          <pre>${escapeHtml(upstreamPayloadText)}</pre>
-        </details>
-      `
-      : "";
-
-  container.classList.remove("is-empty");
-  container.innerHTML = `
-    <div class="test-result-head">
-      <div>
-        <h4>${statusText}</h4>
-        <p class="test-result-message">${escapeHtml(result.message || "-")}</p>
-      </div>
-      <span class="status-pill ${statusClass}">${statusText}</span>
-    </div>
-    <div class="result-grid">
-      <div class="result-item">
-        <strong>测试 IP</strong>
-        <span>${escapeHtml(testIp)}</span>
-      </div>
-      <div class="result-item">
-        <strong>测试源</strong>
-        <span>${escapeHtml(sourceName)}</span>
-      </div>
-      <div class="result-item">
-        <strong>定位阶段</strong>
-        <span>${escapeHtml(result.stage || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>上游状态</strong>
-        <span>${escapeHtml(String(upstreamResponse.status ?? "-"))}</span>
-      </div>
-      <div class="result-item">
-        <strong>国家</strong>
-        <span>${escapeHtml(location.country || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>地区</strong>
-        <span>${escapeHtml(location.region || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>城市</strong>
-        <span>${escapeHtml(location.city || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>区域汇总</strong>
-        <span>${escapeHtml(location.summary || location.full_text || "-")}</span>
-      </div>
-    </div>
-    ${rawJson}
-  `;
-}
-
 export function renderOfflineStatus(offline) {
-  const container = document.getElementById("geo-offline-status");
+  const container = document.getElementById("offlineStatusBody");
+  if (!container) return;
   const status = offline.status || {};
-  container.classList.remove("is-empty");
+  const pillCls = status.file_exists ? "success" : "failed";
   container.innerHTML = `
     <div class="test-result-head">
-      <div>
-        <h4>离线库维护状态</h4>
-        <p class="test-result-message">${escapeHtml(status.last_sync_message || "尚未执行同步。")}</p>
-      </div>
-      <span class="status-pill ${status.file_exists ? "success" : "failed"}">${status.file_exists ? "文件可用" : "文件缺失"}</span>
+      <div><h4 style="margin:0;font-size:14px">离线库维护状态</h4>
+        <p class="test-result-message">${esc(status.last_sync_message || "尚未执行同步。")}</p></div>
+      <span class="status-pill ${pillCls}">${status.file_exists ? "文件可用" : "文件缺失"}</span>
     </div>
     <div class="result-grid">
-      <div class="result-item">
-        <strong>本地路径</strong>
-        <span>${escapeHtml(offline.db_path || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>下载链接</strong>
-        <span>${escapeHtml(offline.download_url || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>文件大小</strong>
-        <span>${escapeHtml(formatBytes(status.file_size || 0))}</span>
-      </div>
-      <div class="result-item">
-        <strong>文件更新时间</strong>
-        <span>${escapeHtml(formatDateTime(status.file_updated_at || ""))}</span>
-      </div>
-      <div class="result-item">
-        <strong>备份文件</strong>
-        <span>${escapeHtml(status.backup_exists ? (status.backup_path || "-") : "暂无备份")}</span>
-      </div>
-      <div class="result-item">
-        <strong>备份大小</strong>
-        <span>${escapeHtml(formatBytes(status.backup_size || 0))}</span>
-      </div>
-      <div class="result-item">
-        <strong>备份更新时间</strong>
-        <span>${escapeHtml(formatDateTime(status.backup_updated_at || ""))}</span>
-      </div>
-      <div class="result-item">
-        <strong>最近同步</strong>
-        <span>${escapeHtml(formatDateTime(status.last_sync_at || ""))}</span>
-      </div>
-      <div class="result-item">
-        <strong>最近成功</strong>
-        <span>${escapeHtml(formatDateTime(status.last_success_at || ""))}</span>
-      </div>
-      <div class="result-item">
-        <strong>同步状态</strong>
-        <span>${escapeHtml(status.last_sync_status || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>下次自动同步</strong>
-        <span>${escapeHtml(formatDateTime(status.next_sync_at || ""))}</span>
-      </div>
-    </div>
-  `;
+      <div class="result-item"><strong>本地路径</strong><span>${esc(offline.db_path || "-")}</span></div>
+      <div class="result-item"><strong>下载链接</strong><span>${esc(offline.download_url || "-")}</span></div>
+      <div class="result-item"><strong>文件大小</strong><span>${esc(formatBytes(status.file_size || 0))}</span></div>
+      <div class="result-item"><strong>文件更新时间</strong><span>${esc(formatDateTime(status.file_updated_at || ""))}</span></div>
+      <div class="result-item"><strong>最近同步</strong><span>${esc(formatDateTime(status.last_sync_at || ""))}</span></div>
+      <div class="result-item"><strong>同步状态</strong><span>${esc(status.last_sync_status || "-")}</span></div>
+    </div>`;
 }
 
-export function resetOfflineGeoTestResult(message = "输入测试 IP 后，可以直接查看离线库定位结果。") {
-  const container = document.getElementById("geo-offline-test-result");
-  container.classList.add("is-empty");
-  container.innerHTML = `<p class="test-result-placeholder">${escapeHtml(message)}</p>`;
-}
-
-export function renderOfflineGeoTestResult(result) {
-  const container = document.getElementById("geo-offline-test-result");
-  const location = result.location || {};
-  const testIp = location.ip || getValue("geo_offline_test_ip").trim() || "-";
-  const statusText = result.success ? "测试成功" : "测试失败";
-  const statusClass = result.success ? "success" : "failed";
-
-  container.classList.remove("is-empty");
-  container.innerHTML = `
-    <div class="test-result-head">
-      <div>
-        <h4>${statusText}</h4>
-        <p class="test-result-message">${escapeHtml(result.message || "-")}</p>
-      </div>
-      <span class="status-pill ${statusClass}">${statusText}</span>
-    </div>
-    <div class="result-grid">
-      <div class="result-item">
-        <strong>测试 IP</strong>
-        <span>${escapeHtml(testIp)}</span>
-      </div>
-      <div class="result-item">
-        <strong>定位来源</strong>
-        <span>${escapeHtml(result.provider || "offline_mmdb")}</span>
-      </div>
-      <div class="result-item">
-        <strong>国家</strong>
-        <span>${escapeHtml(location.country || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>地区</strong>
-        <span>${escapeHtml(location.region || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>城市</strong>
-        <span>${escapeHtml(location.city || "-")}</span>
-      </div>
-      <div class="result-item">
-        <strong>区域汇总</strong>
-        <span>${escapeHtml(location.summary || location.full_text || "-")}</span>
-      </div>
-    </div>
-  `;
+export function renderGeoCache() {
+  const pill = document.getElementById("geoCachePill");
+  const body = document.getElementById("geoCacheBody");
+  const ttl = _geoConfig.online_cache_ttl_seconds ?? 120;
+  if (pill) {
+    pill.className = "pill " + (_geoConfig.enabled ? "pill-ok" : "pill-neutral");
+    pill.textContent = _geoConfig.enabled ? "启用" : "停用";
+  }
+  if (body) {
+    body.innerHTML = `
+      <div class="kv"><div class="k">在线定位缓存</div><div class="val">${_geoConfig.enabled ? "已启用" : "已停用"}</div></div>
+      <div class="kv"><div class="k">缓存 TTL</div><div class="val">${esc(String(ttl))} 秒</div></div>
+      <div class="kv"><div class="k">在线源数量</div><div class="val">${state.geoSources.length}</div></div>`;
+  }
 }
 
 export function buildGeoSettingsPayload() {
   return {
-    enabled: getChecked("geo_enabled"),
-    online_cache_ttl_seconds: getNonNegativeIntValue("geo_online_cache_ttl_seconds", 120),
-    sources: state.geoSources.map((source) => ({
-      name: source.name,
-      enabled: source.enabled,
-      weight: source.weight,
-      url: source.url,
-      method: source.method,
-      request_location: source.request_location,
-      body_format: source.body_format,
-      query_params_json: source.query_params_json,
-      headers_json: source.headers_json,
-      body_template: source.body_template,
-      ip_param_name: source.ip_param_name,
-      timeout: source.timeout,
-      country_path: source.country_path,
-      region_path: source.region_path,
-      city_path: source.city_path,
-      full_path: source.full_path,
-      priority: source.priority,
-      notes: source.notes,
+    enabled: _geoConfig.enabled,
+    online_cache_ttl_seconds: _geoConfig.online_cache_ttl_seconds ?? 120,
+    sources: state.geoSources.map((s) => ({
+      name: s.name, enabled: s.enabled, weight: s.weight, url: s.url, method: s.method,
+      request_location: s.request_location, body_format: s.body_format,
+      query_params_json: s.query_params_json, headers_json: s.headers_json,
+      body_template: s.body_template, ip_param_name: s.ip_param_name, timeout: s.timeout,
+      country_path: s.country_path, region_path: s.region_path, city_path: s.city_path,
+      full_path: s.full_path, priority: s.priority, notes: s.notes,
     })),
     offline: {
-      enabled: getChecked("geo_offline_enabled"),
-      db_path: getValue("geo_offline_db_path"),
-      locale: getValue("geo_offline_locale"),
-      download_url: getValue("geo_offline_download_url"),
-      download_headers_json: getValue("geo_offline_download_headers_json"),
-      refresh_interval_hours: getPositiveIntValue("geo_offline_refresh_interval_hours", 24),
+      enabled: _geoConfig.offline?.enabled ?? false,
+      db_path: _geoConfig.offline?.db_path || "",
+      locale: _geoConfig.offline?.locale || "zh-CN",
+      download_url: _geoConfig.offline?.download_url || "",
+      download_headers_json: _geoConfig.offline?.download_headers_json || "{}",
+      refresh_interval_hours: _geoConfig.offline?.refresh_interval_hours ?? 24,
     },
   };
 }
 
 export async function persistGeoSettings(successMessage = "IP 定位配置已保存。") {
-  await apiFetch("/_admin/api/geoip", {
-    method: "PUT",
-    body: JSON.stringify(buildGeoSettingsPayload()),
-  });
+  await apiFetch("/_admin/api/geoip", { method: "PUT", body: JSON.stringify(buildGeoSettingsPayload()) });
   await loadDashboard();
   showToast(successMessage);
 }
 
-export function fillGeoSourceTestSelect(selectedIndex) {
-  const select = document.getElementById("geo_source_test_select");
-  if (!select) return;
-  select.innerHTML = '<option value="">请选择在线源</option>';
-  state.geoSources.forEach((source, index) => {
-    const opt = document.createElement("option");
-    opt.value = String(index);
-    opt.textContent = source.name || `source-${index + 1}`;
-    select.appendChild(opt);
+export function openGeoOnlineSettings() {
+  openFormModal({
+    title: "在线定位配置",
+    schema: [
+      { key: "enabled", label: "启用在线定位", type: "switch", hint: "关闭后仅使用离线 MMDB 定位" },
+      { key: "online_cache_ttl_seconds", label: "在线定位缓存 TTL（秒）", type: "number", default: 120 },
+    ],
+    values: { enabled: Boolean(_geoConfig.enabled), online_cache_ttl_seconds: _geoConfig.online_cache_ttl_seconds ?? 120 },
+    onSave: async (out) => {
+      _geoConfig.enabled = Boolean(out.enabled);
+      _geoConfig.online_cache_ttl_seconds = Math.max(0, Number(out.online_cache_ttl_seconds ?? 120));
+      renderGeoCache();
+      await persistGeoSettings("在线定位配置已保存。");
+    },
   });
-  if (selectedIndex !== undefined && selectedIndex !== null) {
-    select.value = String(selectedIndex);
-  }
 }
 
-// ============ 日志管理 ============
+export function openGeoOfflineSettings() {
+  const off = _geoConfig.offline || {};
+  openFormModal({
+    title: "离线 MMDB 配置",
+    size: 640,
+    schema: [
+      { key: "enabled", label: "启用离线定位", type: "switch", hint: "在线定位失败时的兜底方案" },
+      { key: "db_path", label: "本地库路径", type: "text", placeholder: "./data/GeoLite2-City.mmdb" },
+      { key: "locale", label: "语言区域", type: "text", default: "zh-CN" },
+      { key: "download_url", label: "下载链接", type: "text" },
+      { key: "download_headers_json", label: "下载请求头 (JSON)", type: "json", default: "{}" },
+      { key: "refresh_interval_hours", label: "自动刷新间隔（小时）", type: "number", default: 24 },
+    ],
+    values: {
+      enabled: Boolean(off.enabled), db_path: off.db_path || "", locale: off.locale || "zh-CN",
+      download_url: off.download_url || "", download_headers_json: off.download_headers_json || "{}",
+      refresh_interval_hours: off.refresh_interval_hours ?? 24,
+    },
+    onSave: async (out) => {
+      _geoConfig.offline = {
+        enabled: Boolean(out.enabled), db_path: out.db_path || "", locale: out.locale || "zh-CN",
+        download_url: out.download_url || "", download_headers_json: out.download_headers_json || "{}",
+        refresh_interval_hours: Math.max(1, Number(out.refresh_interval_hours ?? 24)),
+      };
+      renderOfflineStatus(_geoConfig.offline);
+      await persistGeoSettings("离线定位配置已保存。");
+    },
+  });
+}
 
-export function renderRouteLogSettings(settings) {
-  state.routeLogSettings = settings;
-  setValue("log_retention_days", settings.retention_days ?? 30);
-  const container = document.getElementById("route-log-settings-status");
-  container.classList.remove("is-empty");
-  container.innerHTML = `
+function renderGeoTestResult(result, ip) {
+  const location = result.location || {};
+  const statusText = result.success ? "测试成功" : "测试失败";
+  const statusClass = result.success ? "success" : "failed";
+  const upstreamResponse = result.upstream_response || {};
+  const upstreamPayload = upstreamResponse.payload !== undefined ? upstreamResponse.payload : location.raw;
+  let rawJson = "";
+  if (upstreamPayload !== undefined && upstreamPayload !== null) {
+    const txt = typeof upstreamPayload === "string" ? upstreamPayload : (() => { try { return JSON.stringify(upstreamPayload, null, 2); } catch { return String(upstreamPayload); } })();
+    rawJson = `<details class="test-result-raw"><summary>查看接口原始返回</summary><pre>${esc(txt)}</pre></details>`;
+  }
+  return `
     <div class="test-result-head">
-      <div>
-        <h4>日志清理状态</h4>
-        <p class="test-result-message">当前保留策略为 ${escapeHtml(String(settings.retention_days ?? 30))} 天。</p>
-      </div>
-      <span class="status-pill success">已启用</span>
+      <div><h4 style="margin:0;font-size:14px">${statusText}</h4>
+        <p class="test-result-message">${esc(result.message || "-")}</p></div>
+      <span class="status-pill ${statusClass}">${statusText}</span>
     </div>
     <div class="result-grid">
-      <div class="result-item">
-        <strong>日志总数</strong>
-        <span>${escapeHtml(String(settings.total_logs ?? 0))}</span>
-      </div>
-      <div class="result-item">
-        <strong>最大保留天数</strong>
-        <span>${escapeHtml(String(settings.retention_days ?? 30))}</span>
-      </div>
-      <div class="result-item">
-        <strong>最近清理时间</strong>
-        <span>${escapeHtml(formatDateTime(settings.last_pruned_at || ""))}</span>
-      </div>
-      <div class="result-item">
-        <strong>设置更新时间</strong>
-        <span>${escapeHtml(formatDateTime(settings.updated_at || ""))}</span>
-      </div>
+      <div class="result-item"><strong>测试 IP</strong><span>${esc(ip)}</span></div>
+      <div class="result-item"><strong>定位来源</strong><span>${esc(result.provider || result.stage || "-")}</span></div>
+      <div class="result-item"><strong>国家</strong><span>${esc(location.country || "-")}</span></div>
+      <div class="result-item"><strong>地区</strong><span>${esc(location.region || "-")}</span></div>
+      <div class="result-item"><strong>城市</strong><span>${esc(location.city || "-")}</span></div>
+      <div class="result-item"><strong>区域汇总</strong><span>${esc(location.summary || location.full_text || "-")}</span></div>
     </div>
-  `;
+    ${rawJson}`;
+}
+
+function openTestModal({ title, placeholder, run }) {
+  const modalEl = document.getElementById("modal");
+  const mask = document.getElementById("modalMask");
+  if (!modalEl || !mask) return;
+  modalEl.style.width = "min(640px,100%)";
+  modalEl.innerHTML = `
+    <div class="modal-head"><div class="modal-title">${esc(title)}</div><button class="icon-btn" id="modalClose">✕</button></div>
+    <div class="modal-body">
+      <div class="form-field"><label>测试 IP</label><input class="input" id="testIp" placeholder="${esc(placeholder)}"></div>
+      <div id="testResult"></div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="modalCancel">关闭</button><button class="btn btn-primary" id="modalRun">运行测试</button></div>`;
+  mask.classList.add("open");
+  document.getElementById("modalClose").onclick = closeModal;
+  document.getElementById("modalCancel").onclick = closeModal;
+  document.getElementById("modalRun").onclick = async () => {
+    const ip = document.getElementById("testIp").value.trim();
+    const btn = document.getElementById("modalRun");
+    if (!ip) { showToast("请输入测试 IP", true); return; }
+    btn.disabled = true; btn.textContent = "测试中…";
+    document.getElementById("testResult").innerHTML = `<p class="test-result-placeholder">正在请求定位服务，请稍候…</p>`;
+    try {
+      const result = await run(ip);
+      document.getElementById("testResult").innerHTML = renderGeoTestResult(result, ip);
+    } catch (e) {
+      document.getElementById("testResult").innerHTML = `<p class="test-result-placeholder">${esc(e.message || "测试失败")}</p>`;
+    } finally {
+      btn.disabled = false; btn.textContent = "运行测试";
+    }
+  };
+  window.setTimeout(() => document.getElementById("testIp")?.focus(), 50);
+}
+
+export function openGeoSourceTest(index) {
+  const source = state.geoSources[index];
+  if (!source) return;
+  openTestModal({
+    title: `测试在线源：${source.name || `source-${index + 1}`}`,
+    placeholder: "例如 8.8.8.8",
+    run: (ip) => apiFetch("/_admin/api/geoip/test", { method: "POST", body: JSON.stringify({ ip, source }) }),
+  });
+}
+
+export function openOfflineTest() {
+  openTestModal({
+    title: "离线 MMDB 定位测试",
+    placeholder: "例如 8.8.8.8",
+    run: (ip) => apiFetch("/_admin/api/geoip/offline/test", { method: "POST", body: JSON.stringify({ ip, geoip: buildGeoSettingsPayload() }) }),
+  });
+}
+
+export async function syncOffline() {
+  const result = await apiFetch("/_admin/api/geoip/offline/sync", { method: "POST", body: JSON.stringify({ geoip: buildGeoSettingsPayload() }) });
+  await loadDashboard();
+  showToast(result.message || "离线 GeoIP 同步完成。");
+}
+
+export async function rollbackOffline() {
+  const result = await apiFetch("/_admin/api/geoip/offline/rollback", { method: "POST", body: JSON.stringify({}) });
+  await loadDashboard();
+  showToast(result.message || "离线 GeoIP 回滚完成。");
+}
+
+export async function clearGeoCache() {
+  const result = await apiFetch("/_admin/api/geoip/cache/clear", { method: "POST", body: JSON.stringify({}) });
+  showToast(result.message || "在线定位缓存已清空。");
+}
+
+// ============ 日志（请求日志 + 应用日志） ============
+
+export function renderRouteLogSettings(settings) {
+  state.routeLogSettings = settings || {};
+  const container = document.getElementById("route-log-settings-status");
+  if (container) {
+    container.innerHTML = `
+      <div class="result-grid">
+        <div class="result-item"><strong>日志总数</strong><span>${esc(String(settings.total_logs ?? 0))}</span></div>
+        <div class="result-item"><strong>最大保留天数</strong><span>${esc(String(settings.retention_days ?? 30))}</span></div>
+        <div class="result-item"><strong>最近清理时间</strong><span>${esc(formatDateTime(settings.last_pruned_at || ""))}</span></div>
+      </div>`;
+  }
 }
 
 export function renderRouteLogs(payload) {
@@ -1206,6 +1112,7 @@ export function renderRouteLogs(payload) {
   setText("route-log-total-count", `共 ${total} 条（${rangeText}）`);
 
   const container = document.getElementById("route-logs-list-body");
+  if (!container) return;
   container.innerHTML = "";
   setChecked("route-log-select-all", false);
 
@@ -1216,166 +1123,38 @@ export function renderRouteLogs(payload) {
   }
 
   state.routeLogs.forEach((log) => {
-    const requestMethod = escapeHtml(log.request_method || "-");
-    const requestPath = escapeHtml(log.request_path || "-");
-    const requestQuery = escapeHtml(log.request_query_string || "");
-    const requestHost = escapeHtml(formatRouteLogRequestHost(log.request_host || ""));
-    const originalClientIp = escapeHtml(log.original_client_ip || "-");
-    const clientIp = escapeHtml(log.client_ip || "-");
-    const pathPrefix = escapeHtml(log.path_prefix || "-");
-    const ruleName = escapeHtml(log.rule_name || "-");
-    const ruleRequestHost = escapeHtml(formatRouteLogRuleRequestHost(log.rule_request_host || ""));
-    const geoSummary = escapeHtml(log.geo_summary || "-");
-    const matchedRegion = escapeHtml(log.matched_region || "-");
-    const geoSource = escapeHtml(log.geo_source || "-");
-    const matchStrategy = escapeHtml(formatMatchStrategy(log.match_strategy));
-    const matchDetail = escapeHtml(formatMatchDetail(log.match_detail));
-    const matchedWhitelist = escapeHtml(log.matched_ip_whitelist || "-");
-    const configuredWhitelist = escapeHtml(log.configured_ip_whitelist || "-");
-    const configuredRegions = escapeHtml(log.configured_regions || "-");
-    const redirectLocation = escapeHtml(log.redirect_location || "");
-    const targetUrl = escapeHtml(log.target_url || "-");
-    const upstreamStatus = escapeHtml(String(log.upstream_status || 0));
-    const cacheStatusInfo = formatCacheStatus(log.cache_status);
-    const resultStatus = escapeHtml(formatResultStatus(log.result_status));
-    const durationText = escapeHtml(`${log.operation_duration_ms || 0} ms`);
-    const createdAt = escapeHtml(formatDateTime(log.created_at));
-    const banIp = escapeHtml(log.client_ip || log.original_client_ip || "-");
+    const banIp = log.client_ip || log.original_client_ip || "-";
     const ipBanned = banIp !== "-" && isIpBanned(banIp, state.bannedIps);
     const banButtonHtml = ipBanned
-      ? `<button class="table-btn unban-btn" data-action="unban-ip-from-log" data-ip="${banIp}" type="button" title="解禁IP: ${banIp}">解禁IP</button>`
-      : `<button class="table-btn ban-btn" data-action="ban-ip-from-log" data-ip="${banIp}" type="button" title="封禁IP: ${banIp}">封禁IP</button>`;
-
+      ? `<button class="btn btn-sm" data-action="unban-ip-from-log" data-ip="${esc(banIp)}">解禁IP</button>`
+      : `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(banIp)}">封禁IP</button>`;
+    const cacheStatusInfo = formatCacheStatus(log.cache_status);
     const card = document.createElement("article");
     card.className = "route-log-item";
     card.innerHTML = `
       <div class="route-log-item-main">
-        <div class="route-log-item-check">
-          <input class="route-log-checkbox" data-id="${log.id}" type="checkbox" />
-        </div>
+        <div class="route-log-item-check"><input class="route-log-checkbox" data-id="${log.id}" type="checkbox"></div>
         <div class="route-log-item-body">
           <div class="route-log-item-header">
-            <div class="route-log-item-time">
-              <strong>${createdAt}</strong>
-              <span class="route-log-duration">${durationText}</span>
-            </div>
-            <div class="route-log-item-actions">
-              ${banButtonHtml}
-              <button class="table-btn delete" data-action="delete-route-log" data-id="${log.id}" type="button">删除</button>
-            </div>
+            <div class="route-log-item-time"><strong>${esc(formatDateTime(log.created_at))}</strong><span class="route-log-duration">${esc(`${log.operation_duration_ms || 0} ms`)}</span></div>
+            <div class="route-log-item-actions">${banButtonHtml}<button class="btn btn-sm btn-danger" data-action="delete-route-log" data-id="${log.id}">删除</button></div>
           </div>
           <div class="route-log-item-fields">
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">请求</span>
-                <div class="route-log-field-value">
-                  <strong>${requestMethod}</strong>
-                  <span class="route-log-path" title="${requestPath}">${requestPath}</span>
-                  ${requestQuery ? `<span class="route-log-query hint" title="${requestQuery}">?${requestQuery}</span>` : ""}
-                </div>
-              </div>
-              <div class="route-log-field">
-                <span class="route-log-field-label">域名</span>
-                <div class="route-log-field-value"><span>${requestHost}</span></div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">前缀</span>
-                <div class="route-log-field-value"><strong>${pathPrefix}</strong></div>
-              </div>
-              <div class="route-log-field">
-                <span class="route-log-field-label">规则</span>
-                <div class="route-log-field-value"><span>${ruleName}</span></div>
-              </div>
-              <div class="route-log-field">
-                <span class="route-log-field-label">命中域名规则</span>
-                <div class="route-log-field-value"><span>${ruleRequestHost}</span></div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">地区</span>
-                <div class="route-log-field-value">
-                  <strong>${geoSummary}</strong>
-                  <span class="hint">命中: ${matchedRegion}</span>
-                  <span class="hint">源: ${geoSource}</span>
-                </div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">匹配</span>
-                <div class="route-log-field-value">
-                  <strong>${matchStrategy}</strong>
-                  <span class="hint">${matchDetail}</span>
-                  <span class="hint">命中白名单: ${matchedWhitelist}</span>
-                  <span class="hint">规则白名单: ${configuredWhitelist}</span>
-                  <span class="hint">规则地区: ${configuredRegions}</span>
-                </div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">302地址</span>
-                <div class="route-log-field-value">
-                  <strong class="route-log-target-url" title="${redirectLocation}">${redirectLocation || "-"}</strong>
-                </div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">转发结果</span>
-                <div class="route-log-field-value">
-                  <strong class="route-log-target-url" title="${targetUrl}">${targetUrl}</strong>
-                  <span class="hint">上游状态: ${upstreamStatus}</span>
-                  <span class="cache-status-badge ${cacheStatusInfo.cls}">缓存命中：${cacheStatusInfo.text}</span>
-                  <span class="hint">结果: ${resultStatus}</span>
-                </div>
-              </div>
-            </div>
-            <div class="route-log-field-group">
-              <div class="route-log-field">
-                <span class="route-log-field-label">IP</span>
-                <div class="route-log-field-value">
-                  <span>原始: ${originalClientIp}</span>
-                  <span>匹配: ${clientIp}</span>
-                </div>
-              </div>
-            </div>
+            <div class="route-log-field"><span class="route-log-field-label">请求</span><div class="route-log-field-value"><strong>${esc(log.request_method || "-")}</strong><span class="route-log-path" title="${esc(log.request_path || "")}">${esc(log.request_path || "-")}</span>${log.request_query_string ? `<span class="route-log-query" title="${esc(log.request_query_string)}">?${esc(log.request_query_string)}</span>` : ""}</div></div>
+            <div class="route-log-field"><span class="route-log-field-label">域名</span><div class="route-log-field-value"><span>${esc(formatRouteLogRequestHost(log.request_host || ""))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">前缀</span><div class="route-log-field-value"><strong>${esc(log.path_prefix || "-")}</strong></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">规则</span><div class="route-log-field-value"><span>${esc(log.rule_name || "-")}</span><span class="hint">命中域名: ${esc(formatRouteLogRuleRequestHost(log.rule_request_host || ""))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">地区</span><div class="route-log-field-value"><strong>${esc(log.geo_summary || "-")}</strong><span class="hint">命中: ${esc(log.matched_region || "-")}</span><span class="hint">源: ${esc(log.geo_source || "-")}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">匹配</span><div class="route-log-field-value"><strong>${esc(formatMatchStrategy(log.match_strategy))}</strong><span class="hint">${esc(formatMatchDetail(log.match_detail))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.redirect_location || "")}">${esc(log.redirect_location || "-")}</strong></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
           </div>
         </div>
-      </div>
-    `;
+      </div>`;
     container.appendChild(card);
   });
   renderPagination(state.logCurrentPage, state.logTotalPages, "log-pagination", goToPage);
-}
-
-export function ensureRouteLogFilterFields() {
-  const keywordInput = document.getElementById("log_keyword");
-  if (keywordInput) {
-    keywordInput.placeholder = "路径、域名、目标地址、302地址、地区、IP、原始IP";
-  }
-
-  const filtersContainer = document.querySelector("#route-log-filter-form .two-col");
-  if (!filtersContainer || document.getElementById("log_rule_request_host")) {
-    return;
-  }
-
-  const label = document.createElement("label");
-  label.innerHTML = `
-    <span>命中域名规则</span>
-    <input id="log_rule_request_host" type="text" placeholder="example.com（输入 * 查询通配规则）" />
-  `;
-
-  const pathPrefixInput = document.getElementById("log_path_prefix");
-  const anchorLabel = pathPrefixInput ? pathPrefixInput.closest("label") : null;
-  if (anchorLabel && anchorLabel.nextSibling) {
-    filtersContainer.insertBefore(label, anchorLabel.nextSibling);
-  } else {
-    filtersContainer.appendChild(label);
-  }
 }
 
 export function collectRouteLogFilters() {
@@ -1392,12 +1171,10 @@ export function collectRouteLogFilters() {
   };
 }
 
-export function buildRouteLogQuery(filters) {
+function buildRouteLogQuery(filters) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (value === "" || value === null || value === undefined) {
-      return;
-    }
+    if (value === "" || value === null || value === undefined) return;
     params.set(key, String(value));
   });
   return params.toString();
@@ -1409,8 +1186,7 @@ export async function loadRouteLogSettings() {
 }
 
 export async function loadRouteLogs() {
-  const filters = collectRouteLogFilters();
-  const query = buildRouteLogQuery(filters);
+  const query = buildRouteLogQuery(collectRouteLogFilters());
   const [payload, bansData] = await Promise.all([
     apiFetch(`/_admin/api/logs${query ? `?${query}` : ""}`),
     apiFetch("/_admin/api/banned-ips").catch(() => ({ items: [] })),
@@ -1429,64 +1205,55 @@ export async function goToPage(page, totalPages) {
   await loadRouteLogs();
 }
 
-// ============ 自动刷新（日志） ============
+export async function saveLogRetention() {
+  const days = getNonNegativeIntValue("log_retention_days", 30);
+  await apiFetch("/_admin/api/log-settings", { method: "PUT", body: JSON.stringify({ retention_days: days }) });
+  await refreshRouteLogModule();
+  showToast("日志保留策略已保存。");
+}
+
+export async function cleanupLogs() {
+  const result = await apiFetch("/_admin/api/log-cleanup", { method: "POST" });
+  showToast(`清理完成，删除了 ${result.deleted_count} 条过期日志记录。`);
+  await refreshRouteLogModule();
+}
+
+// ---- 自动刷新（请求日志） ----
 
 let _autoRefreshTimer = null;
 const AUTO_REFRESH_STORAGE_KEY = "log_auto_refresh";
 
 export function getAutoRefreshConfig() {
-  try {
-    const raw = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (e) {}
+  try { const raw = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY); if (raw) return JSON.parse(raw); } catch (_) {}
   return { enabled: false, interval: 5 };
 }
-
-export function saveAutoRefreshConfig(cfg) {
-  localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg));
-}
+export function saveAutoRefreshConfig(cfg) { localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg)); }
 
 function updateAutoRefreshStatusUI() {
   const el = document.getElementById("log_auto_refresh_status");
   if (!el) return;
-  if (_autoRefreshTimer !== null) {
-    el.textContent = "●";
-    el.className = "auto-refresh-status running";
-  } else {
-    el.textContent = "";
-    el.className = "auto-refresh-status stopped";
-  }
+  if (_autoRefreshTimer !== null) { el.textContent = "●"; el.className = "auto-refresh-status running"; }
+  else { el.textContent = ""; el.className = "auto-refresh-status stopped"; }
 }
 
 export function stopAutoRefresh() {
-  if (_autoRefreshTimer !== null) {
-    clearInterval(_autoRefreshTimer);
-    _autoRefreshTimer = null;
-  }
+  if (_autoRefreshTimer !== null) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
   updateAutoRefreshStatusUI();
 }
 
 export function startAutoRefresh() {
   stopAutoRefresh();
-  const enabled = getChecked("log_auto_refresh_enabled");
-  if (!enabled) return;
+  if (!getChecked("log_auto_refresh_enabled")) return;
   const interval = Math.max(1, parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5);
   saveAutoRefreshConfig({ enabled: true, interval });
   _autoRefreshTimer = setInterval(() => {
-    if (state.activeModule !== "logs") {
-      stopAutoRefresh();
-      return;
-    }
-    loadRouteLogs().catch((error) => {
-      showToast(error.message, true);
-      stopAutoRefresh();
-      setChecked("log_auto_refresh_enabled", false);
-    });
+    if (state.activeModule !== "logs") { stopAutoRefresh(); return; }
+    loadRouteLogs().catch((e) => { showToast(e.message, true); stopAutoRefresh(); setChecked("log_auto_refresh_enabled", false); });
   }, interval * 1000);
   updateAutoRefreshStatusUI();
 }
 
-// ============ 应用日志 ============
+// ---- 应用日志 ----
 
 let _appLogAutoRefreshTimer = null;
 const APP_LOG_MAX_DOM_NODES = 600;
@@ -1494,50 +1261,34 @@ const APP_LOG_MAX_DOM_NODES = 600;
 export function highlightLogLine(line) {
   if (!line) return line;
   let safe = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  safe = safe.replace(
-    /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/,
-    '<span class="log-ts">$1</span>',
-  );
-  safe = safe.replace(
-    /\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/g,
-    '<span class="log-level-$1">$1</span>',
-  );
-  safe = safe.replace(
-    /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\/\S*)\s+(\d{3})\s+([\d.]+ms)\b/g,
-    '<span class="log-method">$1</span> $2 <span class="log-status-$3">$3</span> <span class="log-duration">$4</span>',
-  );
+  safe = safe.replace(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\.]?\d*)/, '<span class="log-ts">$1</span>');
+  safe = safe.replace(/\b(INFO|DEBUG|WARNING|ERROR|CRITICAL)\b/g, '<span class="log-level-$1">$1</span>');
+  safe = safe.replace(/\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\/\S*)\s+(\d{3})\s+([\d.]+ms)\b/g, '<span class="log-method">$1</span> $2 <span class="log-status-$3">$3</span> <span class="log-duration">$4</span>');
   return safe;
 }
 
 export async function loadAppLogFiles() {
   const data = await apiFetch("/_admin/api/app-logs");
   if (!data) return;
-  const select = document.getElementById("app-log-file-select");
-  if (!select) return;
-  const prev = select.value || state.appLogFile;
-  select.innerHTML = "";
+  const container = document.getElementById("appLogFiles");
+  const nameEl = document.getElementById("appLogName");
+  if (!container) return;
   const files = data.items || [];
   if (!files.length) {
-    select.innerHTML = '<option value="">暂无日志文件</option>';
+    container.innerHTML = `<div class="empty">暂无日志文件</div>`;
+    if (nameEl) nameEl.textContent = "—";
     return;
   }
-  files.forEach((file) => {
-    const opt = document.createElement("option");
-    opt.value = file.name;
-    const sizeText = file.size >= 1024 * 1024
-      ? (file.size / 1024 / 1024).toFixed(1) + " MB"
-      : file.size >= 1024
-        ? (file.size / 1024).toFixed(1) + " KB"
-        : file.size + " B";
-    opt.textContent = file.name + " (" + sizeText + ")";
-    opt.selected = file.name === (prev || data.current);
-    select.appendChild(opt);
-  });
-  const selected = select.value || data.current || files[0].name;
-  if (state.appLogFile !== selected) {
-    state.appLogFile = selected;
-    loadAppLogContent();
-  }
+  const prev = state.appLogFile || data.current || files[0].name;
+  state.appLogFile = prev;
+  if (nameEl) nameEl.textContent = prev;
+  container.innerHTML = files.map((f) => `
+    <div class="file-item ${f.name === prev ? "current" : ""}" data-action="select-log-file" data-file="${esc(f.name)}">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</span>
+      <span class="fsize">${esc(formatBytes(f.size))}</span>
+    </div>`).join("");
+  loadAppLogContent().catch(() => {});
 }
 
 export async function loadAppLogContent(isAutoRefresh = false) {
@@ -1545,12 +1296,10 @@ export async function loadAppLogContent(isAutoRefresh = false) {
   if (state.appLogFile) params.set("file", state.appLogFile);
   const keyword = (getValue("app-log-keyword") || "").trim();
   if (keyword) params.set("keyword", keyword);
-  const tailLines = getValue("app-log-tail-lines") || "100";
-  params.set("tail", tailLines);
+  params.set("tail", getValue("app-log-tail-lines") || "100");
 
-  const contentEl = document.getElementById("app-log-content");
+  const contentEl = document.getElementById("appLogContent");
   if (!contentEl) return;
-
   const data = await apiFetch(`/_admin/api/app-logs/content?${params.toString()}`);
   if (!data) return;
 
@@ -1572,29 +1321,26 @@ export async function loadAppLogContent(isAutoRefresh = false) {
     const appendCount = Math.min(newTotal - prevTotal, lines.length);
     const newLines = lines.slice(lines.length - appendCount);
     const fragment = document.createDocumentFragment();
-    for (let i = 0; i < newLines.length; i++) {
-      if (!newLines[i]) continue;
+    for (const line of newLines) {
+      if (!line) continue;
       const span = document.createElement("span");
-      span.innerHTML = highlightLogLine(newLines[i]);
+      span.innerHTML = highlightLogLine(line);
       fragment.appendChild(document.createElement("br"));
       fragment.appendChild(span);
     }
     contentEl.appendChild(fragment);
     state.logLastLineCount = newTotal;
-
-    const allChildren = contentEl.childNodes;
-    while (allChildren.length > APP_LOG_MAX_DOM_NODES) {
-      contentEl.removeChild(allChildren[0]);
-    }
+    let childNodes = contentEl.childNodes;
+    while (childNodes.length > APP_LOG_MAX_DOM_NODES) contentEl.removeChild(childNodes[0]);
   } else {
     const fragment = document.createDocumentFragment();
-    for (let i = 0; i < lines.length; i++) {
-      if (!lines[i]) continue;
+    lines.forEach((line, i) => {
+      if (!line) return;
       if (fragment.childNodes.length > 0) fragment.appendChild(document.createElement("br"));
       const span = document.createElement("span");
-      span.innerHTML = highlightLogLine(lines[i]);
+      span.innerHTML = highlightLogLine(line);
       fragment.appendChild(span);
-    }
+    });
     contentEl.innerHTML = "";
     contentEl.appendChild(fragment);
     state.logLastLineCount = newTotal;
@@ -1603,34 +1349,22 @@ export async function loadAppLogContent(isAutoRefresh = false) {
   if (fileInfoEl) fileInfoEl.textContent = `文件: ${data.file || state.appLogFile || "-"}`;
   if (lineInfoEl) {
     const matched = data.matched_lines != null ? data.matched_lines : data.total_lines;
-    lineInfoEl.textContent = keyword
-      ? `匹配: ${matched} / 总计: ${data.total_lines} 行`
-      : `共 ${data.total_lines} 行`;
+    lineInfoEl.textContent = keyword ? `匹配: ${matched} / 总计: ${data.total_lines} 行` : `共 ${data.total_lines} 行`;
   }
-
-  if (state.logAutoScroll) {
-    contentEl.scrollTop = contentEl.scrollHeight;
-  }
+  if (state.logAutoScroll) contentEl.scrollTop = contentEl.scrollHeight;
 }
 
 export function startAppLogAutoRefresh() {
   stopAppLogAutoRefresh();
   if (!getChecked("app-log-auto-refresh")) return;
   _appLogAutoRefreshTimer = setInterval(() => {
-    if (state.activeModule !== "app-logs") {
-      stopAppLogAutoRefresh();
-      return;
-    }
+    if (state.activeModule !== "logs") { stopAppLogAutoRefresh(); return; }
     if (!state.logAutoScroll) return;
     loadAppLogContent(true).catch(() => {});
   }, 3000);
 }
-
 export function stopAppLogAutoRefresh() {
-  if (_appLogAutoRefreshTimer !== null) {
-    clearInterval(_appLogAutoRefreshTimer);
-    _appLogAutoRefreshTimer = null;
-  }
+  if (_appLogAutoRefreshTimer !== null) { clearInterval(_appLogAutoRefreshTimer); _appLogAutoRefreshTimer = null; }
 }
 
 export async function refreshAppLogModule() {
@@ -1639,7 +1373,7 @@ export async function refreshAppLogModule() {
 }
 
 export function initLogScrollDetection() {
-  const contentEl = document.getElementById("app-log-content");
+  const contentEl = document.getElementById("appLogContent");
   if (!contentEl || contentEl._scrollListenerAdded) return;
   contentEl._scrollListenerAdded = true;
   let scrollTimer = null;
@@ -1653,7 +1387,13 @@ export function initLogScrollDetection() {
   });
 }
 
-// ============ IP 缓存管理 ============
+export async function cleanupAppLogFiles() {
+  const result = await apiFetch("/_admin/api/log-file-cleanup", { method: "POST" });
+  showToast(`清理完成，删除了 ${result.deleted_count} 个过期日志文件。`);
+  await refreshAppLogModule();
+}
+
+// ============ 请求结果缓存（ip_result_cache） ============
 
 export async function loadIpCacheSettings() {
   try {
@@ -1662,29 +1402,153 @@ export async function loadIpCacheSettings() {
       setValue("ip_cache_enabled", data.enabled ? "1" : "0");
       setValue("ip_cache_ttl_seconds", String(data.ttl_seconds || 300));
       setValue("ip_cache_max_entries", String(data.max_entries || 5000));
+      renderIpCacheSettings(data);
     }
-  } catch (error) {}
+  } catch (_) {}
+}
+
+function renderIpCacheSettings(data) {
+  const pill = document.getElementById("ipCachePill");
+  if (pill) {
+    pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral");
+    pill.textContent = data.enabled ? "启用" : "停用";
+  }
+  const body = document.getElementById("ipCacheBody");
+  if (body) {
+    body.innerHTML = `
+      <div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "已启用" : "已禁用"}</div></div>
+      <div class="kv"><div class="k">TTL</div><div class="val">${esc(String(data.ttl_seconds || 300))} 秒</div></div>
+      <div class="kv"><div class="k">最大条目</div><div class="val">${esc(String(data.max_entries || 5000))}</div></div>`;
+  }
 }
 
 export async function loadIpCacheStats() {
   try {
     const stats = await apiFetch("/_admin/api/ip-cache/stats");
-    const el = document.getElementById("ip-cache-stats");
-    if (!el || !stats) return;
-    el.className = "test-result-card";
-    el.innerHTML = `
-      <div class="test-result-row"><span>状态</span><span>${stats.enabled ? "已启用" : "已禁用"}</span></div>
-      <div class="test-result-row"><span>当前条目</span><span>${stats.current_entries}</span></div>
-      <div class="test-result-row"><span>命中次数</span><span>${stats.hits}</span></div>
-      <div class="test-result-row"><span>未命中次数</span><span>${stats.misses}</span></div>
-      <div class="test-result-row"><span>命中率</span><span>${stats.hit_rate}</span></div>
-      <div class="test-result-row"><span>TTL</span><span>${stats.ttl_seconds}秒</span></div>
-      <div class="test-result-row"><span>最大条目</span><span>${stats.max_entries}</span></div>
-    `;
-  } catch (error) {}
+    const body = document.getElementById("ipCacheBody");
+    if (!body || !stats) return;
+    body.innerHTML += `
+      <div class="kv"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
+      <div class="kv"><div class="k">命中 / 未命中</div><div class="val">${esc(String(stats.hits))} / ${esc(String(stats.misses))}</div></div>
+      <div class="kv"><div class="k">命中率</div><div class="val">${esc(String(stats.hit_rate))}</div></div>`;
+  } catch (_) {}
 }
 
-// ============ 自动封禁配置 ============
+export function openIpCacheSettings() {
+  openFormModal({
+    title: "请求结果缓存配置",
+    schema: [
+      { key: "enabled", label: "启用请求结果缓存", type: "switch", hint: "缓存 IP 对应的转发结果，命中后跳过定位与规则匹配" },
+      { key: "ttl_seconds", label: "TTL（秒）", type: "number", default: 300 },
+      { key: "max_entries", label: "最大条目", type: "number", default: 5000 },
+    ],
+    values: {
+      enabled: getValue("ip_cache_enabled") === "1",
+      ttl_seconds: Number(getValue("ip_cache_ttl_seconds") || 300),
+      max_entries: Number(getValue("ip_cache_max_entries") || 5000),
+    },
+    onSave: async (out) => {
+      await apiFetch("/_admin/api/ip-cache-settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          ttl_seconds: Number(out.ttl_seconds ?? 300),
+          max_entries: Number(out.max_entries ?? 5000),
+        }),
+      });
+      await loadIpCacheSettings();
+      showToast("请求结果缓存配置已保存。");
+    },
+  });
+}
+
+export async function clearIpCache() {
+  openConfirm({
+    title: "清空请求结果缓存",
+    message: "确认清空所有请求结果缓存吗？",
+    onOk: async () => {
+      try {
+        const data = await apiFetch("/_admin/api/ip-cache/clear", { method: "POST" });
+        showToast(data.message || "缓存已清空");
+        loadIpCacheStats();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
+// ============ 请求去重（request_dedup） ============
+
+export async function loadDedupSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/dedup-settings");
+    if (data) {
+      setValue("dedup_enabled", data.enabled ? "1" : "0");
+      setValue("dedup_window_seconds", String(data.window_seconds ?? 2.0));
+      setValue("dedup_max_cache_entries", String(data.max_cache_entries ?? 10000));
+      const pill = document.getElementById("dedupPill");
+      if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "启用" : "停用"; }
+    }
+  } catch (_) {}
+  loadDedupStats();
+}
+
+export async function loadDedupStats() {
+  try {
+    const stats = await apiFetch("/_admin/api/dedup/stats");
+    const body = document.getElementById("dedupBody");
+    if (!body || !stats) return;
+    body.innerHTML = `
+      <div class="kv"><div class="k">状态</div><div class="val">${stats.enabled ? "已启用" : "已禁用"}</div></div>
+      <div class="kv"><div class="k">窗口时长</div><div class="val">${esc(String(stats.window_seconds))} 秒</div></div>
+      <div class="kv"><div class="k">最大条目</div><div class="val">${esc(String(stats.max_cache_entries))}</div></div>
+      <div class="kv"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
+      <div class="kv"><div class="k">累计命中</div><div class="val">${esc(String(stats.total_hits))}</div></div>`;
+  } catch (_) {}
+}
+
+export function openDedupSettings() {
+  openFormModal({
+    title: "请求去重配置",
+    schema: [
+      { key: "enabled", label: "启用请求去重", type: "switch", hint: "短时间窗口内相同的请求直接返回上次结果，降低后端压力" },
+      { key: "window_seconds", label: "去重窗口（秒）", type: "number", default: 2.0 },
+      { key: "max_cache_entries", label: "最大缓存条目", type: "number", default: 10000 },
+    ],
+    values: {
+      enabled: getValue("dedup_enabled") === "1",
+      window_seconds: Number(getValue("dedup_window_seconds") || 2.0),
+      max_cache_entries: Number(getValue("dedup_max_cache_entries") || 10000),
+    },
+    onSave: async (out) => {
+      await apiFetch("/_admin/api/dedup-settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          window_seconds: Number(out.window_seconds ?? 2.0),
+          max_cache_entries: Number(out.max_cache_entries ?? 10000),
+        }),
+      });
+      await loadDedupSettings();
+      showToast("请求去重配置已保存。");
+    },
+  });
+}
+
+export async function clearDedupCache() {
+  openConfirm({
+    title: "清空请求去重缓存",
+    message: "确认清空请求去重缓存吗？",
+    onOk: async () => {
+      try {
+        const data = await apiFetch("/_admin/api/dedup/clear", { method: "POST" });
+        showToast(data.message || "已清除请求去重缓存");
+        loadDedupStats();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
+// ============ 自动封禁 ============
 
 export async function loadAutoBanSettings() {
   try {
@@ -1698,24 +1562,70 @@ export async function loadAutoBanSettings() {
       setValue("auto_ban_auto_ban_on_404", data.auto_ban_on_404 ? "1" : "0");
       setValue("auto_ban_whitelist", data.whitelist || "");
       setValue("auto_ban_email_on_ban", data.email_on_ban ? "1" : "0");
+      const pill = document.getElementById("autoBanStatusPill");
+      if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "已启用" : "已停用"; }
     }
-  } catch (error) {}
+  } catch (_) {}
 }
 
 export async function loadAutoBanStats() {
   try {
     const stats = await apiFetch("/_admin/api/auto-ban/stats");
-    if (stats) {
-      document.getElementById("auto-ban-status").textContent = stats.enabled ? "已启用" : "已禁用";
-      document.getElementById("auto-ban-tracked-count").textContent = stats.tracked_ips || 0;
-      document.getElementById("auto-ban-whitelist-count").textContent = stats.whitelisted_ips || 0;
-      document.getElementById("auto-ban-total-requests").textContent = stats.total_requests || 0;
-      document.getElementById("auto-ban-total-bans").textContent = stats.total_bans || 0;
-    }
-  } catch (error) {}
+    const body = document.getElementById("autoBanStatsBody");
+    if (!body || !stats) return;
+    body.innerHTML = `
+      <div class="kv"><div class="k">跟踪 IP 数</div><div class="val">${esc(String(stats.tracked_ips ?? 0))}</div></div>
+      <div class="kv"><div class="k">白名单 IP 数</div><div class="val">${esc(String(stats.whitelisted_ips ?? 0))}</div></div>
+      <div class="kv"><div class="k">总请求数</div><div class="val">${esc(String(stats.total_requests ?? 0))}</div></div>
+      <div class="kv"><div class="k">累计封禁</div><div class="val">${esc(String(stats.total_bans ?? 0))}</div></div>`;
+  } catch (_) {}
 }
 
-// ============ 邮件配置 ============
+export function openAutoBanSettings() {
+  openFormModal({
+    title: "自动封禁策略",
+    size: 640,
+    schema: [
+      { key: "enabled", label: "启用自动封禁", type: "switch" },
+      { key: "window_seconds", label: "统计窗口（秒）", type: "number", default: 60 },
+      { key: "max_requests", label: "窗口内最大请求数", type: "number", default: 100 },
+      { key: "ban_duration_seconds", label: "封禁时长（秒）", type: "number", default: 3600 },
+      { key: "max_404", label: "窗口内最大 404 数", type: "number", default: 20 },
+      { key: "auto_ban_on_404", label: "对 404 自动封禁", type: "switch" },
+      { key: "whitelist", label: "白名单（逗号分隔）", type: "text", placeholder: "1.2.3.4, 5.6.7.8" },
+      { key: "email_on_ban", label: "封禁时发送邮件提醒", type: "switch" },
+    ],
+    values: {
+      enabled: getValue("auto_ban_enabled") === "1",
+      window_seconds: Number(getValue("auto_ban_window_seconds") || 60),
+      max_requests: Number(getValue("auto_ban_max_requests") || 100),
+      ban_duration_seconds: Number(getValue("auto_ban_ban_duration_seconds") || 3600),
+      max_404: Number(getValue("auto_ban_max_404") || 20),
+      auto_ban_on_404: getValue("auto_ban_auto_ban_on_404") === "1",
+      whitelist: getValue("auto_ban_whitelist") || "",
+      email_on_ban: getValue("auto_ban_email_on_ban") === "1",
+    },
+    onSave: async (out) => {
+      await apiFetch("/_admin/api/auto-ban", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          window_seconds: Number(out.window_seconds ?? 60),
+          max_requests: Number(out.max_requests ?? 100),
+          ban_duration_seconds: Number(out.ban_duration_seconds ?? 3600),
+          max_404: Number(out.max_404 ?? 20),
+          auto_ban_on_404: Boolean(out.auto_ban_on_404),
+          whitelist: out.whitelist || "",
+          email_on_ban: Boolean(out.email_on_ban),
+        }),
+      });
+      await Promise.all([loadAutoBanSettings(), loadAutoBanStats()]);
+      showToast("自动封禁配置已保存。");
+    },
+  });
+}
+
+// ============ 邮件提醒 ============
 
 export async function loadEmailSettings() {
   try {
@@ -1734,8 +1644,89 @@ export async function loadEmailSettings() {
       setValue("email_alert_max_requests", String(data.alert_max_requests || 80));
       setValue("email_alert_max_404", String(data.alert_max_404 || 15));
       setValue("email_alert_cooldown_minutes", String(data.alert_cooldown_minutes || 30));
+      const pill = document.getElementById("emailStatusPill");
+      const body = document.getElementById("emailSummaryBody");
+      if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "已配置" : "未配置"; }
+      if (body) {
+        body.innerHTML = `
+          <div class="kv"><div class="k">SMTP 主机</div><div class="val">${esc(data.smtp_host || "-")}</div></div>
+          <div class="kv"><div class="k">发件人</div><div class="val">${esc(data.sender || "-")}</div></div>
+          <div class="kv"><div class="k">收件人</div><div class="val">${esc(data.recipients || "-")}</div></div>`;
+      }
     }
-  } catch (error) {}
+  } catch (_) {}
+}
+
+export function openEmailSettings() {
+  openFormModal({
+    title: "邮件提醒配置",
+    size: 680,
+    schema: [
+      { key: "enabled", label: "启用邮件提醒", type: "switch" },
+      { key: "smtp_host", label: "SMTP 主机", type: "text", placeholder: "smtp.example.com" },
+      { key: "smtp_port", label: "SMTP 端口", type: "number", default: 465 },
+      { key: "smtp_ssl", label: "使用 SSL", type: "switch" },
+      { key: "sender", label: "发件邮箱", type: "text" },
+      { key: "sender_name", label: "发件人名称", type: "text" },
+      { key: "password", label: "密码/授权码", type: "password", hint: "留空表示不修改" },
+      { key: "recipients", label: "收件人（逗号分隔）", type: "text" },
+      { key: "block_link_base_url", label: "封禁确认页基础 URL", type: "text" },
+      { key: "alert_window_seconds", label: "告警窗口（秒）", type: "number", default: 60 },
+      { key: "alert_max_requests", label: "窗口内最大请求", type: "number", default: 80 },
+      { key: "alert_max_404", label: "窗口内最大 404", type: "number", default: 15 },
+      { key: "alert_cooldown_minutes", label: "告警冷却（分钟）", type: "number", default: 30 },
+    ],
+    values: {
+      enabled: getValue("email_enabled") === "1",
+      smtp_host: getValue("email_smtp_host"), smtp_port: Number(getValue("email_smtp_port") || 465),
+      smtp_ssl: getValue("email_smtp_ssl") === "1", sender: getValue("email_sender"),
+      sender_name: getValue("email_sender_name"), password: "", recipients: getValue("email_recipients"),
+      block_link_base_url: getValue("email_block_link_base_url"),
+      alert_window_seconds: Number(getValue("email_alert_window_seconds") || 60),
+      alert_max_requests: Number(getValue("email_alert_max_requests") || 80),
+      alert_max_404: Number(getValue("email_alert_max_404") || 15),
+      alert_cooldown_minutes: Number(getValue("email_alert_cooldown_minutes") || 30),
+    },
+    onSave: async (out) => {
+      const payload = {
+        enabled: Boolean(out.enabled),
+        smtp_host: out.smtp_host || "",
+        smtp_port: Number(out.smtp_port ?? 465),
+        smtp_ssl: Boolean(out.smtp_ssl),
+        sender: out.sender || "",
+        sender_name: out.sender_name || "",
+        recipients: out.recipients || "",
+        block_link_base_url: out.block_link_base_url || "",
+        alert_window_seconds: Number(out.alert_window_seconds ?? 60),
+        alert_max_requests: Number(out.alert_max_requests ?? 80),
+        alert_max_404: Number(out.alert_max_404 ?? 15),
+        alert_cooldown_minutes: Number(out.alert_cooldown_minutes ?? 30),
+      };
+      if (out.password) payload.password = out.password;
+      await apiFetch("/_admin/api/email", { method: "PUT", body: JSON.stringify(payload) });
+      await loadEmailSettings();
+      showToast("邮件提醒配置已保存。");
+    },
+  });
+}
+
+export async function testEmail() {
+  try {
+    const result = await apiFetch("/_admin/api/email/test", {
+      method: "POST",
+      body: JSON.stringify({
+        smtp_host: getValue("email_smtp_host") || "",
+        smtp_port: Number(getValue("email_smtp_port") || 465),
+        smtp_ssl: getValue("email_smtp_ssl") === "1",
+        sender: getValue("email_sender") || "",
+        sender_name: getValue("email_sender_name") || "",
+        password: getValue("email_password") || "",
+        recipients: getValue("email_recipients") || "",
+        template_type: "alert",
+      }),
+    });
+    showToast(result.message, !result.success);
+  } catch (e) { showToast(e.message, true); }
 }
 
 // ============ 封禁管理 ============
@@ -1748,34 +1739,19 @@ export function isValidIpOrCidr(str) {
     if (parts.length !== 2) return false;
     const prefix = parseInt(parts[1], 10);
     if (isNaN(prefix) || prefix < 0 || prefix > 128) return false;
-    try {
-      const ipPart = parts[0];
-      if (ipPart.includes(":")) {
-        return prefix <= 128;
-      } else {
-        if (prefix > 32) return false;
-        const octets = ipPart.split(".");
-        if (octets.length !== 4) return false;
-        return octets.every((oct) => {
-          const n = parseInt(oct, 10);
-          return !isNaN(n) && n >= 0 && n <= 255;
-        });
-      }
-    } catch {
-      return false;
-    }
+    const ipPart = parts[0];
+    if (ipPart.includes(":")) return prefix <= 128;
+    if (prefix > 32) return false;
+    const octets = ipPart.split(".");
+    if (octets.length !== 4) return false;
+    return octets.every((o) => { const n = parseInt(o, 10); return !isNaN(n) && n >= 0 && n <= 255; });
   }
   if (s.includes(".")) {
     const octets = s.split(".");
     if (octets.length !== 4) return false;
-    return octets.every((oct) => {
-      const n = parseInt(oct, 10);
-      return !isNaN(n) && n >= 0 && n <= 255;
-    });
+    return octets.every((o) => { const n = parseInt(o, 10); return !isNaN(n) && n >= 0 && n <= 255; });
   }
-  if (s.includes(":")) {
-    return s.split(":").length >= 2;
-  }
+  if (s.includes(":")) return s.split(":").length >= 2;
   return false;
 }
 
@@ -1783,14 +1759,12 @@ export function isIpBanned(ip, bannedList) {
   if (!ip || ip === "-" || !bannedList || !bannedList.length) return false;
   if (bannedList.some((b) => b.ip === ip)) return true;
   for (const b of bannedList) {
-    if (b.ip && b.ip.includes("/")) {
-      if (ipInCidr(ip, b.ip)) return true;
-    }
+    if (b.ip && b.ip.includes("/") && ipInCidr(ip, b.ip)) return true;
   }
   return false;
 }
 
-export function ipInCidr(ip, cidr) {
+function ipInCidr(ip, cidr) {
   try {
     const [range, prefixStr] = cidr.split("/");
     const prefix = parseInt(prefixStr, 10);
@@ -1812,13 +1786,11 @@ export function ipInCidr(ip, cidr) {
       const mask = prefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - prefix)) - 1n);
       return (ipBig & mask) === (rangeBig & mask);
     }
-  } catch {
-    return false;
-  }
+  } catch { return false; }
   return false;
 }
 
-export function ipv6ToBigInt(ip) {
+function ipv6ToBigInt(ip) {
   try {
     const parts = ip.split(":");
     if (parts.length < 3) return null;
@@ -1829,9 +1801,7 @@ export function ipv6ToBigInt(ip) {
       const after = ip.substring(doubleColon + 2).split(":").filter(Boolean);
       const missing = 8 - before.length - after.length;
       fullParts = [...before, ...Array(missing).fill("0"), ...after];
-    } else {
-      fullParts = parts;
-    }
+    } else fullParts = parts;
     if (fullParts.length !== 8) return null;
     let result = 0n;
     for (const part of fullParts) {
@@ -1840,9 +1810,7 @@ export function ipv6ToBigInt(ip) {
       result = (result << 16n) | BigInt(num);
     }
     return result;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 export async function loadBannedIpList() {
@@ -1850,7 +1818,7 @@ export async function loadBannedIpList() {
     const data = await apiFetch("/_admin/api/banned-ips");
     state.bannedIps = data.items || [];
     renderBannedIpListPage();
-  } catch (error) {}
+  } catch (_) {}
 }
 
 export function renderBannedIpListPage() {
@@ -1860,144 +1828,178 @@ export function renderBannedIpListPage() {
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   if (state.banCurrentPage > totalPages) state.banCurrentPage = totalPages;
   const currentPage = state.banCurrentPage;
-  const startIdx = (currentPage - 1) * pageSize;
-  const pageItems = allItems.slice(startIdx, startIdx + pageSize);
-
-  setText("ban-total-count", `共 ${totalCount} 条`);
+  const pageItems = allItems.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  setText("banSummary", `共 ${totalCount} 条`);
   renderBannedIpList(pageItems);
-  renderPagination(currentPage, totalPages, "ban-pagination", goToBanPage);
+  renderPagination(currentPage, totalPages, "banPagination", goToBanPage);
 }
 
-export function goToBanPage(page, totalPages) {
+function goToBanPage(page, totalPages) {
   state.banCurrentPage = Math.max(1, Math.min(totalPages, page));
   renderBannedIpListPage();
 }
 
-export function renderBannedIpList(items) {
-  const tbody = document.getElementById("banned-ips-table-body");
+function renderBannedIpList(items) {
+  const tbody = document.getElementById("banBody");
   if (!tbody) return;
   tbody.innerHTML = "";
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="7">暂无封禁IP记录。</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="5" class="empty" style="padding:26px 0">暂无封禁 IP 记录。</td></tr>`;
     return;
   }
   const nowSec = Math.floor(Date.now() / 1000);
   items.forEach((item) => {
-    const tr = document.createElement("tr");
-
-    let expireText;
-    let statusBadge;
-    let isExpired = false;
+    let expireText, statusBadge;
     if (item.permanent) {
       expireText = "永久";
-      statusBadge = '<span class="ban-status ban-status-permanent">永久封禁</span>';
+      statusBadge = '<span class="pill pill-danger">永久封禁</span>';
     } else if (item.expire_at && item.expire_at > 0) {
-      isExpired = item.expire_at <= nowSec;
-      const expireDate = new Date(item.expire_at * 1000);
-      const remainSec = item.expire_at - nowSec;
-      const formatted = expireDate.toLocaleString("zh-CN", { hour12: false });
+      const isExpired = item.expire_at <= nowSec;
+      const formatted = new Date(item.expire_at * 1000).toLocaleString("zh-CN", { hour12: false });
       if (isExpired) {
         expireText = `${formatted}（已过期）`;
-        statusBadge = '<span class="ban-status ban-status-expired">已过期</span>';
+        statusBadge = '<span class="pill pill-neutral">已过期</span>';
       } else {
-        expireText = `${formatted}（剩 ${formatRemainTime(remainSec)}）`;
-        statusBadge = '<span class="ban-status ban-status-temporary">临时封禁</span>';
+        expireText = `${formatted}（剩 ${formatRemainTime(item.expire_at - nowSec)}）`;
+        statusBadge = '<span class="pill pill-warn">临时封禁</span>';
       }
     } else {
       expireText = "-";
-      statusBadge = '<span class="ban-status ban-status-unknown">未知</span>';
+      statusBadge = '<span class="pill pill-neutral">未知</span>';
     }
-
-    const pathPrefixText = item.path_prefix
-      ? escapeHtml(item.path_prefix)
-      : '<span class="ban-scope-global">全局</span>';
-
-    const extendBtn = item.permanent
-      ? ''
-      : `<button class="table-btn" data-action="extend-ban-ip" data-ip="${escapeHtml(item.ip)}" data-expire="${item.expire_at || 0}" type="button">延长</button>`;
-
+    const extendBtn = item.permanent ? "" : `<button class="btn btn-sm" data-action="extend-ban-ip" data-ip="${esc(item.ip)}" data-expire="${item.expire_at || 0}">延长</button>`;
+    const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td data-label="IP地址/段"><strong>${escapeHtml(item.ip)}</strong></td>
-      <td data-label="路径前缀">${pathPrefixText}</td>
-      <td data-label="原因">${escapeHtml(item.reason || "-")}</td>
-      <td data-label="操作者">${escapeHtml(item.banned_by || "admin")}</td>
-      <td data-label="封禁时间">${escapeHtml(formatDateTime(new Date(item.banned_at * 1000).toISOString()))}</td>
-      <td data-label="到期时间">${expireText}</td>
-      <td data-label="操作">
-        <div class="table-actions">
-          ${extendBtn}
-          <button class="table-btn delete" data-action="unban-ip" data-ip="${escapeHtml(item.ip)}" type="button">解封</button>
-        </div>
-      </td>
-    `;
+      <td><strong>${esc(item.ip)}</strong>${item.path_prefix ? `<div class="hint">路径: ${esc(item.path_prefix)}</div>` : ""}</td>
+      <td>${statusBadge}</td>
+      <td>${esc(item.reason || "-")}</td>
+      <td>${expireText}</td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">${extendBtn}<button class="btn btn-sm btn-danger" data-action="unban-ip" data-ip="${esc(item.ip)}">解封</button></div></td>`;
     tbody.appendChild(tr);
   });
 }
 
 export function openBanModal(options = {}) {
   const mode = options.mode || "add";
-  const titleEl = document.getElementById("ban-ip-modal-title");
-  titleEl.textContent = mode === "from-log" ? "从日志封禁IP" : "封禁IP";
-  setValue("ban_ip_mode", mode);
-  setValue("ban_ip_address", options.ip || "");
-  setValue("ban_ip_path_prefix", options.pathPrefix || "");
-  setValue("ban_ip_reason", options.reason || "");
-  const permanentSelect = document.getElementById("ban_ip_permanent");
-  if (permanentSelect) permanentSelect.value = "1";
-  setValue("ban_ip_duration", "1");
-  toggleBanDurationLabel();
-  openModal("ban-ip-modal");
-}
-
-export function toggleBanDurationLabel() {
-  const selectEl = document.getElementById("ban_ip_permanent");
-  const isPermanent = selectEl ? selectEl.value === "1" : true;
-  const durationLabel = document.getElementById("ban_ip_duration_label");
-  const durationInput = document.getElementById("ban_ip_duration");
-  if (durationLabel) durationLabel.style.display = isPermanent ? "none" : "";
-  if (durationInput) durationInput.required = !isPermanent;
+  openFormModal({
+    title: mode === "from-log" ? "从日志封禁 IP" : "封禁 IP",
+    schema: [
+      { key: "ip", label: "IP 地址 / 网段", type: "text", required: true, placeholder: "1.2.3.4 或 192.168.1.0/24" },
+      { key: "path_prefix", label: "路径前缀（可选）", type: "text", placeholder: "留空表示全局封禁" },
+      { key: "reason", label: "封禁原因", type: "text" },
+      { key: "permanent", label: "封禁类型", type: "select", options: [{ value: "1", label: "永久封禁" }, { value: "0", label: "临时封禁" }] },
+      { key: "duration", label: "封禁时长（小时）", type: "number", default: 1, hint: "临时封禁时生效" },
+    ],
+    values: { ip: options.ip || "", path_prefix: options.pathPrefix || "", reason: options.reason || "", permanent: "1", duration: 1 },
+    validate: (out) => {
+      if (!String(out.ip || "").trim()) return "IP 地址不能为空";
+      if (!isValidIpOrCidr(String(out.ip).trim())) return "IP 格式无效，请输入单个 IP 或 CIDR 网段";
+      if (out.permanent === "0" && (Number(out.duration) || 0) <= 0) return "临时封禁时长必须大于 0";
+      return null;
+    },
+    onSave: async (out) => {
+      const permanent = out.permanent === "1";
+      const durationSeconds = permanent ? 0 : Math.max(60, Math.round((Number(out.duration) || 0) * 3600));
+      await apiFetch("/_admin/api/banned-ips", {
+        method: "POST",
+        body: JSON.stringify({ ip: String(out.ip).trim(), reason: out.reason || "", banned_by: "admin", permanent, duration_seconds: durationSeconds, path_prefix: out.path_prefix || "" }),
+      });
+      const scopeText = out.path_prefix ? `路径前缀 ${out.path_prefix}` : "全局";
+      showToast(`${String(out.ip).includes("/") ? "IP段" : "IP"} ${out.ip} 已封禁（${scopeText}）`);
+      loadBannedIpList();
+    },
+  });
 }
 
 export function openBanExtendModal(ip, currentExpireAt) {
-  setValue("ban_extend_ip", ip);
-  setValue("ban_extend_ip_display", ip);
-  let displayText;
-  if (!currentExpireAt || currentExpireAt <= 0) {
-    displayText = "永久封禁";
-  } else {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expired = currentExpireAt <= nowSec;
-    const dateStr = new Date(currentExpireAt * 1000).toLocaleString("zh-CN", { hour12: false });
-    displayText = expired ? `${dateStr}（已过期）` : dateStr;
-  }
-  setValue("ban_extend_current_expire", displayText);
-  setValue("ban_extend_duration", "1");
-  openModal("ban-extend-modal");
+  openFormModal({
+    title: `延长封禁 ${ip}`,
+    schema: [
+      { key: "duration", label: "延长时长（小时）", type: "number", default: 1, required: true },
+    ],
+    values: { duration: 1 },
+    onSave: async (out) => {
+      const hours = Number(out.duration) || 0;
+      if (hours <= 0) throw new Error("延长时长必须大于 0");
+      await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}/extend`, { method: "POST", body: JSON.stringify({ duration_hours: hours }) });
+      showToast(`IP ${ip} 封禁时间已延长 ${hours} 小时`);
+      loadBannedIpList();
+    },
+  });
 }
 
 export async function banIpFromLog(ip) {
-  openBanModal({
-    ip: ip,
-    reason: "从日志手动封禁",
-    mode: "from-log",
+  openBanModal({ ip, reason: "从日志手动封禁", mode: "from-log" });
+}
+
+export async function unbanIp(ip) {
+  openConfirm({
+    title: "解封 IP",
+    message: `确认解封 IP ${ip} 吗？`,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
+        showToast(`IP ${ip} 已解封`);
+        loadBannedIpList();
+      } catch (e) { showToast(e.message, true); }
+    },
   });
+}
+
+export async function clearBans() {
+  openConfirm({
+    title: "清空封禁记录",
+    message: "确认清空所有封禁记录吗？此操作不可恢复！",
+    onOk: async () => {
+      try {
+        await apiFetch("/_admin/api/banned-ips/clear", { method: "POST" });
+        showToast("所有封禁记录已清空");
+        state.banCurrentPage = 1;
+        loadBannedIpList();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
+// ---- 封禁自动刷新 ----
+
+let _banAutoRefreshTimer = null;
+const BAN_AUTO_REFRESH_STORAGE_KEY = "ban_auto_refresh";
+
+export function getBanAutoRefreshConfig() {
+  try { const raw = localStorage.getItem(BAN_AUTO_REFRESH_STORAGE_KEY); if (raw) return JSON.parse(raw); } catch (_) {}
+  return { enabled: false, interval: 5 };
+}
+export function saveBanAutoRefreshConfig(cfg) { localStorage.setItem(BAN_AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg)); }
+
+export function stopBanAutoRefresh() {
+  if (_banAutoRefreshTimer !== null) { clearInterval(_banAutoRefreshTimer); _banAutoRefreshTimer = null; }
+  const el = document.getElementById("ban_auto_refresh_status");
+  if (el) { el.textContent = ""; el.className = "auto-refresh-status stopped"; }
+}
+
+export function startBanAutoRefresh() {
+  stopBanAutoRefresh();
+  if (!getChecked("ban_auto_refresh_enabled")) return;
+  const interval = Math.max(1, parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5);
+  saveBanAutoRefreshConfig({ enabled: true, interval });
+  _banAutoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "security") { stopBanAutoRefresh(); return; }
+    loadBannedIpList().catch((e) => { showToast(e.message, true); stopBanAutoRefresh(); setChecked("ban_auto_refresh_enabled", false); });
+  }, interval * 1000);
+  const el = document.getElementById("ban_auto_refresh_status");
+  if (el) { el.textContent = "●"; el.className = "auto-refresh-status running"; }
 }
 
 // ============ 备份管理 ============
 
-export function formatBackupSize(bytes) {
+function formatBackupSize(bytes) {
   if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + " MB";
   if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
   return bytes + " B";
 }
-
-export function formatBackupTime(isoStr) {
-  try {
-    const d = new Date(isoStr);
-    return d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-  } catch {
-    return isoStr;
-  }
+function formatBackupTime(isoStr) {
+  try { return new Date(isoStr).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }); } catch { return isoStr; }
 }
 
 export async function loadBackups() {
@@ -2005,32 +2007,27 @@ export async function loadBackups() {
     const data = await apiFetch("/_admin/api/backup/list");
     state.backups = data.items || [];
     renderBackupList();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  } catch (e) { showToast(e.message, true); }
 }
 
-export function renderBackupList() {
-  const tbody = document.getElementById("backup-table-body");
-  const countEl = document.getElementById("backup-total-count");
+function renderBackupList() {
+  const tbody = document.getElementById("backupBody");
   if (!tbody) return;
-  if (countEl) countEl.textContent = `共 ${state.backups.length} 个备份`;
-  if (state.backups.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4">暂无备份</td></tr>';
+  if (!state.backups.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="empty" style="padding:26px 0">暂无备份</td></tr>`;
     return;
   }
-  tbody.innerHTML = state.backups.map(b => `
+  tbody.innerHTML = state.backups.map((b) => `
     <tr>
-      <td>${escapeHtml(b.filename)}</td>
-      <td>${formatBackupSize(b.size)}</td>
-      <td>${formatBackupTime(b.created_at)}</td>
-      <td class="row-actions">
-        <button class="table-btn" data-action="download-backup" data-filename="${escapeHtml(b.filename)}">下载</button>
-        <button class="table-btn" data-action="restore-backup" data-filename="${escapeHtml(b.filename)}">恢复</button>
-        <button class="table-btn delete" data-action="delete-backup" data-filename="${escapeHtml(b.filename)}">删除</button>
-      </td>
-    </tr>
-  `).join("");
+      <td class="mono" style="word-break:break-all">${esc(b.filename)}</td>
+      <td>${esc(formatBackupSize(b.size))}</td>
+      <td>${esc(formatBackupTime(b.created_at))}</td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn btn-sm" data-action="download-backup" data-filename="${esc(b.filename)}">下载</button>
+        <button class="btn btn-sm" data-action="restore-backup" data-filename="${esc(b.filename)}">恢复</button>
+        <button class="btn btn-sm btn-danger" data-action="delete-backup" data-filename="${esc(b.filename)}">删除</button>
+      </div></td>
+    </tr>`).join("");
 }
 
 export async function createBackup() {
@@ -2038,9 +2035,7 @@ export async function createBackup() {
     const data = await apiFetch("/_admin/api/backup/create", { method: "POST" });
     showToast(`备份已创建: ${data.filename}`);
     await loadBackups();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  } catch (e) { showToast(e.message, true); }
 }
 
 export function downloadBackup(filename) {
@@ -2053,114 +2048,80 @@ export function downloadBackup(filename) {
 }
 
 export function openRestoreModal(filename) {
-  document.getElementById("restore_backup_filename").value = filename;
-  document.getElementById("restore-backup-name").textContent = filename;
-  document.getElementById("restore_mode").value = "overwrite";
-  openModal("backup-restore-modal");
+  openFormModal({
+    title: "恢复备份",
+    sub: filename,
+    schema: [
+      { key: "mode", label: "恢复模式", type: "select", options: [{ value: "overwrite", label: "覆盖模式" }, { value: "merge", label: "合并模式" }] },
+    ],
+    values: { mode: "overwrite" },
+    onSave: async (out) => {
+      const formData = new FormData();
+      formData.append("restore_mode", out.mode);
+      formData.append("backup_filename", filename);
+      const response = await fetch("/_admin/api/backup/restore", { method: "POST", body: formData });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "恢复失败");
+      showToast(data.message || "恢复成功");
+      await loadBackups();
+    },
+  });
 }
 
-export async function confirmRestoreBackup() {
-  const filename = document.getElementById("restore_backup_filename").value;
-  const mode = document.getElementById("restore_mode").value;
-  if (!filename) return;
-  try {
-    const formData = new FormData();
-    formData.append("restore_mode", mode);
-    formData.append("backup_filename", filename);
-    const response = await fetch("/_admin/api/backup/restore", {
-      method: "POST",
-      body: formData,
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "恢复失败");
-    showToast(data.message || "恢复成功");
-    closeModal("backup-restore-modal");
-    await loadBackups();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+export function openUploadRestoreModal() {
+  const fileInput = document.getElementById("backupFile");
+  if (!fileInput || !fileInput.files.length) { showToast("请先选择要上传的数据库文件", true); return; }
+  openFormModal({
+    title: "上传并恢复",
+    sub: fileInput.files[0].name,
+    schema: [
+      { key: "mode", label: "恢复模式", type: "select", options: [{ value: "overwrite", label: "覆盖模式" }, { value: "merge", label: "合并模式" }] },
+    ],
+    values: { mode: "overwrite" },
+    onSave: async (out) => {
+      const formData = new FormData();
+      formData.append("restore_mode", out.mode);
+      formData.append("file", fileInput.files[0]);
+      const response = await fetch("/_admin/api/backup/restore", { method: "POST", body: formData });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "恢复失败");
+      showToast(data.message || "恢复成功");
+      fileInput.value = "";
+      await loadBackups();
+    },
+  });
 }
 
 export async function deleteBackup(filename) {
-  if (!window.confirm(`确认删除备份文件 ${filename} 吗？`)) return;
-  try {
-    await apiFetch(`/_admin/api/backup/${encodeURIComponent(filename)}`, { method: "DELETE" });
-    showToast("备份已删除");
-    await loadBackups();
-  } catch (error) {
-    showToast(error.message, true);
-  }
+  openConfirm({
+    title: "删除备份",
+    message: `确认删除备份文件 ${filename} 吗？`,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/backup/${encodeURIComponent(filename)}`, { method: "DELETE" });
+        showToast("备份已删除");
+        await loadBackups();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
 }
 
-export async function uploadAndRestore() {
-  const fileInput = document.getElementById("backup-file-input");
-  const mode = document.getElementById("backup_restore_mode").value;
-  if (!fileInput.files.length) {
-    showToast("请选择数据库文件", true);
-    return;
-  }
-  if (!window.confirm(mode === "overwrite"
-    ? "确认用上传的文件覆盖当前数据库吗？此操作不可撤销。"
-    : "确认从上传的文件合并导入新规则吗？")) {
-    return;
-  }
-  try {
-    const formData = new FormData();
-    formData.append("restore_mode", mode);
-    formData.append("file", fileInput.files[0]);
-    const response = await fetch("/_admin/api/backup/restore", {
-      method: "POST",
-      body: formData,
+// ============ 筛选 chips 初始化 ============
+
+export function initFilterSelects() {
+  const toolbars = [
+    document.getElementById("ruleToolbar"),
+    document.querySelector("#page-logs [data-panel='req'] .toolbar"),
+  ];
+  toolbars.forEach((tb) => {
+    if (!tb) return;
+    tb.querySelectorAll("select").forEach((sel) => {
+      if (sel.id === "log_page_size") return; // 分页大小不是筛选条件，不进 chips
+      if (sel.dataset.default === undefined) {
+        sel.dataset.default = sel.value;
+        const item = sel.closest(".filter-item");
+        sel.dataset.label = item ? (item.querySelector(".fi-label")?.textContent || "") : "";
+      }
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "恢复失败");
-    showToast(data.message || "恢复成功");
-    fileInput.value = "";
-    await loadBackups();
-  } catch (error) {
-    showToast(error.message, true);
-  }
-}
-
-// ============ 封禁自动刷新 ============
-
-let _banAutoRefreshTimer = null;
-const BAN_AUTO_REFRESH_STORAGE_KEY = "ban_auto_refresh";
-
-export function getBanAutoRefreshConfig() {
-  try {
-    const raw = localStorage.getItem(BAN_AUTO_REFRESH_STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (e) {}
-  return { enabled: false, interval: 5 };
-}
-
-export function saveBanAutoRefreshConfig(cfg) {
-  localStorage.setItem(BAN_AUTO_REFRESH_STORAGE_KEY, JSON.stringify(cfg));
-}
-
-export function stopBanAutoRefresh() {
-  if (_banAutoRefreshTimer !== null) {
-    clearInterval(_banAutoRefreshTimer);
-    _banAutoRefreshTimer = null;
-  }
-}
-
-export function startBanAutoRefresh() {
-  stopBanAutoRefresh();
-  const enabled = getChecked("ban_auto_refresh_enabled");
-  if (!enabled) return;
-  const interval = Math.max(1, parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5);
-  saveBanAutoRefreshConfig({ enabled: true, interval });
-  _banAutoRefreshTimer = setInterval(() => {
-    if (state.activeModule !== "ip-ban-manager") {
-      stopBanAutoRefresh();
-      return;
-    }
-    loadBannedIpList().catch((error) => {
-      showToast(error.message, true);
-      stopBanAutoRefresh();
-      setChecked("ban_auto_refresh_enabled", false);
-    });
-  }, interval * 1000);
+  });
 }

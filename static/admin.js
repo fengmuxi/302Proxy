@@ -1,271 +1,289 @@
 /**
- * admin.js - 入口文件
- * 负责：DOMContentLoaded初始化、事件委托绑定、模块激活
+ * admin.js - 入口 / 外壳（原型 6 页版）
+ * 负责：DOMContentLoaded 初始化、导航、鉴权、主题、⌘K 搜索、事件委托接线
+ * 业务逻辑见 js/modules.js；UI 组件见 js/components.js；请求见 js/api.js。
  */
 
 import { state } from './js/state.js';
 import {
   setValue, setChecked, getValue, getChecked,
-  normalizeRequestHost, formatRequestHostLabel,
-  focusField, findRouteGroup,
+  normalizeRequestHost, formatRequestHostLabel, findRouteGroup, focusField, escapeHtml,
 } from './js/utils.js';
 import { apiFetch, loadAuthStatus, submitLogin, performLogout } from './js/api.js';
 import {
-  els, openModal, closeModal,
-  showToast, showUrlTooltip, hideUrlTooltip, copyToClipboard,
-  setAuthError, applyAuthState,
+  showToast, setAuthError, applyAuthState,
   initTheme, applyTheme,
+  openConfirm, closeModal, closeDrawer,
+  showUrlTooltip, hideUrlTooltip, copyToClipboard,
+  renderAllChips, closeSelectPops, upgradeSelect,
 } from './js/components.js';
 import {
-  activateModule, setActiveModule, initHashRouting,
-  loadDashboard,
-  renderRouteGroups,
-  resetRouteGroupForm, openPrefixEditor,
-  submitRouteGroup, updateGroupRegionSwitch,
-  resetRuleForm,
-  submitRule, openRuleEditor, removeRule, toggleRule, toggleRuleField,
-  prepareRuleForGroup,
-  renderGeoSources, resetGeoSourceForm, fillGeoSourceForm,
-  collectGeoSourceForm, resetGeoSourceTestResult,
-  renderGeoSourceTestResult, fillGeoSourceTestSelect,
-  resetOfflineGeoTestResult, renderOfflineGeoTestResult,
-  buildGeoSettingsPayload, persistGeoSettings, bindGeoNumericInputSafety,
-  ensureRouteLogFilterFields,
-  loadRouteLogs, refreshRouteLogModule,
+  setActivePage, activatePage, initHashRouting,
+  loadDashboard, renderOverview,
+  renderRouteGroups, openRouteGroupModal, updateGroupRegionSwitch,
+  renderRules, openRuleModal, prepareRuleForGroup, removeRule, toggleRule, openRuleDrawer,
+  renderGeoSources, openGeoSourceModal, persistGeoSettings,
+  openGeoOnlineSettings, openGeoOfflineSettings, openGeoSourceTest, openOfflineTest,
+  syncOffline, rollbackOffline, clearGeoCache,
+  loadRouteLogs, refreshRouteLogModule, saveLogRetention, cleanupLogs,
   getAutoRefreshConfig, saveAutoRefreshConfig, startAutoRefresh, stopAutoRefresh,
   loadAppLogContent, startAppLogAutoRefresh, stopAppLogAutoRefresh,
-  refreshAppLogModule,
-  loadIpCacheSettings, loadIpCacheStats,
-  loadAutoBanSettings, loadAutoBanStats,
-  loadEmailSettings,
-  loadBannedIpList, renderBannedIpListPage,
-  openBanModal, toggleBanDurationLabel, openBanExtendModal, banIpFromLog,
-  isValidIpOrCidr,
-  loadBackups, createBackup, downloadBackup,
-  openRestoreModal, confirmRestoreBackup, deleteBackup, uploadAndRestore,
+  refreshAppLogModule, cleanupAppLogFiles,
+  loadIpCacheSettings, loadIpCacheStats, openIpCacheSettings, clearIpCache,
+  loadDedupSettings, loadDedupStats, openDedupSettings, clearDedupCache,
+  loadAutoBanSettings, loadAutoBanStats, openAutoBanSettings,
+  loadEmailSettings, openEmailSettings, testEmail,
+  loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
+  banIpFromLog, unbanIp, clearBans,
   getBanAutoRefreshConfig, saveBanAutoRefreshConfig, startBanAutoRefresh, stopBanAutoRefresh,
+  loadBackups, createBackup, downloadBackup, openRestoreModal, openUploadRestoreModal, deleteBackup,
+  initFilterSelects,
 } from './js/modules.js';
 
-// ============ DOMContentLoaded 初始化 ============
+// ============ 小工具 ============
 
-window.addEventListener("DOMContentLoaded", async () => {
-  initTheme();
-  setActiveModule("overview");
-  bindGeoNumericInputSafety();
-  ensureRouteLogFilterFields();
-  resetRouteGroupForm();
-  resetGeoSourceForm();
-  resetRuleForm();
-  const savedAutoRefresh = getAutoRefreshConfig();
-  setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
-  setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
+const $ = (id) => document.getElementById(id);
 
-  const savedBanRefresh = getBanAutoRefreshConfig();
-  setChecked("ban_auto_refresh_enabled", savedBanRefresh.enabled);
-  setValue("ban_auto_refresh_interval", String(savedBanRefresh.interval));
+function confirmAsync(title, message, fn) {
+  openConfirm({
+    title,
+    message,
+    onOk: async () => {
+      try { await fn(); }
+      catch (e) { showToast(e.message, true); }
+    },
+  });
+}
 
-  const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "50", 10) || 50;
-  state.logPageSize = savedLogPageSize;
-  setValue("log_page_size", String(savedLogPageSize));
+// ============ 导航 ============
 
-  const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "20", 10) || 20;
-  state.banPageSize = savedBanPageSize;
-  setValue("ban_page_size", String(savedBanPageSize));
-
-  // 模块按钮事件
-  document.querySelectorAll(".module-btn").forEach((button) => {
-    button.addEventListener("click", () => {
-      activateModule(button.dataset.moduleTarget);
-    });
+function bindNavigation() {
+  document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
+    item.addEventListener("click", () => activatePage(item.dataset.page));
   });
 
-  // 仪表板模块卡片
-  document.querySelectorAll(".dash-module-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      activateModule(card.dataset.moduleTarget);
-    });
+  // 概览卡片内跳转按钮
+  document.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-goto]");
+    if (target) activatePage(target.dataset.goto);
   });
 
-  const statCardModuleMap = {
-    "dash-stat-routes": "route-config",
-    "dash-stat-rules": "route-config",
-    "dash-stat-bans": "ip-ban-manager",
-    "dash-stat-sources": "geoip-online",
-    "dash-stat-logfiles": "app-logs",
-    "dash-stat-backups": "backup-manager",
-  };
-  Object.entries(statCardModuleMap).forEach(([id, target]) => {
-    const card = document.getElementById(id);
-    if (card) {
-      card.addEventListener("click", () => activateModule(target));
+  // 移动端侧边栏开关
+  $("menuToggle")?.addEventListener("click", () => {
+    $("sidebar")?.classList.toggle("open");
+  });
+}
+
+// ============ 顶栏 ============
+
+function bindTopbar() {
+  $("themeBtn")?.addEventListener("click", () => {
+    const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    applyTheme(next);
+  });
+
+  $("newRuleBtn")?.addEventListener("click", () => openRuleModal(null));
+
+  $("ovRefreshBtn")?.addEventListener("click", async () => {
+    const btn = $("ovRefreshBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "刷新中…"; }
+    try { await renderOverview(); }
+    catch (e) { showToast(e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "刷新"; } }
+  });
+}
+
+// ============ 路由配置 ============
+
+function bindRouting() {
+  $("newGroupBtn")?.addEventListener("click", () => openRouteGroupModal(null));
+  $("newRuleInlineBtn")?.addEventListener("click", () => openRuleModal(null));
+
+  const applyRulesFilter = () => { renderRules(state.rules); renderAllChips(); };
+  $("ruleSearch")?.addEventListener("input", applyRulesFilter);
+  $("ruleFilter")?.addEventListener("change", applyRulesFilter);
+  $("ruleHost")?.addEventListener("change", applyRulesFilter);
+  $("resetFilter")?.addEventListener("click", () => {
+    setValue("ruleSearch", "");
+    setValue("ruleFilter", "");
+    setValue("ruleHost", "");
+    applyRulesFilter();
+  });
+
+  // 路由组表事件委托
+  $("groupBody")?.addEventListener("click", async (e) => {
+    const sw = e.target.closest(".switch[data-action='toggle-group-region']");
+    if (sw) {
+      const pathPrefix = sw.dataset.pathPrefix;
+      const requestHost = normalizeRequestHost(sw.dataset.requestHost);
+      const next = !sw.classList.contains("on");
+      try {
+        await updateGroupRegionSwitch(pathPrefix, requestHost, next);
+        await loadDashboard();
+        showToast(`${pathPrefix} @ ${formatRequestHostLabel(requestHost)} 的地区匹配已${next ? "开启" : "关闭"}。`);
+      } catch (err) { showToast(err.message, true); }
+      return;
     }
-  });
-
-  // 主题选择
-  document.querySelectorAll(".theme-dot").forEach((dot) => {
-    dot.addEventListener("click", () => {
-      applyTheme(dot.dataset.themeVal);
-    });
-  });
-
-  // 新增按钮
-  document.getElementById("add-prefix-btn").addEventListener("click", () => {
-    resetRouteGroupForm();
-    document.getElementById("route-group-form-title").textContent = "新增路径前缀";
-    openModal("prefix-modal");
-  });
-
-  document.getElementById("add-geo-source-btn")?.addEventListener("click", () => {
-    resetGeoSourceForm();
-    document.getElementById("geo-source-form-title").textContent = "新增在线源";
-    openModal("geo-source-modal");
-  });
-
-  document.getElementById("add-rule-btn").addEventListener("click", () => {
-    resetRuleForm();
-    document.getElementById("rule-form-title").textContent = "新增规则";
-    openModal("rule-modal");
-  });
-
-  // 路由过滤
-  const filterKeyword = document.getElementById("route_filter_keyword");
-  const filterStatus = document.getElementById("route_filter_status");
-  const filterDefault = document.getElementById("route_filter_default");
-  const filterResetBtn = document.getElementById("route-filter-reset-btn");
-
-  const applyRouteFilter = () => {
-    state.routeFilter.keyword = filterKeyword ? filterKeyword.value : "";
-    state.routeFilter.status = filterStatus ? filterStatus.value : "";
-    state.routeFilter.isDefault = filterDefault ? filterDefault.value : "";
-    renderRouteGroups(state.routeGroups);
-  };
-
-  if (filterKeyword) filterKeyword.addEventListener("input", applyRouteFilter);
-  if (filterStatus) filterStatus.addEventListener("change", applyRouteFilter);
-  if (filterDefault) filterDefault.addEventListener("change", applyRouteFilter);
-  if (filterResetBtn) {
-    filterResetBtn.addEventListener("click", () => {
-      if (filterKeyword) filterKeyword.value = "";
-      if (filterStatus) filterStatus.value = "";
-      if (filterDefault) filterDefault.value = "";
-      applyRouteFilter();
-    });
-  }
-
-  // 弹框关闭按钮
-  document.querySelectorAll("[data-close-modal]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      closeModal(btn.dataset.closeModal);
-    });
-  });
-
-  // 弹框背景点击关闭
-  document.querySelectorAll(".modal-overlay").forEach(modal => {
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) {
-        closeModal(modal.id);
-      }
-    });
-  });
-
-  // 表单提交
-  document.getElementById("prefix-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    await submitRouteGroup();
-    closeModal("prefix-modal");
-  });
-
-  document.getElementById("rule-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    await submitRule();
-    closeModal("rule-modal");
-  });
-
-  // 路由组卡片事件委托
-  document.getElementById("route-group-cards").addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-action]");
-    if (!button) return;
-
-    const action = button.dataset.action;
-    const pathPrefix = button.dataset.pathPrefix;
-    const requestHost = normalizeRequestHost(button.dataset.requestHost);
-    const ruleId = button.dataset.id;
-
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const pathPrefix = btn.dataset.pathPrefix;
+    const requestHost = normalizeRequestHost(btn.dataset.requestHost);
+    const action = btn.dataset.action;
     if (action === "create-rule-for-group") {
       prepareRuleForGroup(pathPrefix, requestHost);
-      return;
-    }
-    if (action === "edit-group") {
-      openPrefixEditor(pathPrefix, requestHost);
-      return;
-    }
-    if (action === "delete-group") {
+    } else if (action === "edit-group") {
+      const group = findRouteGroup(pathPrefix, requestHost, state);
+      if (group) openRouteGroupModal(group);
+    } else if (action === "delete-group") {
       const group = findRouteGroup(pathPrefix, requestHost, state);
       if (!group) return;
-      if (!window.confirm(`确认删除路径前缀 ${pathPrefix} @ ${formatRequestHostLabel(requestHost)} 吗？`)) return;
-      try {
+      confirmAsync("删除路由组", `确认删除路径前缀 ${pathPrefix} @ ${formatRequestHostLabel(requestHost)} 吗？此操作不可撤销。`, async () => {
         await apiFetch("/_admin/api/route-groups", {
           method: "DELETE",
           body: JSON.stringify({ path_prefix: pathPrefix, request_host: requestHost }),
         });
-        resetRouteGroupForm();
         await loadDashboard();
         showToast("路径前缀已删除。");
-      } catch (error) {
-        showToast(error.message, true);
-      }
-      return;
+      });
     }
-    if (action === "edit-rule-from-group") {
-      openRuleEditor(ruleId);
-      return;
-    }
-    if (action === "toggle-rule-from-group") {
-      const enabled = button.classList.contains("off");
+  });
+
+  // 规则表事件委托（开关 / 编辑 / 删除 / 行点击查看抽屉）
+  $("rulesBody")?.addEventListener("click", async (e) => {
+    const sw = e.target.closest(".switch[data-action='toggle-rule']");
+    if (sw) {
+      const ruleId = Number(sw.dataset.id);
+      const enabled = !sw.classList.contains("on");
       await toggleRule(ruleId, enabled);
       return;
     }
-    if (action === "toggle-rule-field") {
-      const field = button.dataset.field;
-      const nextValue = button.classList.contains("off");
-      await toggleRuleField(ruleId, field, nextValue);
+    const btn = e.target.closest("button[data-action]");
+    if (btn) {
+      const action = btn.dataset.action;
+      const ruleId = Number(btn.dataset.id);
+      if (action === "edit-rule") {
+        const rule = state.rules.find((r) => r.id === ruleId);
+        if (rule) openRuleModal(rule);
+      } else if (action === "delete-rule") {
+        removeRule(ruleId);
+      }
       return;
     }
-    if (action === "delete-rule-from-group") {
-      await removeRule(ruleId);
-    }
+    const row = e.target.closest("tr[data-rule-id]");
+    if (row) openRuleDrawer(row.dataset.ruleId);
+  });
+}
+
+// ============ 安全与封禁 ============
+
+function bindSecurity() {
+  $("manualBanBtn")?.addEventListener("click", () => openBanModal({ mode: "add" }));
+  $("clearBans")?.addEventListener("click", () => clearBans());
+  $("editAutoBanBtn")?.addEventListener("click", () => openAutoBanSettings());
+
+  // 封禁表事件委托
+  $("banBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const ip = btn.dataset.ip;
+    const action = btn.dataset.action;
+    if (action === "unban-ip") unbanIp(ip);
+    else if (action === "extend-ban-ip") openBanExtendModal(ip, parseFloat(btn.dataset.expire || "0") || 0);
   });
 
-  // 路由组地区开关
-  document.getElementById("route-group-cards").addEventListener("change", async (event) => {
-    const checkbox = event.target.closest('input[data-action="toggle-group-region"]');
-    if (!checkbox) return;
-    const pathPrefix = checkbox.dataset.pathPrefix;
-    const requestHost = normalizeRequestHost(checkbox.dataset.requestHost);
-    const nextValue = checkbox.checked;
-    try {
-      await updateGroupRegionSwitch(pathPrefix, requestHost, nextValue);
-      await loadDashboard();
-      showToast(`${pathPrefix} @ ${formatRequestHostLabel(requestHost)} 的地区匹配已${nextValue ? "开启" : "关闭"}。`);
-    } catch (error) {
-      checkbox.checked = !nextValue;
-      showToast(error.message, true);
+  // 封禁自动刷新
+  $("ban_auto_refresh_enabled")?.addEventListener("change", () => {
+    if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
+    else { stopBanAutoRefresh(); saveBanAutoRefreshConfig({ enabled: false, interval: parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5 }); }
+  });
+  $("ban_auto_refresh_interval")?.addEventListener("change", () => {
+    const interval = parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5;
+    saveBanAutoRefreshConfig({ enabled: getChecked("ban_auto_refresh_enabled"), interval });
+    if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
+  });
+  $("ban_page_size")?.addEventListener("change", () => {
+    const size = parseInt(getValue("ban_page_size") || "20", 10) || 20;
+    state.banPageSize = Math.max(1, size);
+    state.banCurrentPage = 1;
+    localStorage.setItem("ban_page_size", String(state.banPageSize));
+    renderBannedIpListPage();
+  });
+}
+
+// ============ IP 定位 ============
+
+function bindGeo() {
+  $("editGeoOnlineBtn")?.addEventListener("click", () => openGeoOnlineSettings());
+  $("addGeoSourceBtn")?.addEventListener("click", () => openGeoSourceModal(null, null));
+  $("editGeoOfflineBtn")?.addEventListener("click", () => openGeoOfflineSettings());
+  $("editGeoCacheBtn")?.addEventListener("click", () => openGeoOnlineSettings());
+
+  $("syncMMDB")?.addEventListener("click", () => syncOffline().catch((e) => showToast(e.message, true)));
+  $("rollbackMMDB")?.addEventListener("click", () => rollbackOffline().catch((e) => showToast(e.message, true)));
+  $("testMMDB")?.addEventListener("click", () => openOfflineTest());
+  $("clearGeoCache")?.addEventListener("click", () => clearGeoCache().catch((e) => showToast(e.message, true)));
+  $("clearCache")?.addEventListener("click", () => clearGeoCache().catch((e) => showToast(e.message, true)));
+
+  // 在线源事件委托（开关 / 测试 / 编辑 / 删除）
+  $("geoSourceBody")?.addEventListener("click", async (e) => {
+    const sw = e.target.closest(".switch[data-action='toggle-geo-source']");
+    if (sw) {
+      const idx = Number(sw.dataset.index);
+      const src = state.geoSources[idx];
+      if (!src) return;
+      const prev = state.geoSources.map((s) => ({ ...s }));
+      src.enabled = !src.enabled;
+      renderGeoSources();
+      try { await persistGeoSettings(src.enabled ? "在线源已启用。" : "在线源已禁用。"); }
+      catch (err) { state.geoSources = prev; renderGeoSources(); showToast(err.message, true); }
+      return;
+    }
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const idx = Number(btn.dataset.index);
+    const src = state.geoSources[idx];
+    const action = btn.dataset.action;
+    if (action === "edit-geo-source") {
+      if (src) openGeoSourceModal(src, idx);
+    } else if (action === "test-geo-source") {
+      openGeoSourceTest(idx);
+    } else if (action === "delete-geo-source") {
+      if (!src) return;
+      confirmAsync("删除在线源", `确认删除在线源 ${src.name || src.url} 吗？`, async () => {
+        const prev = state.geoSources.map((s) => ({ ...s }));
+        state.geoSources.splice(idx, 1);
+        renderGeoSources();
+        try { await persistGeoSettings("在线源已删除。"); }
+        catch (err) { state.geoSources = prev; renderGeoSources(); showToast(err.message, true); }
+      });
     }
   });
+}
 
-  // 日志过滤表单
-  document.getElementById("route-log-filter-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
+// ============ 日志与审计 ============
+
+function switchLogTab(tabName) {
+  document.querySelectorAll(".tab[data-tab]").forEach((t) => t.classList.toggle("active", t.dataset.tab === tabName));
+  document.querySelectorAll("#page-logs [data-panel]").forEach((p) => {
+    p.hidden = p.dataset.panel !== tabName;
+  });
+}
+
+function bindLogs() {
+  // Tab 切换（请求日志 / 应用日志）
+  document.querySelectorAll(".tab[data-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => switchLogTab(tab.dataset.tab));
+  });
+
+  // 请求日志筛选表单
+  $("route-log-filter-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
     state.logCurrentPage = 1;
-    try {
-      await loadRouteLogs();
-      showToast("日志查询已更新。");
-    } catch (error) {
-      showToast(error.message, true);
-    }
+    try { await loadRouteLogs(); showToast("日志查询已更新。"); }
+    catch (err) { showToast(err.message, true); }
   });
 
-  document.getElementById("route-log-reset-btn").addEventListener("click", async () => {
+  $("route-log-reset-btn")?.addEventListener("click", async () => {
     setValue("log_keyword", "");
     setValue("log_path_prefix", "");
     setValue("log_rule_request_host", "");
@@ -273,558 +291,466 @@ window.addEventListener("DOMContentLoaded", async () => {
     setValue("log_result_status", "");
     setValue("log_date_from", "");
     setValue("log_date_to", "");
-    setValue("log_limit", "50");
     state.logCurrentPage = 1;
-    try {
-      await loadRouteLogs();
-    } catch (error) {
-      showToast(error.message, true);
-    }
+    renderAllChips();
+    try { await loadRouteLogs(); } catch (err) { showToast(err.message, true); }
   });
 
-  document.getElementById("route-log-settings-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      await apiFetch("/_admin/api/log-settings", {
-        method: "PUT",
-        body: JSON.stringify({ retention_days: Number(getValue("log_retention_days") || 30) }),
-      });
-      await refreshRouteLogModule();
-      showToast("日志保留策略已保存。");
-    } catch (error) {
-      showToast(error.message, true);
-    }
-  });
+  // 筛选下拉变化时更新 chips（数据由“查询”按钮触发）
+  $("log_match_strategy")?.addEventListener("change", renderAllChips);
+  $("log_result_status")?.addEventListener("change", renderAllChips);
 
-  document.getElementById("log-cleanup-btn").addEventListener("click", async () => {
-    try {
-      const result = await apiFetch("/_admin/api/log-cleanup", { method: "POST" });
-      showToast(`清理完成，删除了 ${result.deleted_count} 条过期日志记录。`);
-      await refreshRouteLogModule();
-    } catch (error) {
-      showToast(error.message, true);
-    }
-  });
-
-  // 日志列表事件委托
-  document.getElementById("route-logs-list-body").addEventListener("mouseover", (event) => {
-    const target = event.target.closest(".route-log-target-url");
-    if (target) {
-      const url = target.getAttribute("title") || target.textContent;
-      showUrlTooltip(event, url);
-    }
-  });
-
-  document.getElementById("route-logs-list-body").addEventListener("mouseout", (event) => {
-    const target = event.target.closest(".route-log-target-url");
-    if (target) hideUrlTooltip();
-  });
-
-  document.getElementById("route-logs-list-body").addEventListener("click", async (event) => {
-    const target = event.target.closest(".route-log-target-url");
-    if (target) {
-      const url = target.getAttribute("title") || target.textContent;
-      copyToClipboard(url);
-      return;
-    }
-    const button = event.target.closest("button[data-action]");
-    if (!button) return;
-    const action = button.dataset.action;
-    if (action === "delete-route-log") {
-      const logId = Number(button.dataset.id);
-      if (!window.confirm(`确认删除日志 #${logId} 吗？`)) return;
-      try {
-        await apiFetch("/_admin/api/logs", { method: "DELETE", body: JSON.stringify({ ids: [logId] }) });
-        await refreshRouteLogModule();
-        showToast("日志已删除。");
-      } catch (error) {
-        showToast(error.message, true);
-      }
-    } else if (action === "ban-ip-from-log") {
-      const ip = button.dataset.ip;
-      if (!ip || ip === "-") { showToast("该日志没有可封禁的IP地址", true); return; }
-      try { await banIpFromLog(ip); } catch (error) { showToast(error.message, true); }
-    } else if (action === "unban-ip-from-log") {
-      const ip = button.dataset.ip;
-      if (!ip || ip === "-") { showToast("该日志没有可解禁的IP地址", true); return; }
-      if (!window.confirm(`确认解禁 IP ${ip} 吗？`)) return;
-      try {
-        await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
-        showToast(`IP ${ip} 已解禁`);
-        await loadRouteLogs();
-      } catch (error) { showToast(error.message, true); }
-    }
-  });
-
-  // 日志全选/批量删除
-  document.getElementById("route-log-select-all").addEventListener("change", (event) => {
-    const checked = Boolean(event.target.checked);
+  // 全选 / 批量删除 / 清空
+  $("route-log-select-all")?.addEventListener("change", (e) => {
+    const checked = Boolean(e.target.checked);
     document.querySelectorAll(".route-log-checkbox").forEach((cb) => { cb.checked = checked; });
   });
 
-  document.getElementById("route-log-delete-selected-btn").addEventListener("click", async () => {
+  $("route-log-delete-selected-btn")?.addEventListener("click", () => {
     const ids = Array.from(document.querySelectorAll(".route-log-checkbox:checked"))
-      .map((cb) => Number(cb.dataset.id))
-      .filter((v) => Number.isInteger(v) && v > 0);
+      .map((cb) => Number(cb.dataset.id)).filter((v) => Number.isInteger(v) && v > 0);
     if (!ids.length) { showToast("请先选择要删除的日志", true); return; }
-    if (!window.confirm(`确认删除选中的 ${ids.length} 条日志吗？`)) return;
-    try {
+    confirmAsync("删除日志", `确认删除选中的 ${ids.length} 条日志吗？`, async () => {
       await apiFetch("/_admin/api/logs", { method: "DELETE", body: JSON.stringify({ ids }) });
       await refreshRouteLogModule();
       showToast("选中日志已删除。");
-    } catch (error) { showToast(error.message, true); }
+    });
   });
 
-  document.getElementById("route-log-delete-all-btn").addEventListener("click", async () => {
-    if (!window.confirm("确认清空所有规则转发日志吗？")) return;
-    try {
-      await apiFetch("/_admin/api/logs", { method: "DELETE", body: JSON.stringify({ delete_all: true }) });
-      await refreshRouteLogModule();
-      showToast("规则转发日志已清空。");
-    } catch (error) { showToast(error.message, true); }
+  const clearAllLogs = () => confirmAsync("清空日志", "确认清空所有规则转发日志吗？此操作不可恢复！", async () => {
+    await apiFetch("/_admin/api/logs", { method: "DELETE", body: JSON.stringify({ delete_all: true }) });
+    await refreshRouteLogModule();
+    showToast("规则转发日志已清空。");
+  });
+  $("route-log-delete-all-btn")?.addEventListener("click", clearAllLogs);
+  $("logClearAllBtn")?.addEventListener("click", clearAllLogs);
+
+  // 日志列表事件委托（复制 / 删除 / 封禁 / 解禁 + URL tooltip）
+  const logList = $("route-logs-list-body");
+  logList?.addEventListener("mouseover", (e) => {
+    const t = e.target.closest(".route-log-target-url");
+    if (t) showUrlTooltip(e, t.getAttribute("title") || t.textContent);
+  });
+  logList?.addEventListener("mouseout", (e) => {
+    if (e.target.closest(".route-log-target-url")) hideUrlTooltip();
+  });
+  logList?.addEventListener("click", async (e) => {
+    const urlTarget = e.target.closest(".route-log-target-url");
+    if (urlTarget) { copyToClipboard(urlTarget.getAttribute("title") || urlTarget.textContent); return; }
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === "delete-route-log") {
+      const logId = Number(btn.dataset.id);
+      confirmAsync("删除日志", `确认删除日志 #${logId} 吗？`, async () => {
+        await apiFetch("/_admin/api/logs", { method: "DELETE", body: JSON.stringify({ ids: [logId] }) });
+        await refreshRouteLogModule();
+        showToast("日志已删除。");
+      });
+    } else if (action === "ban-ip-from-log") {
+      const ip = btn.dataset.ip;
+      if (!ip || ip === "-") { showToast("该日志没有可封禁的 IP 地址", true); return; }
+      banIpFromLog(ip);
+    } else if (action === "unban-ip-from-log") {
+      const ip = btn.dataset.ip;
+      if (!ip || ip === "-") { showToast("该日志没有可解禁的 IP 地址", true); return; }
+      unbanIp(ip);
+    }
   });
 
   // 日志自动刷新
-  document.getElementById("log_auto_refresh_enabled")?.addEventListener("change", () => {
+  $("log_auto_refresh_enabled")?.addEventListener("change", () => {
     if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
     else { stopAutoRefresh(); saveAutoRefreshConfig({ enabled: false, interval: parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5 }); }
   });
-  document.getElementById("log_auto_refresh_interval")?.addEventListener("change", () => {
+  $("log_auto_refresh_interval")?.addEventListener("change", () => {
     const interval = parseInt(getValue("log_auto_refresh_interval") || "5", 10) || 5;
     saveAutoRefreshConfig({ enabled: getChecked("log_auto_refresh_enabled"), interval });
     if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
   });
-  document.getElementById("log_page_size")?.addEventListener("change", () => {
+  $("log_page_size")?.addEventListener("change", () => {
     const size = parseInt(getValue("log_page_size") || "50", 10) || 50;
     state.logPageSize = Math.max(1, size);
     state.logCurrentPage = 1;
     localStorage.setItem("log_page_size", String(state.logPageSize));
-    loadRouteLogs().catch((error) => { showToast(error.message, true); });
+    loadRouteLogs().catch((err) => showToast(err.message, true));
   });
 
-  // GeoIP 表单
-  document.getElementById("geo-source-save-btn").addEventListener("click", async () => {
-    const payload = collectGeoSourceForm();
-    if (!payload.url) { showToast("在线源接口地址不能为空", true); return; }
-    const button = document.getElementById("geo-source-save-btn");
-    const originalText = button.textContent;
-    const indexText = getValue("geo_source_id");
-    const index = indexText === "" ? null : Number(indexText);
-    const previousSources = state.geoSources.map((s) => ({ ...s }));
-    const isEdit = index !== null && Number.isInteger(index) && index >= 0;
-    if (isEdit) state.geoSources[index] = payload;
-    else state.geoSources.push(payload);
-    renderGeoSources();
-    button.disabled = true;
-    button.textContent = "保存中...";
-    try {
-      await persistGeoSettings(isEdit ? "在线源已更新。" : "在线源已新增。");
-      closeModal("geo-source-modal");
-      resetGeoSourceForm();
-    } catch (error) {
-      state.geoSources = previousSources;
-      renderGeoSources();
-      showToast(error.message, true);
-    } finally {
-      button.disabled = false;
-      button.textContent = originalText;
-    }
-  });
-
-  document.getElementById("geo-source-test-btn").addEventListener("click", () => {
-    resetGeoSourceTestResult();
-    setValue("geo_source_test_ip", "");
-    fillGeoSourceTestSelect();
-    openModal("geo-source-test-modal");
-  });
-
-  document.getElementById("geo-source-test-select")?.addEventListener("change", () => {
-    resetGeoSourceTestResult();
-  });
-
-  document.getElementById("geo-source-test-run-btn").addEventListener("click", async () => {
-    const ip = getValue("geo_source_test_ip").trim();
-    const selectedIndex = getValue("geo_source_test_select");
-    const button = document.getElementById("geo-source-test-run-btn");
-    const originalText = button.textContent;
-    if (!ip) { showToast("测试 IP 不能为空", true); return; }
-    let source = null;
-    if (selectedIndex !== "") source = state.geoSources[Number(selectedIndex)] || null;
-    if (!source || !source.url) { showToast("请先选择一个有效的在线源", true); return; }
-    button.disabled = true;
-    button.textContent = "测试中...";
-    resetGeoSourceTestResult("正在请求在线定位源，请稍候...");
-    try {
-      const result = await apiFetch("/_admin/api/geoip/test", { method: "POST", body: JSON.stringify({ ip, source }) });
-      renderGeoSourceTestResult(result);
-      showToast(result.success ? "在线源测试完成。" : "在线源测试失败。", !result.success);
-    } catch (error) {
-      renderGeoSourceTestResult({ success: false, stage: "online", provider: source.name || source.url, message: error.message, location: null });
-      showToast(error.message, true);
-    } finally {
-      button.disabled = false;
-      button.textContent = originalText;
-    }
-  });
-
-  // GeoIP 在线源表格事件委托
-  document.getElementById("geo-sources-table-body").addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-action]");
-    if (!button) return;
-    const index = Number(button.dataset.index);
-    const action = button.dataset.action;
-    const source = state.geoSources[index];
-    if (!source) return;
-    if (action === "edit-geo-source") { fillGeoSourceForm(source, index); openModal("geo-source-modal"); return; }
-    if (action === "toggle-geo-source") {
-      const previousSources = state.geoSources.map((item) => ({ ...item }));
-      source.enabled = !source.enabled;
-      renderGeoSources();
-      try { await persistGeoSettings(source.enabled ? "在线源已启用。" : "在线源已禁用。"); }
-      catch (error) { state.geoSources = previousSources; renderGeoSources(); showToast(error.message, true); }
-      return;
-    }
-    if (action === "test-geo-source") { resetGeoSourceTestResult(); setValue("geo_source_test_ip", ""); fillGeoSourceTestSelect(index); openModal("geo-source-test-modal"); return; }
-    if (action === "delete-geo-source") {
-      if (!window.confirm(`确认删除在线源 ${source.name || source.url} 吗？`)) return;
-      const previousSources = state.geoSources.map((item) => ({ ...item }));
-      state.geoSources.splice(index, 1);
-      renderGeoSources();
-      try { await persistGeoSettings("在线源已删除"); resetGeoSourceForm(); }
-      catch (error) { state.geoSources = previousSources; renderGeoSources(); showToast(error.message, true); }
-    }
-  });
-
-  ["geoip-online-form", "geoip-offline-form"].forEach((formId) => {
-    const form = document.getElementById(formId);
-    if (!form) return;
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try { await persistGeoSettings(formId === "geoip-online-form" ? "在线定位配置已保存。" : "离线定位配置已保存。"); }
-      catch (error) { showToast(error.message, true); }
-    });
-  });
-
-  document.getElementById("geo-online-cache-clear-btn").addEventListener("click", async () => {
-    const button = document.getElementById("geo-online-cache-clear-btn");
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = "清理中...";
-    try {
-      const result = await apiFetch("/_admin/api/geoip/cache/clear", { method: "POST", body: JSON.stringify({}) });
-      showToast(result.message || "在线定位缓存已清空。");
-    } catch (error) { showToast(error.message, true); }
-    finally { button.disabled = false; button.textContent = originalText; }
-  });
-
-  document.getElementById("geo-offline-sync-btn").addEventListener("click", async () => {
-    const button = document.getElementById("geo-offline-sync-btn");
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = "同步中...";
-    try {
-      const result = await apiFetch("/_admin/api/geoip/offline/sync", { method: "POST", body: JSON.stringify({ geoip: buildGeoSettingsPayload() }) });
-      await loadDashboard();
-      showToast(result.message || "离线 GeoIP 同步完成。");
-    } catch (error) { showToast(error.message, true); }
-    finally { button.disabled = false; button.textContent = originalText; }
-  });
-
-  document.getElementById("geo-offline-rollback-btn").addEventListener("click", async () => {
-    if (!window.confirm("确认回滚到离线 GeoIP 备份吗？")) return;
-    const button = document.getElementById("geo-offline-rollback-btn");
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = "回滚中...";
-    try {
-      const result = await apiFetch("/_admin/api/geoip/offline/rollback", { method: "POST", body: JSON.stringify({}) });
-      await loadDashboard();
-      showToast(result.message || "离线 GeoIP 回滚完成。");
-    } catch (error) { showToast(error.message, true); }
-    finally { button.disabled = false; button.textContent = originalText; }
-  });
-
-  document.getElementById("geo-offline-test-btn").addEventListener("click", () => {
-    resetOfflineGeoTestResult();
-    setValue("geo_offline_test_ip", "");
-    openModal("geo-offline-test-modal");
-  });
-
-  document.getElementById("geo-offline-test-run-btn").addEventListener("click", async () => {
-    const ip = getValue("geo_offline_test_ip").trim();
-    const button = document.getElementById("geo-offline-test-run-btn");
-    const originalText = button.textContent;
-    if (!ip) { showToast("离线库测试 IP 不能为空", true); return; }
-    button.disabled = true;
-    button.textContent = "测试中...";
-    resetOfflineGeoTestResult("正在使用离线库进行定位，请稍候...");
-    try {
-      const result = await apiFetch("/_admin/api/geoip/offline/test", { method: "POST", body: JSON.stringify({ ip, geoip: buildGeoSettingsPayload() }) });
-      renderOfflineGeoTestResult(result);
-      showToast(result.success ? "离线定位测试完成。" : "离线定位测试失败。", !result.success);
-    } catch (error) {
-      renderOfflineGeoTestResult({ success: false, provider: "offline_mmdb", message: error.message, location: null });
-      showToast(error.message, true);
-    } finally { button.disabled = false; button.textContent = originalText; }
-  });
-
-  // IP 缓存
-  document.getElementById("ip-cache-settings-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      await apiFetch("/_admin/api/ip-cache-settings", {
-        method: "PUT",
-        body: JSON.stringify({
-          enabled: getValue("ip_cache_enabled") === "1",
-          ttl_seconds: Number(getValue("ip_cache_ttl_seconds") || 300),
-          max_entries: Number(getValue("ip_cache_max_entries") || 5000),
-        }),
-      });
-      await Promise.all([loadIpCacheSettings(), loadIpCacheStats()]);
-      showToast("请求结果缓存配置已保存。");
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("clear-ip-cache-btn")?.addEventListener("click", async () => {
-    if (!window.confirm("确认清空所有请求结果缓存吗？")) return;
-    try {
-      const data = await apiFetch("/_admin/api/ip-cache/clear", { method: "POST" });
-      showToast(data.message || "缓存已清空");
-      loadIpCacheStats();
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  // 自动封禁
-  document.getElementById("auto-ban-settings-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      await apiFetch("/_admin/api/auto-ban", {
-        method: "PUT",
-        body: JSON.stringify({
-          enabled: getValue("auto_ban_enabled") === "1",
-          window_seconds: Number(getValue("auto_ban_window_seconds") || 60),
-          max_requests: Number(getValue("auto_ban_max_requests") || 100),
-          ban_duration_seconds: Number(getValue("auto_ban_ban_duration_seconds") || 3600),
-          max_404: Number(getValue("auto_ban_max_404") || 20),
-          auto_ban_on_404: getValue("auto_ban_auto_ban_on_404") === "1",
-          whitelist: getValue("auto_ban_whitelist") || "",
-          email_on_ban: getValue("auto_ban_email_on_ban") === "1",
-        }),
-      });
-      await Promise.all([loadAutoBanSettings(), loadAutoBanStats()]);
-      closeModal("auto-ban-modal");
-      showToast("自动封禁配置已保存。");
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("open-auto-ban-modal-btn").addEventListener("click", async () => {
-    await loadAutoBanSettings();
-    openModal("auto-ban-modal");
-  });
-
-  // 邮件配置
-  document.getElementById("email-settings-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      const password = getValue("email_password") || "";
-      const payload = {
-        enabled: getValue("email_enabled") === "1",
-        smtp_host: getValue("email_smtp_host") || "",
-        smtp_port: Number(getValue("email_smtp_port") || 465),
-        smtp_ssl: getValue("email_smtp_ssl") === "1",
-        sender: getValue("email_sender") || "",
-        sender_name: getValue("email_sender_name") || "",
-        recipients: getValue("email_recipients") || "",
-        block_link_base_url: getValue("email_block_link_base_url") || "",
-        alert_window_seconds: Number(getValue("email_alert_window_seconds") || 60),
-        alert_max_requests: Number(getValue("email_alert_max_requests") || 80),
-        alert_max_404: Number(getValue("email_alert_max_404") || 15),
-        alert_cooldown_minutes: Number(getValue("email_alert_cooldown_minutes") || 30),
-      };
-      if (password) payload.password = password;
-      await apiFetch("/_admin/api/email", { method: "PUT", body: JSON.stringify(payload) });
-      await loadEmailSettings();
-      showToast("邮件提醒配置已保存。");
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("test-email-btn").addEventListener("click", async () => {
-    const btn = document.getElementById("test-email-btn");
-    btn.disabled = true;
-    btn.textContent = "发送中...";
-    try {
-      const result = await apiFetch("/_admin/api/email/test", {
-        method: "POST",
-        body: JSON.stringify({
-          smtp_host: getValue("email_smtp_host") || "",
-          smtp_port: Number(getValue("email_smtp_port") || 465),
-          smtp_ssl: getValue("email_smtp_ssl") === "1",
-          sender: getValue("email_sender") || "",
-          sender_name: getValue("email_sender_name") || "",
-          password: getValue("email_password") || "",
-          recipients: getValue("email_recipients") || "",
-          template_type: getValue("email_test_template_type") || "alert",
-        }),
-      });
-      showToast(result.message, !result.success);
-    } catch (error) { showToast(error.message, true); }
-    finally { btn.disabled = false; btn.textContent = "发送测试邮件"; }
-  });
-
-  // 封禁管理
-  document.getElementById("ban-ip-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const ip = getValue("ban_ip_address").trim();
-    if (!ip) { showToast("IP地址不能为空", true); return; }
-    if (!isValidIpOrCidr(ip)) { showToast("IP格式无效，请输入单个IP（如 1.2.3.4）或 CIDR 网段（如 192.168.1.0/24）", true); return; }
-    const pathPrefix = getValue("ban_ip_path_prefix").trim();
-    const reason = getValue("ban_ip_reason").trim();
-    const selectEl = document.getElementById("ban_ip_permanent");
-    const permanent = selectEl ? selectEl.value === "1" : true;
-    const durationHours = parseFloat(getValue("ban_ip_duration") || "0") || 0;
-    if (!permanent && durationHours <= 0) { showToast("临时封禁时长必须大于0", true); return; }
-    const durationSeconds = permanent ? 0 : Math.max(60, Math.round(durationHours * 3600));
-    try {
-      await apiFetch("/_admin/api/banned-ips", {
-        method: "POST",
-        body: JSON.stringify({ ip, reason: reason || "", banned_by: "admin", permanent, duration_seconds: durationSeconds, path_prefix: pathPrefix }),
-      });
-      const scopeText = pathPrefix ? `路径前缀 ${pathPrefix}` : "全局";
-      showToast(`${ip.includes("/") ? "IP段" : "IP"} ${ip} 已封禁（${scopeText}）`);
-      closeModal("ban-ip-modal");
-      loadBannedIpList();
-      if (getValue("ban_ip_mode") === "from-log") loadRouteLogs();
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("ban-extend-form")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const ip = getValue("ban_extend_ip").trim();
-    const durationHours = parseFloat(getValue("ban_extend_duration") || "0") || 0;
-    if (!ip) { showToast("IP地址不能为空", true); return; }
-    if (durationHours <= 0) { showToast("延长时长必须大于0", true); return; }
-    try {
-      await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}/extend`, {
-        method: "POST", body: JSON.stringify({ duration_hours: durationHours }),
-      });
-      showToast(`IP ${ip} 封禁时间已延长 ${durationHours} 小时`);
-      closeModal("ban-extend-modal");
-      loadBannedIpList();
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("banned-ips-table-body")?.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-action]");
-    if (!button) return;
-    const action = button.dataset.action;
-    const ip = button.dataset.ip;
-    if (action === "unban-ip") {
-      if (!window.confirm(`确认解封 IP ${ip} 吗？`)) return;
-      try {
-        await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}`, { method: "DELETE" });
-        showToast(`IP ${ip} 已解封`);
-        loadBannedIpList();
-      } catch (error) { showToast(error.message, true); }
-    } else if (action === "extend-ban-ip") {
-      const expireAt = parseFloat(button.dataset.expire || "0") || 0;
-      openBanExtendModal(ip, expireAt);
-    }
-  });
-
-  document.getElementById("add-ban-btn")?.addEventListener("click", () => { openBanModal({ mode: "add" }); });
-
-  document.getElementById("clear-bans-btn")?.addEventListener("click", async () => {
-    if (!window.confirm("确认清空所有封禁记录吗？此操作不可恢复！")) return;
-    try {
-      await apiFetch("/_admin/api/banned-ips/clear", { method: "POST" });
-      showToast("所有封禁记录已清空");
-      state.banCurrentPage = 1;
-      loadBannedIpList();
-    } catch (error) { showToast(error.message, true); }
-  });
-
-  document.getElementById("ban_ip_permanent")?.addEventListener("change", toggleBanDurationLabel);
-
-  document.getElementById("ban_auto_refresh_enabled")?.addEventListener("change", () => {
-    if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
-    else { stopBanAutoRefresh(); saveBanAutoRefreshConfig({ enabled: false, interval: parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5 }); }
-  });
-  document.getElementById("ban_auto_refresh_interval")?.addEventListener("change", () => {
-    const interval = parseInt(getValue("ban_auto_refresh_interval") || "5", 10) || 5;
-    saveBanAutoRefreshConfig({ enabled: getChecked("ban_auto_refresh_enabled"), interval });
-    if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
-  });
-  document.getElementById("ban_page_size")?.addEventListener("change", () => {
-    const size = parseInt(getValue("ban_page_size") || "20", 10) || 20;
-    state.banPageSize = Math.max(1, size);
-    state.banCurrentPage = 1;
-    localStorage.setItem("ban_page_size", String(state.banPageSize));
-    renderBannedIpListPage();
-  });
+  // 保留策略
+  $("saveRetention")?.addEventListener("click", () => saveLogRetention().catch((e) => showToast(e.message, true)));
+  $("cleanupLogs")?.addEventListener("click", () => cleanupLogs().catch((e) => showToast(e.message, true)));
 
   // 应用日志
-  document.getElementById("app-log-cleanup-btn").addEventListener("click", async () => {
-    try {
-      const result = await apiFetch("/_admin/api/log-file-cleanup", { method: "POST" });
-      showToast(`清理完成，删除了 ${result.deleted_count} 个过期日志文件。`);
-      await refreshAppLogModule();
-    } catch (error) { showToast(error.message, true); }
+  $("app-log-refresh-btn")?.addEventListener("click", () => refreshAppLogModule().catch((e) => showToast(e.message, true)));
+  $("app-log-cleanup-btn")?.addEventListener("click", () => cleanupAppLogFiles().catch((e) => showToast(e.message, true)));
+  $("app-log-search-btn")?.addEventListener("click", () => loadAppLogContent().catch((e) => showToast(e.message, true)));
+  $("app-log-tail-lines")?.addEventListener("change", () => loadAppLogContent().catch((e) => showToast(e.message, true)));
+  $("app-log-keyword")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadAppLogContent().catch((err) => showToast(err.message, true));
   });
-  document.getElementById("app-log-file-select")?.addEventListener("change", (e) => { state.appLogFile = e.target.value; loadAppLogContent(); });
-  document.getElementById("app-log-refresh-btn").addEventListener("click", () => { refreshAppLogModule().catch((error) => { showToast(error.message, true); }); });
-  document.getElementById("app-log-search-btn").addEventListener("click", () => { loadAppLogContent().catch((error) => { showToast(error.message, true); }); });
-  document.getElementById("app-log-tail-lines").addEventListener("change", () => { loadAppLogContent().catch((error) => { showToast(error.message, true); }); });
-  document.getElementById("app-log-auto-refresh").addEventListener("change", () => {
+  $("app-log-auto-refresh")?.addEventListener("change", () => {
     if (getChecked("app-log-auto-refresh")) startAppLogAutoRefresh();
     else stopAppLogAutoRefresh();
   });
-  document.getElementById("app-log-keyword").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") loadAppLogContent().catch((error) => { showToast(error.message, true); });
+  $("appLogFiles")?.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-action='select-log-file']");
+    if (!item) return;
+    state.appLogFile = item.dataset.file;
+    refreshAppLogModule().catch(() => {});
   });
+}
 
-  // 备份管理
-  document.getElementById("backup-table-body")?.addEventListener("click", (e) => {
+// ============ 系统设置 ============
+
+function bindSystem() {
+  $("createBackupBtn")?.addEventListener("click", () => createBackup().catch((e) => showToast(e.message, true)));
+  $("backup-refresh-btn")?.addEventListener("click", () => loadBackups().catch((e) => showToast(e.message, true)));
+  $("backupFile")?.addEventListener("change", () => openUploadRestoreModal());
+
+  $("editEmailBtn")?.addEventListener("click", () => openEmailSettings());
+  $("testEmailBtn")?.addEventListener("click", () => testEmail());
+
+  $("editIpCacheBtn")?.addEventListener("click", () => openIpCacheSettings());
+  $("clearResultCache")?.addEventListener("click", () => clearIpCache());
+
+  $("saveDedup")?.addEventListener("click", () => openDedupSettings());
+  $("clearDedup")?.addEventListener("click", () => clearDedupCache());
+
+  // 备份表事件委托
+  $("backupBody")?.addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-action]");
     if (!btn) return;
-    const action = btn.dataset.action;
     const filename = btn.dataset.filename;
+    const action = btn.dataset.action;
     if (action === "download-backup") downloadBackup(filename);
     else if (action === "restore-backup") openRestoreModal(filename);
     else if (action === "delete-backup") deleteBackup(filename);
   });
-  document.getElementById("backup-create-btn")?.addEventListener("click", createBackup);
-  document.getElementById("backup-refresh-btn")?.addEventListener("click", loadBackups);
-  document.getElementById("backup-restore-confirm-btn")?.addEventListener("click", confirmRestoreBackup);
-  document.getElementById("backup-upload-form")?.addEventListener("submit", (e) => { e.preventDefault(); uploadAndRestore(); });
-  document.getElementById("backup_restore_mode")?.addEventListener("change", (e) => {
-    const hint = document.getElementById("backup-mode-hint");
-    if (hint) hint.textContent = e.target.value === "overwrite" ? "覆盖模式：用上传的数据库文件完全替换当前数据库。" : "合并模式：仅导入上传文件中的新规则，跳过已存在的规则。";
-  });
-  document.getElementById("restore_mode")?.addEventListener("change", (e) => {
-    const hint = document.getElementById("restore-mode-hint");
-    if (hint) hint.textContent = e.target.value === "overwrite" ? "覆盖模式会替换当前数据库中的所有配置和数据。" : "合并模式会导入所有配置表（系统设置、路由规则、GeoIP 等），跳过已存在的条目，运行日志和封禁列表不会被导入。";
-  });
+}
 
-  // 登录
-  document.getElementById("auth-login-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
+// ============ 鉴权 ============
+
+function bindAuth() {
+  $("auth-login-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
     try {
       const ok = await submitLogin(state, showToast);
       if (ok) {
         await loadDashboard();
         initHashRouting();
-        showToast("后台登录成功");
       }
-    } catch (error) {
-      setAuthError(error.message);
+    } catch (err) {
+      setAuthError(err.message);
     }
   });
 
-  els.authLogoutBtn?.addEventListener("click", async () => {
-    if (!window.confirm("确认退出登录吗？")) return;
-    try { await performLogout(state, showToast); setAuthError("已退出登录。"); showToast("已退出登录。"); }
-    catch (error) { showToast(error.message, true); }
+  $("auth-logout-btn")?.addEventListener("click", async () => {
+    confirmAsync("退出登录", "确认退出登录吗？", async () => {
+      await performLogout(state, showToast);
+    });
   });
+}
+
+// ============ 遮罩关闭 ============
+
+function bindOverlayClosers() {
+  $("modalMask")?.addEventListener("click", (e) => { if (e.target === $("modalMask")) closeModal(); });
+  $("drawerClose")?.addEventListener("click", closeDrawer);
+  $("drawerMask")?.addEventListener("click", closeDrawer);
+}
+
+// ============ 全局快捷键 ============
+
+function bindGlobalShortcuts() {
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      const search = $("globalSearch");
+      if (search) { search.focus(); search.select(); }
+      return;
+    }
+    if (e.key === "Escape") {
+      closeSelectPops();
+      closeDrawer();
+      const sidebar = $("sidebar");
+      if (sidebar && sidebar.classList.contains("open")) sidebar.classList.remove("open");
+    }
+  });
+}
+
+// ============ ⌘K 全局检索 ============
+
+const PAGE_INDEX = [
+  { page: "overview", title: "系统概览", kw: "概览 首页 总览 仪表盘 dashboard overview" },
+  { page: "routing", title: "路由配置", kw: "路由 规则 转发 前缀 重定向 routing rule" },
+  { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 security ban" },
+  { page: "geo", title: "IP 定位", kw: "定位 地理 离线库 mmdb 在线源 geo" },
+  { page: "logs", title: "日志与审计", kw: "日志 审计 请求日志 应用日志 logs log" },
+  { page: "system", title: "系统设置", kw: "系统 设置 备份 邮件 缓存 去重 恢复 system" },
+];
+
+const COMMAND_INDEX = [
+  { title: "新建规则", sub: "创建一个转发规则", page: "routing", action: "new-rule" },
+  { title: "新建路由组", sub: "创建一个路径前缀路由组", page: "routing", action: "new-group" },
+  { title: "手动封禁 IP", sub: "封禁一个 IP 或网段", page: "security", action: "new-ban" },
+  { title: "编辑自动封禁策略", sub: "配置自动封禁参数", page: "security", action: "auto-ban-settings" },
+  { title: "在线定位源配置", sub: "编辑在线定位源", page: "geo", action: "geo-online-settings" },
+  { title: "离线库配置", sub: "编辑离线 MMDB 配置", page: "geo", action: "geo-offline-settings" },
+  { title: "清空定位缓存", sub: "清除在线定位结果缓存", page: "geo", action: "clear-geo-cache" },
+  { title: "编辑邮件配置", sub: "配置 SMTP 邮件提醒", page: "system", action: "email-settings" },
+  { title: "发送测试邮件", sub: "验证邮件提醒配置", page: "system", action: "test-email" },
+  { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "system", action: "ip-cache-settings" },
+  { title: "请求去重配置", sub: "编辑请求去重参数", page: "system", action: "dedup-settings" },
+  { title: "创建备份", sub: "生成一份数据快照", page: "system", action: "create-backup" },
+];
+
+function searchIndex(q) {
+  q = (q || "").trim().toLowerCase();
+  if (!q) return [];
+  const results = [];
+  const hit = (text) => String(text || "").toLowerCase().includes(q);
+
+  // 页面导航
+  PAGE_INDEX.forEach((p) => {
+    if (hit(p.title) || hit(p.kw)) {
+      results.push({ type: "页面", title: p.title, sub: "前往页面", page: p.page, action: "goto" });
+    }
+  });
+
+  // 常用命令
+  COMMAND_INDEX.forEach((c) => {
+    if (hit(c.title) || hit(c.sub)) {
+      results.push({ type: "命令", title: c.title, sub: c.sub, page: c.page, action: c.action });
+    }
+  });
+
+  // 规则
+  (state.rules || []).forEach((r) => {
+    const hay = [r.name, r.path_prefix, r.target_url, r.notes].map((v) => String(v || "")).join(" ").toLowerCase();
+    if (hay.includes(q)) {
+      results.push({ type: "规则", title: r.name || r.path_prefix || "(未命名规则)", sub: `${r.path_prefix || ""} → ${r.target_url || ""}`, page: "routing", action: "filter-rule", filter: r.name || r.path_prefix || "" });
+    }
+  });
+
+  // 路由组
+  (state.routeGroups || []).forEach((g) => {
+    const hay = [g.path_prefix, g.request_host].map((v) => String(v || "")).join(" ").toLowerCase();
+    if (hay.includes(q)) {
+      results.push({ type: "路由组", title: g.path_prefix, sub: formatRequestHostLabel(normalizeRequestHost(g.request_host)), page: "routing", action: "filter-rule", filter: g.path_prefix });
+    }
+  });
+
+  // 封禁 IP
+  (state.bannedIps || []).forEach((b) => {
+    const hay = [b.ip, b.reason].map((v) => String(v || "")).join(" ").toLowerCase();
+    if (hay.includes(q)) results.push({ type: "封禁IP", title: b.ip, sub: b.reason || "", page: "security", action: "goto" });
+  });
+
+  // 在线定位源
+  (state.geoSources || []).forEach((s) => {
+    const hay = [s.name, s.url].map((v) => String(v || "")).join(" ").toLowerCase();
+    if (hay.includes(q)) results.push({ type: "定位源", title: s.name || s.url || "(未命名源)", sub: s.url || "", page: "geo", action: "goto" });
+  });
+
+  // 备份文件
+  (state.backups || []).forEach((b) => {
+    const name = b.filename || b.name || "";
+    if (name.toLowerCase().includes(q)) results.push({ type: "备份", title: name, sub: "数据备份", page: "system", action: "goto" });
+  });
+
+  // 应用日志文件
+  (state.logFiles || []).forEach((f) => {
+    const name = f.name || f.filename || "";
+    if (name.toLowerCase().includes(q)) results.push({ type: "日志文件", title: name, sub: "应用日志", page: "logs", action: "goto-app-log", appFile: name });
+  });
+
+  return results.slice(0, 12);
+}
+
+function highlightHtml(text, q) {
+  const safe = escapeHtml(text == null ? "" : String(text));
+  if (!q) return safe;
+  const idx = safe.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return safe;
+  return safe.slice(0, idx) + "<mark>" + safe.slice(idx, idx + q.length) + "</mark>" + safe.slice(idx + q.length);
+}
+
+function applySearchResult(r) {
+  if (!r) return;
+  if (r.action === "goto") { activatePage(r.page); return; }
+  if (r.action === "filter-rule") {
+    activatePage("routing");
+    setValue("ruleSearch", r.filter);
+    renderRules(state.rules);
+    return;
+  }
+  if (r.action === "goto-app-log") {
+    activatePage("logs");
+    switchLogTab("app");
+    state.appLogFile = r.appFile;
+    loadAppLogContent().catch(() => {});
+    return;
+  }
+  switch (r.action) {
+    case "new-rule": activatePage("routing"); openRuleModal(null); break;
+    case "new-group": activatePage("routing"); openRouteGroupModal(null); break;
+    case "new-ban": activatePage("security"); openBanModal(); break;
+    case "auto-ban-settings": activatePage("security"); openAutoBanSettings(); break;
+    case "geo-online-settings": activatePage("geo"); openGeoOnlineSettings(); break;
+    case "geo-offline-settings": activatePage("geo"); openGeoOfflineSettings(); break;
+    case "clear-geo-cache":
+      activatePage("geo");
+      confirmAsync("清空定位缓存", "确认清空所有在线定位结果缓存吗？", () => clearGeoCache());
+      break;
+    case "email-settings": activatePage("system"); openEmailSettings(); break;
+    case "test-email": activatePage("system"); testEmail(); break;
+    case "ip-cache-settings": activatePage("system"); openIpCacheSettings(); break;
+    case "dedup-settings": activatePage("system"); openDedupSettings(); break;
+    case "create-backup": activatePage("system"); createBackup(); break;
+  }
+}
+
+function bindSearch() {
+  const input = $("globalSearch");
+  const searchBox = input?.closest(".search");
+  if (!input || !searchBox) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "search-results";
+  searchBox.appendChild(wrap);
+
+  let timer = null;
+  let results = [];
+  let activeIdx = -1;
+
+  const setActive = (i) => {
+    activeIdx = i;
+    wrap.querySelectorAll(".search-result").forEach((el) => {
+      el.classList.toggle("is-active", Number(el.dataset.idx) === i);
+    });
+    const activeEl = wrap.querySelector(".search-result.is-active");
+    if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({ block: "nearest" });
+  };
+
+  const close = () => { wrap.classList.remove("open"); };
+
+  const commit = (r) => {
+    close();
+    input.value = "";
+    input.blur();
+    applySearchResult(r);
+  };
+
+  const render = () => {
+    const q = input.value.trim();
+    results = searchIndex(q);
+    activeIdx = -1;
+    if (!q) { close(); wrap.innerHTML = ""; return; }
+    if (!results.length) {
+      wrap.innerHTML = `<div class="search-result-empty">未找到「${escapeHtml(q)}」的匹配项</div>`;
+    } else {
+      const typeClass = (t) => {
+        if (t === "封禁IP") return "t-danger";
+        if (t === "定位源" || t === "日志文件" || t === "备份") return "t-ok";
+        return "";
+      };
+      wrap.innerHTML = results.map((r, i) => `
+        <div class="search-result" data-idx="${i}">
+          <span class="sr-type ${typeClass(r.type)}">${escapeHtml(r.type)}</span>
+          <span class="sr-text">
+            <span class="sr-title">${highlightHtml(r.title, q)}</span>
+            ${r.sub ? `<span class="sr-sub">${highlightHtml(r.sub, q)}</span>` : ""}
+          </span>
+        </div>`).join("") +
+        `<div class="search-results-footer"><span>↑↓ 选择 · Enter 打开 · Esc 关闭</span><span>${results.length} 项</span></div>`;
+      wrap.querySelectorAll(".search-result").forEach((el) => {
+        el.addEventListener("mouseenter", () => setActive(Number(el.dataset.idx)));
+        el.addEventListener("click", () => commit(results[Number(el.dataset.idx)]));
+      });
+    }
+    if (results.length) setActive(0);
+    wrap.classList.add("open");
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(render, 150);
+  });
+
+  input.addEventListener("focus", render);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (results.length) setActive((activeIdx + 1) % results.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (results.length) setActive((activeIdx - 1 + results.length) % results.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (results.length && activeIdx >= 0) commit(results[activeIdx]);
+      else {
+        const q = input.value.trim();
+        close();
+        input.blur();
+        if (q) { activatePage("routing"); setValue("ruleSearch", q); renderRules(state.rules); }
+      }
+    } else if (e.key === "Escape") {
+      close();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!searchBox.contains(e.target)) close();
+  });
+
+  // 点击搜索框任意位置（图标、⌘K、空白）聚焦输入框并打开结果
+  searchBox.addEventListener("click", (e) => {
+    if (e.target === input) return;
+    if (e.target.closest(".search-results")) return;
+    e.preventDefault();
+    input.focus();
+    input.select();
+    render();
+  });
+}
+
+// ============ DOMContentLoaded 初始化 ============
+
+window.addEventListener("DOMContentLoaded", async () => {
+  initTheme();
+  initFilterSelects();
+  // 静态 select 全部升级为自定义下拉（美化展开面板 + 主题适配）
+  document.querySelectorAll("select").forEach((s) => upgradeSelect(s));
+  renderAllChips();
+
+  // 恢复每页条数
+  const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "50", 10) || 50;
+  state.logPageSize = savedLogPageSize;
+  setValue("log_page_size", String(savedLogPageSize));
+  const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "20", 10) || 20;
+  state.banPageSize = savedBanPageSize;
+  setValue("ban_page_size", String(savedBanPageSize));
+
+  // 恢复自动刷新配置
+  const savedAutoRefresh = getAutoRefreshConfig();
+  setChecked("log_auto_refresh_enabled", savedAutoRefresh.enabled);
+  setValue("log_auto_refresh_interval", String(savedAutoRefresh.interval));
+  const savedBanRefresh = getBanAutoRefreshConfig();
+  setChecked("ban_auto_refresh_enabled", savedBanRefresh.enabled);
+  setValue("ban_auto_refresh_interval", String(savedBanRefresh.interval));
+
+  // 绑定事件
+  bindNavigation();
+  bindTopbar();
+  bindRouting();
+  bindSecurity();
+  bindGeo();
+  bindLogs();
+  bindSystem();
+  bindAuth();
+  bindOverlayClosers();
+  bindGlobalShortcuts();
+  bindSearch();
 
   // 初始化
   try {
@@ -840,5 +766,3 @@ window.addEventListener("DOMContentLoaded", async () => {
     showToast(error.message, true);
   }
 });
-
-// ============ 辅助函数（供入口文件内部使用） ============

@@ -1,1444 +1,353 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Proxy Control Center</title>
   <link rel="icon" type="image/svg+xml" href="/_admin/static/favicon.svg">
-  <link rel="stylesheet" href="/_admin/static/admin.css?v=2026083103">
+  <link rel="stylesheet" href="/_admin/static/admin.css?v=2026090202">
 </head>
 <body>
-  <div id="auth-overlay" class="auth-overlay is-active">
-    <div class="auth-card">
-      <p class="eyebrow">Admin Login</p>
-      <h1>后台登录</h1>
-      <p class="auth-text">请输入 `config.yaml` 中配置的后台账号和密码。</p>
-      <form id="auth-login-form" class="stack-form">
-        <label>
-          <span>账号</span>
-          <input id="auth_username" type="text" autocomplete="username" placeholder="admin" />
-        </label>
-        <label>
-          <span>密码</span>
-          <input id="auth_password" type="password" autocomplete="current-password" placeholder="请输入密码" />
-        </label>
-        <p id="auth-error" class="auth-error" hidden></p>
-        <button type="submit" class="primary-btn">登录后台</button>
-      </form>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-logo"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+      <div><div class="brand-name">Proxy Control</div><div class="brand-sub">302 路由控制中心</div></div>
     </div>
-  </div>
+    <nav class="nav" id="nav">
+      <div class="nav-group-label">概览</div>
+      <div class="nav-item active" data-page="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>系统概览</span></div>
+      <div class="nav-group-label">配置与运营</div>
+      <div class="nav-item" data-page="routing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span>路由配置</span><span class="nav-count" id="navCountRouting">0</span></div>
+      <div class="nav-item" data-page="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>安全与封禁</span><span class="nav-count" id="navCountSecurity">0</span></div>
+      <div class="nav-item" data-page="geo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>IP 定位</span></div>
+      <div class="nav-item" data-page="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>日志与审计</span></div>
+      <div class="nav-item" data-page="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>系统设置</span></div>
+    </nav>
+    <div class="side-foot"><div class="avatar" id="sideAvatar">A</div><div style="font-size:12px"><div style="font-weight:500" id="sideUsername">admin</div><div style="color:var(--text-3)"><span class="side-status"></span>系统运行中</div></div><button class="side-logout" id="auth-logout-btn" hidden>退出</button></div>
+  </aside>
 
-  <div class="page-shell">
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">Proxy Control Center</p>
-        <h1>地区转发配置台</h1>
-        <p class="hero-text">
-          以路径前缀为单位管理多目标地址转发。每个前缀可以单独控制是否启用地区匹配，
-          同一前缀下的多条目标地址通过地区过滤命中，不命中时走该前缀默认地址。
-        </p>
-      </div>
-      <div class="hero-panel">
-        <div class="metric">
-          <span>本地数据库</span>
-          <strong id="metric-db-path">-</strong>
-        </div>
-        <div class="metric-grid">
-          <div class="metric-card">
-            <span>规则总数</span>
-            <strong id="metric-total-rules">0</strong>
-          </div>
-          <div class="metric-card">
-            <span>启用规则</span>
-            <strong id="metric-enabled-rules">0</strong>
-          </div>
-          <div class="metric-card">
-            <span>前缀分组</span>
-            <strong id="metric-route-groups">0</strong>
-          </div>
-          <div class="metric-card">
-            <span>启用地区匹配分组</span>
-            <strong id="metric-region-groups">0</strong>
-          </div>
-        </div>
-      </div>
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-toggle" id="menuToggle" title="菜单"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+      <div class="breadcrumb" id="breadcrumb">概览 / <b>系统概览</b></div>
+      <div class="search"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="globalSearch" placeholder="搜索规则、IP、日志…"><span class="kbd" id="searchKbd" title="Ctrl / ⌘ + K">Ctrl/⌘K</span></div>
+      <div class="theme-toggle"><button class="icon-btn" id="themeBtn" title="切换主题"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg></button></div>
+      <button class="btn btn-primary btn-sm" id="newRuleBtn">+ 新建规则</button>
     </header>
 
-    <nav class="module-nav" aria-label="配置菜单">
-      <div class="nav-brand">
-        <div class="nav-brand-icon">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
+    <!-- ===== Overview ===== -->
+    <div class="page" id="page-overview">
+      <div class="grid kpi-grid">
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--brand)"></span>今日请求</div><div class="kpi-value" id="kpiTotal">—</div><div class="kpi-delta" id="kpiTotalDelta">累计总请求数</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--info)"></span>302 跟随</div><div class="kpi-value" id="kpiRedirect">—</div><div class="kpi-delta" id="kpiRedirectDelta">命中重定向</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--danger)"></span>拦截请求</div><div class="kpi-value" id="kpiFailed">—</div><div class="kpi-delta" id="kpiFailedDelta">失败 / 拦截</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--ok)"></span>平均延迟</div><div class="kpi-value" id="kpiLatency">—</div><div class="kpi-delta" id="kpiLatencyDelta">近 24 小时</div></div>
+      </div>
+      <div class="grid cols-2" style="margin-top:16px">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">请求吞吐趋势 · 近 24 小时</div><div class="panel-head-actions"><span class="pill pill-neutral">按小时</span><button class="btn btn-sm" id="ovRefreshBtn">刷新</button></div></div>
+          <div class="panel-body" id="trendChart"></div>
+          <div class="chart-legend" style="padding:0 16px 16px;font-size:12px;color:var(--text-2);display:flex;gap:16px"><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--brand)"></span>总请求</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--info)"></span>302 跟随</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--danger)"></span>拦截</span></div>
         </div>
-        <div class="nav-brand-text">
-          <span class="nav-brand-name">Proxy Control</span>
-          <span class="nav-brand-sub">路由控制中心</span>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">服务健康</div><span class="pill pill-ok" id="healthPill">正常</span></div>
+          <div class="panel-body" id="healthBody"></div>
         </div>
-        <div class="nav-brand-pulse"></div>
       </div>
-
-      <div class="nav-section">
-        <span class="nav-section-label">概览</span>
-        <button class="module-btn is-active" data-module-target="overview" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-          <span>系统概览</span>
-        </button>
+      <div class="grid cols-2" style="margin-top:16px">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">近期拦截事件</div><button class="btn btn-sm" data-goto="security">查看全部</button></div>
+          <ul class="mini-list" style="padding:6px 16px 12px" id="blocksBody"></ul>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">待办与风险</div></div>
+          <ul class="mini-list" style="padding:6px 16px 12px" id="risksBody"></ul>
+        </div>
       </div>
+    </div>
 
-      <div class="nav-section">
-        <span class="nav-section-label">配置</span>
-        <button class="module-btn" data-module-target="route-config" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-          <span>路由配置</span>
-        </button>
-        <button class="module-btn" data-module-target="geoip-online" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-          <span>在线 IP 定位</span>
-        </button>
-        <button class="module-btn" data-module-target="geoip-offline" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-          <span>离线 IP 定位</span>
-        </button>
-      </div>
+    <!-- ===== Routing ===== -->
+    <div class="page" id="page-routing" hidden>
+      <div class="page-head"><div><h1 class="page-title">路由配置</h1><p class="page-desc">管理路由组、转发规则、正则重写与地区访问控制。</p></div><div class="page-actions"><button class="btn" id="newGroupBtn">+ 新建路由组</button><button class="btn btn-primary" id="newRuleInlineBtn">+ 新建规则</button></div></div>
 
-      <div class="nav-section">
-        <span class="nav-section-label">管理</span>
-        <button class="module-btn" data-module-target="logs" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          <span>日志管理</span>
-        </button>
-        <button class="module-btn" data-module-target="app-logs" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-          <span>应用日志</span>
-        </button>
-        <button class="module-btn" data-module-target="ip-cache-manager" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
-          <span>请求结果缓存</span>
-        </button>
-        <button class="module-btn" data-module-target="ip-ban-manager" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-          <span>IP 封禁管理</span>
-        </button>
-        <button class="module-btn" data-module-target="email-manager" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-          <span>邮件提醒</span>
-        </button>
-        <button class="module-btn" data-module-target="backup-manager" type="button">
-          <svg class="nav-btn-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span>数据管理</span>
-        </button>
-      </div>
-
-      <div class="theme-switcher">
-        <span class="theme-switcher-label">主题</span>
-        <div class="theme-switcher-btns">
-          <span class="theme-dot active" data-theme-val="light" data-theme-name="浅色" title="浅色主题"></span>
-          <span class="theme-dot" data-theme-val="dark" data-theme-name="深色" title="深色主题"></span>
-          <span class="theme-dot" data-theme-val="cosmic" data-theme-name="宇宙" title="宇宙主题"></span>
-          <span class="theme-dot" data-theme-val="ocean" data-theme-name="海洋" title="海洋主题"></span>
-          <span class="theme-dot" data-theme-val="amber" data-theme-name="琥珀" title="琥珀主题"></span>
-          <span class="theme-dot" data-theme-val="forest" data-theme-name="森林" title="森林主题"></span>
-          <span class="theme-dot" data-theme-val="sakura" data-theme-name="樱花" title="樱花主题"></span>
+      <div class="card" style="margin-bottom:16px">
+        <div class="panel-head"><div class="panel-title">路由组</div><span class="pill pill-neutral" id="groupCountPill">0 个</span></div>
+        <div class="panel-body pad-sm">
+          <div class="table-wrap no-border">
+            <table style="min-width:0"><thead><tr><th>路径前缀</th><th>请求主机</th><th>地区匹配</th><th>默认规则</th><th>规则数</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody id="groupBody"></tbody></table>
+          </div>
         </div>
       </div>
 
-      <div class="nav-footer">
-        <div class="nav-status">
-          <span class="nav-status-dot"></span>
-          <span class="nav-status-text">系统运行中</span>
+      <div class="toolbar" id="ruleToolbar">
+        <span class="filter-tag">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          筛选条件
+        </span>
+        <div class="filter-item">
+          <span class="fi-label">关键词</span>
+          <input class="input" id="ruleSearch" placeholder="前缀 / 目标 / 名称…">
         </div>
-        <button id="auth-logout-btn" class="nav-logout-btn" type="button" hidden title="退出登录">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-            <polyline points="16 17 21 12 16 7"/>
-            <line x1="21" y1="12" x2="9" y2="12"/>
-          </svg>
-          <span>退出</span>
-        </button>
+        <div class="filter-item">
+          <span class="fi-label">状态</span>
+          <select id="ruleFilter"><option value="">全部状态</option><option value="enabled">仅启用</option><option value="disabled">仅停用</option><option value="default">默认规则</option></select>
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">主机</span>
+          <select id="ruleHost"><option value="">全部主机</option></select>
+        </div>
+        <button class="btn btn-sm reset" id="resetFilter">重置</button>
       </div>
-    </nav>
-
-    <main class="module-stack">
-      <section class="module-panel active" data-module-panel="overview">
-        <div class="dash-hero">
-          <div class="dash-hero-bg"></div>
-          <div class="dash-hero-particles">
-            <div class="dash-hero-particle"></div>
-            <div class="dash-hero-particle"></div>
-            <div class="dash-hero-particle"></div>
-            <div class="dash-hero-particle"></div>
-            <div class="dash-hero-particle"></div>
-            <div class="dash-hero-particle"></div>
-          </div>
-          <div class="dash-hero-glow dash-hero-glow-1"></div>
-          <div class="dash-hero-glow dash-hero-glow-2"></div>
-          <div class="dash-hero-orbit"></div>
-          <div class="dash-hero-content">
-            <p class="dash-hero-tag">Nginx 302 Proxy</p>
-            <h1 class="dash-hero-title">智能代理<span class="dash-hero-accent">路由控制</span>中心</h1>
-            <p class="dash-hero-desc">多路径前缀路由 · 正则重写 · IP 地区访问控制 · 在线/离线定位 · 请求缓存</p>
-          </div>
-        </div>
-
-        <div class="dash-stats-grid">
-          <article class="dash-stat-card" id="dash-stat-routes">
-            <div class="dash-stat-icon routes-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="routes">—</span>
-              <span class="dash-stat-label">路由前缀</span>
-            </div>
-          </article>
-          <article class="dash-stat-card" id="dash-stat-rules">
-            <div class="dash-stat-icon rules-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="rules">—</span>
-              <span class="dash-stat-label">转发规则</span>
-            </div>
-          </article>
-          <article class="dash-stat-card" id="dash-stat-bans">
-            <div class="dash-stat-icon bans-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="bans">—</span>
-              <span class="dash-stat-label">封禁 IP</span>
-            </div>
-          </article>
-          <article class="dash-stat-card" id="dash-stat-sources">
-            <div class="dash-stat-icon sources-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="sources">—</span>
-              <span class="dash-stat-label">在线定位源</span>
-            </div>
-          </article>
-          <article class="dash-stat-card" id="dash-stat-logfiles">
-            <div class="dash-stat-icon logfiles-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="logfiles">—</span>
-              <span class="dash-stat-label">日志文件</span>
-            </div>
-          </article>
-          <article class="dash-stat-card" id="dash-stat-backups">
-            <div class="dash-stat-icon backups-icon">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            </div>
-            <div class="dash-stat-body">
-              <span class="dash-stat-value" data-metric="backups">—</span>
-              <span class="dash-stat-label">备份文件</span>
-            </div>
-          </article>
-        </div>
-
-        <div class="dash-modules-grid">
-          <article class="dash-module-card" data-module-target="route-config">
-            <div class="dash-module-icon" style="--module-color: var(--accent-primary)">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-            </div>
-            <h3 class="dash-module-title">路由配置</h3>
-            <p class="dash-module-desc">管理路径前缀与转发规则，支持正则重写、Strip Prefix、流式转发</p>
-          </article>
-          <article class="dash-module-card" data-module-target="logs">
-            <div class="dash-module-icon" style="--module-color: var(--success)">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            </div>
-            <h3 class="dash-module-title">日志管理</h3>
-            <p class="dash-module-desc">查询请求日志，支持自动刷新、IP 封禁/解禁操作</p>
-          </article>
-          <article class="dash-module-card" data-module-target="geoip-online">
-            <div class="dash-module-icon" style="--module-color: #8b5cf6">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            </div>
-            <h3 class="dash-module-title">在线 IP 定位</h3>
-            <p class="dash-module-desc">多源配置、权重轮询、自动回退到离线库</p>
-          </article>
-          <article class="dash-module-card" data-module-target="geoip-offline">
-            <div class="dash-module-icon" style="--module-color: #f59e0b">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-            </div>
-            <h3 class="dash-module-title">离线 IP 定位</h3>
-            <p class="dash-module-desc">MaxMind 离线库管理、自动同步、版本回滚</p>
-          </article>
-          <article class="dash-module-card" data-module-target="ip-cache-manager">
-            <div class="dash-module-icon" style="--module-color: #06b6d4">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
-            </div>
-            <h3 class="dash-module-title">请求结果缓存</h3>
-            <p class="dash-module-desc">IP 定位结果缓存管理、命中率统计、手动清除</p>
-          </article>
-          <article class="dash-module-card" data-module-target="ip-ban-manager">
-            <div class="dash-module-icon" style="--module-color: var(--error)">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-            </div>
-            <h3 class="dash-module-title">IP 封禁管理</h3>
-            <p class="dash-module-desc">永久/临时封禁、路径前缀级封禁、批量管理</p>
-          </article>
-          <article class="dash-module-card" data-module-target="app-logs">
-            <div class="dash-module-icon" style="--module-color: #6366f1">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            </div>
-            <h3 class="dash-module-title">应用日志</h3>
-            <p class="dash-module-desc">查看运行日志文件，支持关键词搜索、语法高亮</p>
-          </article>
-          <article class="dash-module-card" data-module-target="email-manager">
-            <div class="dash-module-icon" style="--module-color: #ec4899">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-            </div>
-            <h3 class="dash-module-title">邮件提醒</h3>
-            <p class="dash-module-desc">自动封禁通知、告警邮件配置、发送测试</p>
-          </article>
-          <article class="dash-module-card" data-module-target="backup-manager">
-            <div class="dash-module-icon" style="--module-color: #14b8a6">
-              <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            </div>
-            <h3 class="dash-module-title">数据管理</h3>
-            <p class="dash-module-desc">数据库备份与恢复、合并导入、日志文件清理</p>
-          </article>
-        </div>
-
-        <div class="dash-flow-section">
-          <h2 class="dash-section-title">请求处理流程</h2>
-          <div class="dash-flow-diagram">
-            <div class="dash-flow-node">
-              <div class="dash-flow-node-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-              </div>
-              <span class="dash-flow-node-label">客户端请求</span>
-            </div>
-            <div class="dash-flow-arrow"></div>
-            <div class="dash-flow-node">
-              <div class="dash-flow-node-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-              </div>
-              <span class="dash-flow-node-label">路由匹配</span>
-            </div>
-            <div class="dash-flow-arrow"></div>
-            <div class="dash-flow-node">
-              <div class="dash-flow-node-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              </div>
-              <span class="dash-flow-node-label">访问控制</span>
-            </div>
-            <div class="dash-flow-arrow"></div>
-            <div class="dash-flow-node">
-              <div class="dash-flow-node-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              </div>
-              <span class="dash-flow-node-label">IP 封禁检查</span>
-            </div>
-            <div class="dash-flow-arrow"></div>
-            <div class="dash-flow-node">
-              <div class="dash-flow-node-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-              </div>
-              <span class="dash-flow-node-label">代理转发</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="route-config">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Route Configuration</p>
-              <h2>路由配置</h2>
-              <p class="hint">管理路径前缀和转发规则。点击路径前缀卡片上的按钮新增规则，点击顶部按钮新增前缀。</p>
-            </div>
-            <div class="table-actions">
-              <button id="add-prefix-btn" type="button" class="ghost-btn">新增前缀</button>
-              <button id="add-rule-btn" type="button" class="primary-btn">新增规则</button>
-            </div>
-          </div>
-          <form id="route-filter-form" class="route-filter-form" autocomplete="off">
-            <div class="route-filter-row">
-              <label class="route-filter-field">
-                <span>关键词</span>
-                <input id="route_filter_keyword" type="text" placeholder="前缀 / 域名 / 规则名 / 目标地址 / 备注" />
-              </label>
-              <label class="route-filter-field">
-                <span>状态</span>
-                <select id="route_filter_status">
-                  <option value="">全部</option>
-                  <option value="enabled">已启用</option>
-                  <option value="disabled">已禁用</option>
-                </select>
-              </label>
-              <label class="route-filter-field">
-                <span>默认规则</span>
-                <select id="route_filter_default">
-                  <option value="">全部</option>
-                  <option value="yes">仅默认</option>
-                  <option value="no">非默认</option>
-                </select>
-              </label>
-              <div class="route-filter-actions">
-                <button type="button" id="route-filter-reset-btn" class="ghost-btn">重置</button>
-              </div>
-            </div>
-            <p class="hint route-filter-summary" id="route-filter-summary"></p>
-          </form>
-          <div class="route-groups-layout">
-            <div id="route-group-cards" class="route-group-cards"></div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="logs">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Route Logs</p>
-              <h2>规则转发日志</h2>
-              <p class="hint">查询每次路径规则选路、地区匹配和最终转发目标，也可以设置自动清理天数。</p>
-            </div>
-          </div>
-          <div class="rules-layout logs-layout">
-            <form id="route-log-filter-form" class="sub-card stack-form" style="height: 532px;">
-              <div class="sub-card-head">
-                <h3>日志查询</h3>
-                <div class="table-actions">
-                  <button id="route-log-search-btn" type="submit" class="primary-btn">查询日志</button>
-                  <button id="route-log-reset-btn" type="button" class="ghost-btn">重置条件</button>
-                </div>
-              </div>
-              <div class="two-col">
-                <label>
-                  <span>关键词</span>
-                  <input id="log_keyword" type="text" placeholder="路径、目标地址、302地址、地区、IP、原始IP" />
-                </label>
-                <label>
-                  <span>路径前缀</span>
-                  <input id="log_path_prefix" type="text" placeholder="/play" />
-                </label>
-                <label>
-                  <span>匹配策略</span>
-                  <select id="log_match_strategy">
-                    <option value="">全部</option>
-                    <option value="ip_whitelist_match">IP 白名单命中</option>
-                    <option value="region_match">地区匹配命中</option>
-                    <option value="default_route">默认规则转发</option>
-                    <option value="priority_fallback">优先级回退</option>
-                    <option value="no_route">未匹配到规则</option>
-                  </select>
-                </label>
-                <label>
-                  <span>结果状态</span>
-                  <select id="log_result_status">
-                    <option value="">全部</option>
-                    <option value="forwarded">转发成功</option>
-                    <option value="cache_hit">缓存命中</option>
-                    <option value="forwarded_client_error">上游返回 4xx</option>
-                    <option value="upstream_error">上游异常</option>
-                    <option value="proxy_error">代理内部错误</option>
-                    <option value="no_route">未匹配到规则</option>
-                  </select>
-                </label>
-                <label>
-                  <span>开始时间</span>
-                  <input id="log_date_from" type="datetime-local" />
-                </label>
-                <label>
-                  <span>结束时间</span>
-                  <input id="log_date_to" type="datetime-local" />
-                </label>
-                <label>
-                  <span>返回条数</span>
-                  <input id="log_limit" type="number" min="1" max="500" value="50" />
-                </label>
-              </div>
-            </form>
-
-            <div class="stack-form">
-              <form id="route-log-settings-form" class="sub-card stack-form">
-                <div class="sub-card-head">
-                  <h3>日志保留设置</h3>
-                </div>
-                <label>
-                  <span>最大保存天数</span>
-                  <input id="log_retention_days" type="number" min="1" value="30" />
-                </label>
-                <p class="hint">超过该天数的规则日志会自动删除。系统启动时和运行过程中都会定期清理。</p>
-                <div class="row gap">
-                  <button type="submit" class="primary-btn">保存保留策略</button>
-                  <button type="button" id="log-cleanup-btn" class="ghost-btn danger">手动清理过期日志</button>
-                </div>
-              </form>
-
-              <div id="route-log-settings-status" class="test-result-card is-empty">
-                <p class="test-result-placeholder">这里会显示日志总数、最近清理时间和当前保留策略。</p>
-              </div>
-            </div>
-
-            <div class="sub-card">
-              <div class="sub-card-head">
-                <h3>日志列表</h3>
-                <div class="table-actions">
-                  <!-- 统计信息组 -->
-                  <div class="table-actions-group">
-                    <span class="hint" id="route-log-total-count">共 0 条</span>
-                  </div>
-                  <!-- 刷新控制组 -->
-                  <div class="table-actions-group">
-                    <label class="auto-refresh-toggle" title="开启后按设定间隔自动刷新日志列表">
-                      <input id="log_auto_refresh_enabled" type="checkbox" />
-                      <span class="auto-refresh-label">自动刷新</span>
-                    </label>
-                    <select id="log_auto_refresh_interval" title="刷新间隔（秒）">
-                      <option value="3">3秒</option>
-                      <option value="5" selected>5秒</option>
-                      <option value="10">10秒</option>
-                      <option value="15">15秒</option>
-                      <option value="30">30秒</option>
-                      <option value="60">60秒</option>
-                    </select>
-                    <span class="auto-refresh-status" id="log_auto_refresh_status"></span>
-                  </div>
-                  <!-- 每页大小控制组 -->
-                  <div class="table-actions-group">
-                    <label class="page-size-label">
-                      <span>每页</span>
-                      <select id="log_page_size">
-                        <option value="10">10</option>
-                        <option value="20">20</option>
-                        <option value="50" selected>50</option>
-                        <option value="100">100</option>
-                      </select>
-                    </label>
-                  </div>
-                  <!-- 操作按钮组 -->
-                  <div class="table-actions-group">
-                    <button id="route-log-delete-selected-btn" type="button" class="ghost-btn">删除选中</button>
-                    <button id="route-log-delete-all-btn" type="button" class="ghost-btn">清空全部</button>
-                  </div>
-                </div>
-              </div>
-              <div class="route-log-list-wrap">
-                <div class="route-log-list-header">
-                  <label class="route-log-select-all-label">
-                    <input id="route-log-select-all" type="checkbox" />
-                    <span>全选</span>
-                  </label>
-                  <div class="route-log-toolbar">
-                    <span class="hint">规则转发日志列表</span>
-                  </div>
-                </div>
-                <div id="route-logs-list-body" class="route-log-list-body"></div>
-              </div>
-
-              <div id="log-pagination" class="pagination"></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="app-logs">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Application Logs</p>
-              <h2>应用日志</h2>
-              <p class="hint">查看应用运行日志，支持日期筛选和关键词搜索。</p>
-            </div>
-            <div class="table-actions">
-              <button id="app-log-cleanup-btn" type="button" class="ghost-btn danger">清理过期日志文件</button>
-              <button id="app-log-refresh-btn" type="button" class="ghost-btn">刷新</button>
-              <label class="auto-refresh-toggle" title="开启后每3秒自动刷新日志内容">
-                <input id="app-log-auto-refresh" type="checkbox" />
-                <span class="auto-refresh-label">自动刷新</span>
-              </label>
-            </div>
-          </div>
-          <div class="app-log-layout">
-            <div class="app-log-main">
-              <div class="app-log-toolbar">
-                <label>
-                  <span>日志文件</span>
-                  <select id="app-log-file-select"></select>
-                </label>
-                <label>
-                  <span>关键词搜索</span>
-                  <input id="app-log-keyword" type="text" placeholder="输入关键词过滤日志" />
-                </label>
-                <label>
-                  <span>显示行数</span>
-                  <select id="app-log-tail-lines">
-                    <option value="100" selected>100 行</option>
-                    <option value="500">500 行</option>
-                    <option value="1000">1000 行</option>
-                    <option value="5000">5000 行</option>
-                  </select>
-                </label>
-                <button id="app-log-search-btn" type="button" class="primary-btn">搜索</button>
-              </div>
-              <div class="app-log-info">
-                <span id="app-log-file-info">-</span>
-                <span id="app-log-line-info">-</span>
-              </div>
-              <pre id="app-log-content" class="app-log-content"></pre>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="geoip-online">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Geo Resolver Online</p>
-              <h2>在线 IP 定位源配置</h2>
-            </div>
-          </div>
-          <form id="geoip-online-form" class="stack-form">
-            <label class="toggle-row">
-              <span>启用 IP 定位链路</span>
-              <input type="checkbox" id="geo_enabled" />
-            </label>
-
-            <div class="sub-card">
-              <div class="sub-card-head">
-                <h3>在线定位缓存</h3>
-              </div>
-              <div class="two-col">
-                <label>
-                  <span>缓存时长(秒)</span>
-                  <input id="geo_online_cache_ttl_seconds" type="number" min="0" step="1" inputmode="numeric" value="120" />
-                </label>
-                <div class="test-actions">
-                  <p class="hint">只缓存在线定位成功结果。填 `0` 表示关闭在线定位缓存。</p>
-                  <div class="table-actions">
-                    <button id="geo-online-cache-clear-btn" type="button" class="ghost-btn">清空在线定位缓存</button>
-                    <button type="submit" class="primary-btn">保存在线定位配置</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="sub-card">
-              <div class="sub-card-head">
-                <h3>在线定位源</h3>
-                <button id="add-geo-source-btn" type="button" class="ghost-btn">新增在线源</button>
-              </div>
-              <div class="rule-list-wrap">
-                <table class="rules-table">
-                  <thead>
-                    <tr>
-                      <th>名称</th>
-                      <th>地址</th>
-                      <th>权重</th>
-                      <th>方式</th>
-                      <th>状态</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody id="geo-sources-table-body"></tbody>
-                </table>
-              </div>
-            </div>
-
-            <div class="sub-card test-panel">
-              <div class="sub-card-head">
-                <h3>在线定位源测试</h3>
-              </div>
-              <div class="test-actions inline-actions">
-                <p class="hint">选择一个已保存的在线源进行测试，或直接在弹窗中填写配置测试。</p>
-                <button id="geo-source-test-btn" type="button" class="ghost-btn">测试在线定位源</button>
-              </div>
-            </div>
-          </form>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="geoip-offline">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Geo Resolver Offline</p>
-              <h2>离线 IP 定位源配置</h2>
-            </div>
-          </div>
-          <form id="geoip-offline-form" class="stack-form">
-            <div class="sub-card">
-              <div class="sub-card-head">
-                <h3>离线 IP 库兜底</h3>
-              </div>
-              <div class="three-col">
-                <label class="toggle-row">
-                  <span>启用离线库</span>
-                  <input type="checkbox" id="geo_offline_enabled" />
-                </label>
-                <label>
-                  <span>语言</span>
-                  <input id="geo_offline_locale" type="text" value="zh-CN" />
-                </label>
-                <label>
-                  <span>自动同步周期(小时)</span>
-                  <input id="geo_offline_refresh_interval_hours" type="number" min="1" step="1" inputmode="numeric" value="24" />
-                </label>
-              </div>
-              <label>
-                <span>离线库路径</span>
-                <input id="geo_offline_db_path" type="text" placeholder="data/geoip/GeoLite2-City.mmdb" />
-              </label>
-              <label>
-                <span>离线库下载链接</span>
-                <input id="geo_offline_download_url" type="url" placeholder="https://example.com/GeoLite2-City.mmdb" />
-              </label>
-              <label>
-                <span>下载请求头 JSON</span>
-                <textarea id="geo_offline_download_headers_json" rows="2" placeholder='{"Authorization":"Bearer xxx"}'></textarea>
-              </label>
-              <div class="test-actions inline-actions">
-                <button id="geo-offline-sync-btn" type="button" class="ghost-btn">立即拉取离线库</button>
-                <button id="geo-offline-rollback-btn" type="button" class="ghost-btn">回滚到备份</button>
-              </div>
-              <div id="geo-offline-status" class="test-result-card is-empty">
-                <p class="test-result-placeholder">保存配置后，这里会显示离线库文件状态、最近同步结果和下次同步时间。</p>
-              </div>
-            </div>
-
-            <div class="sub-card test-panel">
-              <div class="sub-card-head">
-                <h3>离线库测试</h3>
-              </div>
-              <div class="test-actions inline-actions">
-                <p class="hint">使用当前离线库配置测试本地文件能否正常返回区域信息。</p>
-                <button id="geo-offline-test-btn" type="button" class="ghost-btn">测试离线库</button>
-              </div>
-            </div>
-
-            <button type="submit" class="primary-btn">保存离线定位配置</button>
-          </form>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="ip-ban-manager">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">IP Ban Manager</p>
-              <h2>IP封禁管理</h2>
-              <p class="hint">管理被封禁的IP地址或IP段，被封禁的请求将被拒绝（返回403）。支持单IP封禁、CIDR网段封禁（如 192.168.1.0/24）、从日志快速封禁，也可手动添加。</p>
-            </div>
-          </div>
-
-          <div class="sub-card">
-            <div class="sub-card-head">
-              <h3>自动封禁</h3>
-              <div class="table-actions">
-                <button id="open-auto-ban-modal-btn" type="button" class="primary-btn">自动封禁配置</button>
-              </div>
-            </div>
-            <div class="stats-grid">
-              <div class="stat-item">
-                <span class="stat-label">状态</span>
-                <span class="stat-value" id="auto-ban-status">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">监控IP数</span>
-                <span class="stat-value" id="auto-ban-tracked-count">0</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">白名单IP数</span>
-                <span class="stat-value" id="auto-ban-whitelist-count">0</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">累计请求</span>
-                <span class="stat-value" id="auto-ban-total-requests">0</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">累计封禁</span>
-                <span class="stat-value" id="auto-ban-total-bans">0</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="sub-card">
-            <div class="sub-card-head">
-              <h3>封禁列表</h3>
-              <div class="table-actions">
-                <div class="table-actions-group">
-                  <span class="hint" id="ban-total-count">共 0 条</span>
-                </div>
-                <div class="table-actions-group">
-                  <label class="auto-refresh-toggle" title="开启后按设定间隔自动刷新封禁列表">
-                    <input id="ban_auto_refresh_enabled" type="checkbox" />
-                    <span class="auto-refresh-label">自动刷新</span>
-                  </label>
-                  <select id="ban_auto_refresh_interval" title="刷新间隔（秒）">
-                    <option value="3">3秒</option>
-                    <option value="5" selected>5秒</option>
-                    <option value="10">10秒</option>
-                    <option value="15">15秒</option>
-                    <option value="30">30秒</option>
-                    <option value="60">60秒</option>
-                  </select>
-                </div>
-                <div class="table-actions-group">
-                  <label class="ban-page-size-label">
-                    <span>每页</span>
-                    <select id="ban_page_size">
-                      <option value="10">10</option>
-                      <option value="20" selected>20</option>
-                      <option value="50">50</option>
-                      <option value="100">100</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="table-actions-group">
-                  <button id="add-ban-btn" type="button" class="primary-btn">添加封禁</button>
-                  <button id="clear-bans-btn" type="button" class="ghost-btn">清空所有封禁</button>
-                </div>
-              </div>
-            </div>
-            <div class="rule-list-wrap">
-              <table class="rules-table compact-table">
-                <thead>
-                  <tr>
-                    <th>IP地址/段</th>
-                    <th>路径前缀</th>
-                    <th>原因</th>
-                    <th>操作者</th>
-                    <th>封禁时间</th>
-                    <th>到期时间</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody id="banned-ips-table-body">
-                  <tr><td colspan="7">加载中...</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div id="ban-pagination" class="pagination"></div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="ip-cache-manager">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Request Result Cache</p>
-              <h2>请求结果缓存管理</h2>
-              <p class="hint">同IP请求同链接时，在有效期内直接使用之前的处理结果（302重定向或流式转发），跳过重定向链跟踪，提升响应速度。</p>
-            </div>
-          </div>
-
-          <form id="ip-cache-settings-form" class="sub-card stack-form">
-            <div class="sub-card-head">
-              <h3>缓存配置</h3>
-            </div>
-            <label>
-              <span>启用缓存</span>
-              <select id="ip_cache_enabled">
-                <option value="1">启用</option>
-                <option value="0">禁用</option>
-              </select>
-            </label>
-            <label>
-              <span>缓存时间（秒）</span>
-              <input id="ip_cache_ttl_seconds" type="number" min="0" value="300" />
-            </label>
-            <p class="hint">同IP请求同链接时，在有效期内直接使用之前的处理结果，跳过重定向链跟踪。</p>
-            <label>
-              <span>最大条目数</span>
-              <input id="ip_cache_max_entries" type="number" min="100" max="50000" value="5000" />
-            </label>
-            <p class="hint">超过该数量时，最久未使用的缓存条目会被自动淘汰（LRU策略）。</p>
-            <button type="submit" class="primary-btn">保存缓存配置</button>
-          </form>
-
-          <div class="sub-card">
-            <div class="sub-card-head">
-              <h3>缓存统计</h3>
-              <div class="table-actions">
-                <button id="clear-ip-cache-btn" type="button" class="ghost-btn">清空缓存</button>
-              </div>
-            </div>
-            <div id="ip-cache-stats" class="test-result-card is-empty">
-              <p class="test-result-placeholder">这里会显示缓存命中率和当前条目数。</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="email-manager">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Email Alert</p>
-              <h2>邮件提醒</h2>
-              <p class="hint">配置邮件提醒，当检测到IP请求异常时自动发送邮件通知管理员。</p>
-            </div>
-          </div>
-
-          <form id="email-settings-form" class="sub-card stack-form">
-            <div class="sub-card-head">
-              <h3>邮件配置</h3>
-            </div>
-            <label>
-              <span>启用邮件提醒</span>
-              <select id="email_enabled">
-                <option value="1">启用</option>
-                <option value="0">禁用</option>
-              </select>
-            </label>
-            <label>
-              <span>SMTP服务器</span>
-              <input id="email_smtp_host" type="text" placeholder="smtp.qq.com" />
-            </label>
-            <div class="two-col">
-              <label>
-                <span>SMTP端口</span>
-                <input id="email_smtp_port" type="number" min="1" value="465" />
-              </label>
-              <label>
-                <span>SSL/TLS</span>
-                <select id="email_smtp_ssl">
-                  <option value="1">启用</option>
-                  <option value="0">禁用</option>
-                </select>
-              </label>
-            </div>
-            <label>
-              <span>发件邮箱</span>
-              <input id="email_sender" type="email" placeholder="your-email@qq.com" />
-            </label>
-            <label>
-              <span>发件人名称（可选）</span>
-              <input id="email_sender_name" type="text" placeholder="代理监控系统" />
-            </label>
-            <p class="hint">自定义发件人显示名称，如"代理监控系统"。留空则只显示邮箱地址。</p>
-            <label>
-              <span>邮箱密码/授权码</span>
-              <input id="email_password" type="password" placeholder="请输入邮箱密码或授权码" />
-            </label>
-            <label>
-              <span>收件邮箱（多个用逗号分隔）</span>
-              <input id="email_recipients" type="text" placeholder="admin1@example.com,admin2@example.com" />
-            </label>
-            <p class="hint">多个收件邮箱用逗号分隔，系统会在检测到异常时向所有收件人发送邮件。</p>
-            <label>
-              <span>封禁链接域名（可选）</span>
-              <input id="email_block_link_base_url" type="text" placeholder="留空则自动检测，如 https://example.com" />
-            </label>
-            <p class="hint">邮件中封禁链接使用的域名。若服务部署在反向代理后，请填写对外访问地址（如 https://proxy.example.com），留空则自动使用服务器本地地址。</p>
-
-            <div class="sub-card-head" style="margin-top: 16px;">
-              <h3>提醒阈值</h3>
-            </div>
-            <div class="two-col">
-              <label>
-                <span>监测时间窗口（秒）</span>
-                <input id="email_alert_window_seconds" type="number" min="10" value="60" />
-              </label>
-              <label>
-                <span>请求频率阈值</span>
-                <input id="email_alert_max_requests" type="number" min="1" value="80" />
-              </label>
-            </div>
-            <div class="two-col">
-              <label>
-                <span>404错误阈值</span>
-                <input id="email_alert_max_404" type="number" min="1" value="15" />
-              </label>
-              <label>
-                <span>同IP提醒冷却时间（分钟）</span>
-                <input id="email_alert_cooldown_minutes" type="number" min="1" value="30" />
-              </label>
-            </div>
-            <p class="hint">同一IP在冷却时间内不会重复发送提醒邮件，避免邮件轰炸。</p>
-            <div class="row gap">
-              <button type="submit" class="primary-btn">保存配置</button>
-              <label class="inline-label">
-                <span>测试模板</span>
-                <select id="email_test_template_type">
-                  <option value="alert">异常请求模板</option>
-                  <option value="ban">封禁通知模板</option>
-                </select>
-              </label>
-              <button type="button" id="test-email-btn" class="ghost-btn">发送测试邮件</button>
-            </div>
-          </form>
-        </div>
-      </section>
-
-      <section class="module-panel" data-module-panel="backup-manager">
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <p class="section-tag">Data Management</p>
-              <h2>数据备份与恢复</h2>
-              <p class="hint">备份和恢复数据库配置。覆盖模式会替换整个数据库，合并模式仅导入新规则（跳过已存在的）。</p>
-            </div>
-            <div class="table-actions">
-              <button id="backup-create-btn" type="button" class="primary-btn">创建备份</button>
-            </div>
-          </div>
-
-          <div class="sub-card">
-            <div class="sub-card-head">
-              <h3>备份列表</h3>
-              <div class="table-actions">
-                <span class="hint" id="backup-total-count">共 0 个备份</span>
-                <button id="backup-refresh-btn" type="button" class="ghost-btn">刷新</button>
-              </div>
-            </div>
-            <div class="rule-list-wrap">
-              <table class="rules-table compact-table">
-                <thead>
-                  <tr>
-                    <th>文件名</th>
-                    <th>大小</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody id="backup-table-body">
-                  <tr><td colspan="4">暂无备份</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="sub-card">
-            <div class="sub-card-head">
-              <h3>从文件恢复</h3>
-            </div>
-            <form id="backup-upload-form" class="stack-form">
-              <label>
-                <span>恢复模式</span>
-                <select id="backup_restore_mode">
-                  <option value="overwrite">覆盖模式（替换整个数据库）</option>
-                  <option value="merge">合并模式（仅导入新规则）</option>
-                </select>
-              </label>
-              <p class="hint" id="backup-mode-hint">覆盖模式：用上传的数据库文件完全替换当前数据库。合并模式：仅导入上传文件中的新规则，跳过已存在的规则。</p>
-              <label>
-                <span>选择数据库文件</span>
-                <input id="backup-file-input" type="file" accept=".db" />
-              </label>
-              <button type="submit" class="primary-btn">上传并恢复</button>
-            </form>
-          </div>
-        </div>
-      </section>
-    </main>
-  </div>
-
-  <div id="toast" class="toast"></div>
-
-  <!-- 路径前缀弹框 -->
-  <div id="prefix-modal" class="modal-overlay" hidden>
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3 id="route-group-form-title">新增路径前缀</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="prefix-modal" aria-label="关闭">×</button>
+      <div class="chipbar" id="ruleChips"></div>
+      <div class="hint" id="rulesSummary" style="margin-bottom:10px"></div>
+      <div class="table-wrap">
+        <table id="rulesTable"><thead><tr><th>ID</th><th>名称 / 前缀</th><th>目标地址</th><th>正则重写</th><th>地区过滤</th><th>优先级</th><th>流式</th><th>状态</th><th>默认</th><th>操作</th></tr></thead><tbody id="rulesBody"></tbody></table>
       </div>
-      <form id="prefix-form" class="modal-body">
-        <input id="route_group_old_path_prefix" type="hidden" />
-        <input id="route_group_old_request_host" type="hidden" />
-        <label>
-          <span>路径前缀 <strong style="color:#c00">*</strong></span>
-          <input id="route_group_path_prefix" type="text" placeholder="/play" required />
-        </label>
-        <label>
-          <span>请求域名（可选）</span>
-          <input id="route_group_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
-        </label>
-        <div class="two-col">
-          <label>
-            <span>IP白名单（访问控制，可选）</span>
-            <input id="route_group_access_ip_whitelist" type="text" placeholder="1.1.1.1,203.0.113.0/24 留空=不限制" />
-          </label>
-          <label>
-            <span>IP黑名单（可选）</span>
-            <input id="route_group_ip_blacklist" type="text" placeholder="1.1.1.1,203.0.113.0/24 留空=不限制" />
-          </label>
-          <label>
-            <span>地区白名单（可选）</span>
-            <input id="route_group_region_whitelist" type="text" placeholder="广东,深圳,华南 留空=不限制" />
-          </label>
-          <label>
-            <span>地区黑名单（可选）</span>
-            <input id="route_group_region_blacklist" type="text" placeholder="广东,深圳,华南 留空=不限制" />
-          </label>
+    </div>
+
+    <!-- ===== Security ===== -->
+    <div class="page" id="page-security" hidden>
+      <div class="page-head"><div><h1 class="page-title">安全与封禁</h1><p class="page-desc">查看封禁名单、配置自动封禁策略与白名单。</p></div></div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">封禁名单</div><div class="panel-head-actions"><span class="pill pill-neutral" id="banSummary"></span><button class="btn btn-sm btn-danger" id="clearBans">清空封禁</button><button class="btn btn-sm" id="manualBanBtn">+ 手动封禁</button></div></div>
+          <div class="table-wrap no-border">
+            <table><thead><tr><th>IP</th><th>原因</th><th>来源</th><th>到期</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody id="banBody"></tbody></table>
+          </div>
+          <div class="panel-body" style="padding-top:0">
+            <div class="pagination" id="banPagination"></div>
+            <div class="log-actions" style="margin-top:12px">
+              <span class="hint">每页</span>
+              <select id="ban_page_size" class="input inline" style="min-width:auto;max-width:none;width:auto;padding:5px 30px 5px 10px"><option value="10">10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select>
+              <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="ban_auto_refresh_enabled"> 自动刷新</label>
+              <input class="input inline" id="ban_auto_refresh_interval" type="number" min="1" value="5" style="width:70px;padding:5px 8px"> <span class="hint">秒</span>
+              <span class="auto-refresh-status" id="ban_auto_refresh_status"></span>
+            </div>
+          </div>
         </div>
-        <p class="hint">访问控制按「IP白 → IP黑 → 地区白 → 地区黑」顺序检查，命中任一拦截规则返回403。前缀配置作用于该前缀下所有规则（先于规则级检查）。IP白名单与转发规则的IP白名单（路由匹配）独立。</p>
-        <label>
-          <span>备注</span>
-          <textarea id="route_group_notes" rows="3" placeholder="用于说明该路径前缀的业务用途"></textarea>
-        </label>
-      </form>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="prefix-modal">取消</button>
-        <button type="submit" form="prefix-form" class="primary-btn">保存</button>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">自动封禁策略</div><span class="pill pill-neutral" id="autoBanStatusPill">已停用</span></div>
+          <div class="panel-body" id="autoBanStatsBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editAutoBanBtn">编辑策略</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Geo ===== -->
+    <div class="page" id="page-geo" hidden>
+      <div class="page-head"><div><h1 class="page-title">IP 定位</h1><p class="page-desc">在线定位源按权重轮询，离线 MMDB 兜底，结果内存缓存。</p></div></div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="panel-head"><div class="panel-title">在线定位源</div><div class="panel-head-actions"><button class="btn btn-sm" id="editGeoOnlineBtn">在线配置</button><button class="btn btn-sm" id="clearGeoCache">清空定位缓存</button><button class="btn btn-sm" id="addGeoSourceBtn">+ 新增源</button></div></div>
+        <div class="panel-body" id="geoSourceBody"></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">离线 MMDB</div><div class="panel-head-actions"><button class="btn btn-sm" id="editGeoOfflineBtn">配置</button><button class="btn btn-sm btn-primary" id="syncMMDB">同步库</button><button class="btn btn-sm" id="rollbackMMDB">回滚</button><button class="btn btn-sm" id="testMMDB">测试</button></div></div>
+          <div class="panel-body" id="offlineStatusBody"></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">定位结果缓存</div><div class="panel-head-actions"><span class="pill pill-ok" id="geoCachePill">启用</span><button class="btn btn-sm" id="editGeoCacheBtn">编辑</button></div></div>
+          <div class="panel-body" id="geoCacheBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="clearCache">清空缓存</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Logs ===== -->
+    <div class="page" id="page-logs" hidden>
+      <div class="page-head"><div><h1 class="page-title">日志与审计</h1><p class="page-desc">按请求维度追踪转发链路，或浏览应用运行日志。</p></div></div>
+      <div class="tabs">
+        <div class="tab active" data-tab="req">请求日志</div>
+        <div class="tab" data-tab="app">应用日志</div>
+      </div>
+
+      <div data-panel="req">
+        <form class="toolbar" id="route-log-filter-form">
+          <span class="filter-tag">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            筛选条件
+          </span>
+          <div class="filter-item">
+            <span class="fi-label">关键词</span>
+            <input class="input" id="log_keyword" placeholder="路径 / IP / 规则…">
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">路径前缀</span>
+            <input class="input" id="log_path_prefix" placeholder="/play">
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">命中域名</span>
+            <input class="input" id="log_rule_request_host" placeholder="example.com">
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">匹配策略</span>
+            <select id="log_match_strategy"><option value="">全部</option><option value="ip_whitelist_match">IP 白名单命中</option><option value="region_match">地区命中</option><option value="default_route">默认路由</option><option value="priority_fallback">优先级回退</option><option value="no_route">未匹配路由</option></select>
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">结果状态</span>
+            <select id="log_result_status"><option value="">全部</option><option value="forwarded">转发成功</option><option value="cache_hit">缓存命中</option><option value="forwarded_client_error">上游 4xx</option><option value="upstream_error">上游异常</option><option value="proxy_error">代理异常</option><option value="no_route">未匹配路由</option></select>
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">开始日期</span>
+            <input class="input" id="log_date_from" type="datetime-local" style="min-width:180px">
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">结束日期</span>
+            <input class="input" id="log_date_to" type="datetime-local" style="min-width:180px">
+          </div>
+          <div class="filter-item">
+            <span class="fi-label">每页</span>
+            <select id="log_page_size"><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>
+          </div>
+          <button class="btn btn-primary btn-sm" type="submit">查询</button>
+          <button class="btn btn-sm" type="button" id="route-log-reset-btn">重置</button>
+        </form>
+        <div class="chipbar" id="logChips"></div>
+
+        <div class="log-actions">
+          <span class="hint" id="route-log-total-count">共 0 条</span>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="route-log-select-all"> 全选</label>
+          <button class="btn btn-sm btn-danger" id="route-log-delete-selected-btn">删除选中</button>
+          <button class="btn btn-sm" id="route-log-delete-all-btn">清空全部</button>
+          <span style="flex:1"></span>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="log_auto_refresh_enabled"> 自动刷新</label>
+          <input class="input inline" id="log_auto_refresh_interval" type="number" min="1" value="5" style="width:70px;padding:5px 8px"> <span class="hint">秒</span>
+          <span class="auto-refresh-status" id="log_auto_refresh_status"></span>
+        </div>
+
+        <div id="route-logs-list-body"></div>
+        <div class="pagination" id="log-pagination"></div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="panel-head"><div class="panel-title">路由日志保留策略</div><div class="panel-head-actions"><button class="btn btn-sm btn-danger" id="logClearAllBtn">清空全部</button><button class="btn btn-sm" id="cleanupLogs">清理历史日志</button></div></div>
+          <div class="panel-body">
+            <div class="kv"><div class="k">保留天数</div><div class="val"><input class="input inline" type="number" id="log_retention_days" value="30" style="max-width:120px"> 天</div></div>
+            <div id="route-log-settings-status"></div>
+            <button class="btn btn-primary btn-sm" style="margin-top:8px" id="saveRetention">保存策略</button>
+          </div>
+        </div>
+      </div>
+
+      <div data-panel="app" hidden>
+        <div class="grid cols-2">
+          <div>
+            <div class="card"><div class="panel-head"><div class="panel-title">日志文件</div><div class="panel-head-actions"><button class="btn btn-sm" id="app-log-refresh-btn">刷新</button><button class="btn btn-sm btn-danger" id="app-log-cleanup-btn">清理</button></div></div>
+              <div class="panel-body" id="appLogFiles"></div>
+            </div>
+          </div>
+          <div>
+            <div class="card"><div class="panel-head"><div class="panel-title">内容预览</div><span class="pill pill-neutral" id="appLogName">—</span></div>
+              <div class="panel-body">
+                <div class="log-actions" style="margin-top:0">
+                  <input class="input inline" id="app-log-keyword" placeholder="关键词…" style="width:180px">
+                  <button class="btn btn-sm" id="app-log-search-btn">搜索</button>
+                  <span class="hint">末尾</span>
+                  <input class="input inline" id="app-log-tail-lines" type="number" value="100" style="width:80px;padding:5px 8px"> <span class="hint">行</span>
+                  <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="app-log-auto-refresh"> 自动刷新</label>
+                </div>
+                <div class="hint" id="app-log-file-info" style="margin-bottom:8px"></div>
+                <div class="log-content" id="appLogContent"></div>
+                <div class="hint" id="app-log-line-info" style="margin-top:8px"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== System ===== -->
+    <div class="page" id="page-system" hidden>
+      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">数据备份与恢复、邮件提醒、请求结果缓存、请求去重与账户。</p></div></div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">备份与恢复</div><div class="panel-head-actions"><label class="btn btn-sm" style="cursor:pointer">上传并恢复<input type="file" id="backupFile" accept=".db" hidden></label><button class="btn btn-sm" id="backup-refresh-btn">刷新</button><button class="btn btn-sm btn-primary" id="createBackupBtn">创建备份</button></div></div>
+          <div class="panel-body">
+            <div class="table-wrap no-border">
+              <table style="min-width:0"><thead><tr><th>文件</th><th>大小</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="backupBody"></tbody></table>
+            </div>
+            <div class="hint" id="restore-mode-hint" style="margin-top:10px"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">邮件提醒</div><span class="pill pill-neutral" id="emailStatusPill">未配置</span></div>
+          <div class="panel-body" id="emailSummaryBody"></div>
+          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-sm" id="editEmailBtn">编辑配置</button><button class="btn btn-primary btn-sm" id="testEmailBtn">发送测试邮件</button></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">请求结果缓存 (ip_result_cache)</div><div class="panel-head-actions"><span class="pill pill-ok" id="ipCachePill">启用</span><button class="btn btn-sm" id="editIpCacheBtn">编辑</button></div></div>
+          <div class="panel-body" id="ipCacheBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="clearResultCache">清空缓存</button></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">请求去重 (request_dedup)</div><span class="pill pill-ok" id="dedupPill">启用</span></div>
+          <div class="panel-body" id="dedupBody"></div>
+          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="saveDedup">保存去重配置</button><button class="btn btn-sm" id="clearDedup">清空去重缓存</button></div>
+        </div>
       </div>
     </div>
   </div>
+</div>
 
-  <!-- 规则弹框 -->
-  <div id="rule-modal" class="modal-overlay" hidden>
-    <div class="modal-content modal-lg">
-      <div class="modal-header">
-        <h3 id="rule-form-title">新增规则</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="rule-modal" aria-label="关闭">×</button>
-      </div>
-      <form id="rule-form" class="modal-body">
-        <input id="rule_id" type="hidden" />
-        <div class="two-col">
-          <label>
-            <span>规则名称 <strong style="color:#c00">*</strong></span>
-            <input id="rule_name" type="text" placeholder="华东默认线路" required />
-          </label>
-          <label>
-            <span>路径前缀 <strong style="color:#c00">*</strong></span>
-            <input id="rule_path_prefix" list="route-group-options" type="text" placeholder="/play" required />
-            <datalist id="route-group-options"></datalist>
-          </label>
-          <label>
-            <span>请求域名（可选）</span>
-            <input id="rule_request_host" type="text" placeholder="a.com,b.com 或留空表示任意域名" />
-          </label>
-          <label>
-            <span>目标地址 <strong style="color:#c00">*</strong></span>
-            <input id="rule_target_url" type="url" placeholder="https://backend.example.com" required />
-          </label>
-          <label>
-            <span>IP 白名单（路由匹配）</span>
-            <input id="rule_ip_whitelist" type="text" placeholder="1.1.1.1,2.2.2.2,203.0.113.0/24 命中走该规则" />
-          </label>
-          <label>
-            <span>地区条件（路由匹配）</span>
-            <input id="rule_region_filters" type="text" placeholder="广东,深圳,华南 命中走该规则" />
-          </label>
-          <label>
-            <span>访问控制 IP白名单</span>
-            <input id="rule_access_ip_whitelist" type="text" placeholder="1.1.1.1,203.0.113.0/24 留空=不限制" />
-          </label>
-          <label>
-            <span>访问控制 IP黑名单</span>
-            <input id="rule_ip_blacklist" type="text" placeholder="1.1.1.1,203.0.113.0/24 留空=不限制" />
-          </label>
-          <label>
-            <span>访问控制 地区白名单</span>
-            <input id="rule_region_whitelist" type="text" placeholder="广东,深圳 留空=不限制" />
-          </label>
-          <label>
-            <span>访问控制 地区黑名单</span>
-            <input id="rule_region_blacklist" type="text" placeholder="广东,深圳 留空=不限制" />
-          </label>
-          <label>
-            <span>优先级</span>
-            <input id="rule_priority" type="number" value="0" />
-          </label>
-          <label>
-            <span>超时(秒)</span>
-            <input id="rule_timeout" type="number" min="1" value="30" />
-          </label>
-          <label>
-            <span>最大重定向</span>
-            <input id="rule_max_redirects" type="number" min="0" value="10" />
-          </label>
-          <label>
-            <span>重试次数</span>
-            <input id="rule_retry_times" type="number" min="0" value="3" />
-          </label>
-        </div>
-        <div class="two-col">
-          <label>
-            <span>路径正则模式</span>
-            <input id="rule_path_rewrite_pattern" type="text" placeholder="留空表示不启用，例：^/api/(.+)$" />
-          </label>
-          <label>
-            <span>路径替换模板</span>
-            <input id="rule_path_rewrite_replacement" type="text" placeholder="支持 \\1 反向引用，例：/v2/\\1" />
-          </label>
-        </div>
-        <label>
-          <span>备注</span>
-          <textarea id="rule_notes" rows="2" placeholder="用于补充业务说明"></textarea>
-        </label>
-        <div class="check-grid">
-          <label class="toggle-row"><span>启用规则</span><input id="rule_enabled" type="checkbox" checked /></label>
-          <label class="toggle-row"><span>默认规则</span><input id="rule_is_default" type="checkbox" /></label>
-          <label class="toggle-row"><span>去掉前缀</span><input id="rule_strip_prefix" type="checkbox" /></label>
-          <label class="toggle-row"><span>自动跟随重定向</span><input id="rule_follow_redirects" type="checkbox" checked /></label>
-          <label class="toggle-row"><span>启用流式转发</span><input id="rule_enable_streaming" type="checkbox" checked /></label>
-        </div>
-      </form>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="rule-modal">取消</button>
-        <button type="submit" form="rule-form" class="primary-btn">保存</button>
-      </div>
+<div class="modal-mask" id="modalMask"><div class="modal" id="modal"></div></div>
+
+<div class="drawer-mask" id="drawerMask"></div>
+<aside class="drawer" id="drawer"><div class="drawer-head"><div class="panel-title" id="drawerTitle">详情</div><button class="icon-btn" id="drawerClose">✕</button></div><div class="drawer-body" id="drawerBody"></div></aside>
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- 登录层 -->
+<div id="auth-overlay" class="auth-overlay">
+  <form class="auth-card" id="auth-login-form">
+    <div class="auth-logo"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+    <h1 class="auth-title">后台登录</h1>
+    <p class="auth-sub">请输入 config.yaml 中配置的后台账号和密码</p>
+    <div class="auth-error" id="auth-error" hidden></div>
+    <div class="form-field">
+      <label>用户名</label>
+      <input class="input" id="auth_username" autocomplete="username" placeholder="admin">
     </div>
-  </div>
-
-  <!-- 封禁IP弹框 -->
-  <div id="ban-ip-modal" class="modal-overlay" hidden>
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3 id="ban-ip-modal-title">封禁IP</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="ban-ip-modal" aria-label="关闭">×</button>
-      </div>
-      <form id="ban-ip-form" class="modal-body">
-        <input id="ban_ip_mode" type="hidden" value="add" />
-        <label>
-          <span>IP地址 / IP段 <strong style="color:#c00">*</strong></span>
-          <input id="ban_ip_address" type="text" placeholder="单个IP: 1.2.3.4 ｜ IP段: 192.168.1.0/24" required />
-        </label>
-        <label>
-          <span>路径前缀（可选）</span>
-          <input id="ban_ip_path_prefix" type="text" placeholder="留空=全局封禁；填 /play 只封禁该前缀下请求" />
-        </label>
-        <label>
-          <span>封禁原因</span>
-          <input id="ban_ip_reason" type="text" placeholder="可选，记录封禁原因便于后续排查" />
-        </label>
-        <label>
-          <span>封禁时长</span>
-          <select id="ban_ip_permanent">
-            <option value="1" selected>永久封禁</option>
-            <option value="0">临时封禁</option>
-          </select>
-        </label>
-        <label id="ban_ip_duration_label">
-          <span>临时封禁时长（小时，支持小数） <strong style="color:#c00">*</strong></span>
-          <input id="ban_ip_duration" type="number" min="0.0166" step="any" value="1" placeholder="1 = 1小时，0.5 = 30分钟，0.25 = 15分钟" />
-        </label>
-        <p class="hint">支持单个IP（如 1.2.3.4）或 CIDR 网段（如 192.168.1.0/24 封禁整个 192.168.1.x 网段）。路径前缀留空表示全局封禁；填写后只封禁该前缀下的请求。选择"临时封禁"时，到期后自动解封。</p>
-      </form>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="ban-ip-modal">取消</button>
-        <button type="submit" form="ban-ip-form" class="primary-btn">确认封禁</button>
-      </div>
+    <div class="form-field">
+      <label>密码</label>
+      <input class="input" id="auth_password" type="password" autocomplete="current-password" placeholder="••••••••">
     </div>
-  </div>
+    <button class="btn btn-primary" type="submit">登录</button>
+  </form>
+</div>
 
-  <!-- 延长封禁弹框 -->
-  <div id="ban-extend-modal" class="modal-overlay" hidden>
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3>延长封禁时间</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="ban-extend-modal" aria-label="关闭">×</button>
-      </div>
-      <form id="ban-extend-form" class="modal-body">
-        <input id="ban_extend_ip" type="hidden" />
-        <label>
-          <span>IP地址</span>
-          <input id="ban_extend_ip_display" type="text" readonly />
-        </label>
-        <label>
-          <span>当前到期时间</span>
-          <input id="ban_extend_current_expire" type="text" readonly />
-        </label>
-        <label>
-          <span>延长时长（小时，支持小数） <strong style="color:#c00">*</strong></span>
-          <input id="ban_extend_duration" type="number" min="0.0166" step="any" value="1" placeholder="1 = 1小时，0.5 = 30分钟，0.25 = 15分钟" required />
-        </label>
-        <p class="hint">延长时长会在当前到期时间基础上累加；若已过期或为永久封禁，则从当前时间起算并转为临时封禁。</p>
-      </form>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="ban-extend-modal">取消</button>
-        <button type="submit" form="ban-extend-form" class="primary-btn">确认延长</button>
-      </div>
-    </div>
-  </div>
+<!-- 配置状态暂存：供 modules.js 的 load*Settings/open*Settings 暂存后端配置，无 UI 呈现 -->
+<div hidden aria-hidden="true">
+  <input type="hidden" id="ip_cache_enabled">
+  <input type="hidden" id="ip_cache_ttl_seconds">
+  <input type="hidden" id="ip_cache_max_entries">
+  <input type="hidden" id="dedup_enabled">
+  <input type="hidden" id="dedup_window_seconds">
+  <input type="hidden" id="dedup_max_cache_entries">
+  <input type="hidden" id="auto_ban_enabled">
+  <input type="hidden" id="auto_ban_window_seconds">
+  <input type="hidden" id="auto_ban_max_requests">
+  <input type="hidden" id="auto_ban_ban_duration_seconds">
+  <input type="hidden" id="auto_ban_max_404">
+  <input type="hidden" id="auto_ban_auto_ban_on_404">
+  <input type="hidden" id="auto_ban_whitelist">
+  <input type="hidden" id="auto_ban_email_on_ban">
+  <input type="hidden" id="email_enabled">
+  <input type="hidden" id="email_smtp_host">
+  <input type="hidden" id="email_smtp_port">
+  <input type="hidden" id="email_smtp_ssl">
+  <input type="hidden" id="email_sender">
+  <input type="hidden" id="email_sender_name">
+  <input type="hidden" id="email_password">
+  <input type="hidden" id="email_recipients">
+  <input type="hidden" id="email_block_link_base_url">
+  <input type="hidden" id="email_alert_window_seconds">
+  <input type="hidden" id="email_alert_max_requests">
+  <input type="hidden" id="email_alert_max_404">
+  <input type="hidden" id="email_alert_cooldown_minutes">
+</div>
 
-  <!-- 在线源编辑弹框 -->
-  <div id="geo-source-modal" class="modal-overlay" hidden>
-    <div class="modal-content modal-lg">
-      <div class="modal-header">
-        <h3 id="geo-source-form-title">新增在线源</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="geo-source-modal" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <input id="geo_source_id" type="hidden" />
-        <label class="toggle-row geo-source-enabled-row">
-          <span>启用在线源</span>
-          <input id="geo_source_enabled" type="checkbox" checked />
-        </label>
-        <div class="two-col">
-          <label><span>名称</span><input id="geo_source_name" type="text" placeholder="provider-a" /></label>
-          <label><span>接口地址</span><input id="geo_source_url" type="url" placeholder="https://example.com/{{ip}}/query 路径参数占位符为 {{ip}}"/></label>
-          <label><span>权重</span><input id="geo_source_weight" type="number" min="1" value="1" /></label>
-          <label><span>优先级</span><input id="geo_source_priority" type="number" value="0" /></label>
-          <label><span>请求方法</span><select id="geo_source_method"><option value="GET">GET</option><option value="POST">POST</option></select></label>
-          <label><span>传参位置</span><select id="geo_source_request_location"><option value="query">query</option><option value="body">body</option></select></label>
-          <label><span>Body 格式</span><select id="geo_source_body_format"><option value="json">json</option><option value="form">form</option><option value="raw">raw</option></select></label>
-          <label><span>IP 参数名</span><input id="geo_source_ip_param_name" type="text" value="ip" /></label>
-          <label><span>超时(秒)</span><input id="geo_source_timeout" type="number" min="1" value="3" /></label>
-          <label><span>国家字段路径</span><input id="geo_source_country_path" type="text" value="country" /></label>
-          <label><span>地区字段路径</span><input id="geo_source_region_path" type="text" value="region" /></label>
-          <label><span>城市字段路径</span><input id="geo_source_city_path" type="text" value="city" /></label>
-          <label><span>完整地区字段路径</span><input id="geo_source_full_path" type="text" placeholder="data.location" /></label>
-        </div>
-        <label><span>Query 参数 JSON</span><textarea id="geo_source_query_params_json" rows="2" placeholder='{"accessKey":"demo","format":"json","ip":"{{ip}}"}'></textarea></label>
-        <label><span>请求头 JSON</span><textarea id="geo_source_headers_json" rows="2" placeholder='{"Authorization":"Bearer xxx"}'></textarea></label>
-        <label><span>请求体模板</span><textarea id="geo_source_body_template" rows="2" placeholder='{"ip":"{{ip}}"}'></textarea></label>
-        <label><span>备注</span><textarea id="geo_source_notes" rows="2" placeholder="用于说明该在线源的特点"></textarea></label>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="geo-source-modal">取消</button>
-        <button type="button" id="geo-source-save-btn" class="primary-btn">保存在线源</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 在线源测试弹框 -->
-  <div id="geo-source-test-modal" class="modal-overlay" hidden>
-    <div class="modal-content modal-lg">
-      <div class="modal-header">
-        <h3>在线定位源测试</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="geo-source-test-modal" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <label>
-          <span>选择在线源 <strong style="color:#c00">*</strong></span>
-          <select id="geo_source_test_select">
-            <option value="">请选择在线源</option>
-          </select>
-        </label>
-        <label>
-          <span>测试 IP <strong style="color:#c00">*</strong></span>
-          <input id="geo_source_test_ip" type="text" placeholder="8.8.8.8" />
-        </label>
-        <div id="geo-source-test-result" class="test-result-card is-empty">
-          <p class="test-result-placeholder">选择在线源并输入测试 IP 后，点击"开始测试"查看在线定位结果。</p>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="geo-source-test-modal">关闭</button>
-        <button type="button" id="geo-source-test-run-btn" class="primary-btn">开始测试</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 离线库测试弹框 -->
-  <div id="geo-offline-test-modal" class="modal-overlay" hidden>
-    <div class="modal-content modal-lg">
-      <div class="modal-header">
-        <h3>离线库测试</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="geo-offline-test-modal" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <label>
-          <span>测试 IP <strong style="color:#c00">*</strong></span>
-          <input id="geo_offline_test_ip" type="text" placeholder="8.8.8.8" />
-        </label>
-        <p class="hint">使用当前离线库配置测试本地文件能否正常返回区域信息。</p>
-        <div id="geo-offline-test-result" class="test-result-card is-empty">
-          <p class="test-result-placeholder">输入测试 IP 后，点击"开始测试"查看离线库定位结果。</p>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="geo-offline-test-modal">关闭</button>
-        <button type="button" id="geo-offline-test-run-btn" class="primary-btn">开始测试</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 自动封禁配置弹窗 -->
-  <div id="auto-ban-modal" class="modal-overlay" hidden>
-    <div class="modal-content modal-lg">
-      <div class="modal-header">
-        <h3>自动封禁配置</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="auto-ban-modal" aria-label="关闭">×</button>
-      </div>
-      <form id="auto-ban-settings-form" class="modal-body">
-        <div class="two-col">
-          <label>
-            <span>启用自动封禁</span>
-            <select id="auto_ban_enabled">
-              <option value="1">启用</option>
-              <option value="0">禁用</option>
-            </select>
-          </label>
-          <label>
-            <span>启用404错误检测</span>
-            <select id="auto_ban_auto_ban_on_404">
-              <option value="1">启用</option>
-              <option value="0">禁用</option>
-            </select>
-          </label>
-          <label>
-            <span>封禁时发送邮件</span>
-            <select id="auto_ban_email_on_ban">
-              <option value="1">启用</option>
-              <option value="0">禁用</option>
-            </select>
-          </label>
-        </div>
-        <div class="two-col">
-          <label>
-            <span>监测时间窗口（秒）</span>
-            <input id="auto_ban_window_seconds" type="number" min="10" value="60" />
-          </label>
-          <label>
-            <span>最大请求数</span>
-            <input id="auto_ban_max_requests" type="number" min="1" value="100" />
-          </label>
-        </div>
-        <div class="two-col">
-          <label>
-            <span>封禁时长（秒）</span>
-            <input id="auto_ban_ban_duration_seconds" type="number" min="60" value="3600" />
-          </label>
-          <label>
-            <span>最大404错误数</span>
-            <input id="auto_ban_max_404" type="number" min="1" value="20" />
-          </label>
-        </div>
-        <label>
-          <span>白名单IP（逗号分隔）</span>
-          <input id="auto_ban_whitelist" type="text" placeholder="192.168.1.1,10.0.0.1" />
-        </label>
-        <p class="hint">白名单中的IP地址将不受自动封禁规则限制。</p>
-      </form>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="auto-ban-modal">取消</button>
-        <button type="submit" form="auto-ban-settings-form" class="primary-btn">保存配置</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 恢复确认弹框 -->
-  <div id="backup-restore-modal" class="modal-overlay" hidden>
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3>恢复数据库</h3>
-        <button type="button" class="modal-close-btn" data-close-modal="backup-restore-modal" aria-label="关闭">×</button>
-      </div>
-      <div class="modal-body">
-        <input id="restore_backup_filename" type="hidden" />
-        <p>即将从备份文件 <strong id="restore-backup-name"></strong> 恢复数据库。</p>
-        <label>
-          <span>恢复模式</span>
-          <select id="restore_mode">
-            <option value="overwrite">覆盖模式（替换整个数据库）</option>
-            <option value="merge">合并模式（仅导入新配置）</option>
-          </select>
-        </label>
-        <p class="hint" id="restore-mode-hint">覆盖模式会替换当前数据库中的所有配置和数据。合并模式会导入所有配置表（系统设置、路由规则、GeoIP 等），跳过已存在的条目，运行日志和封禁列表不会被导入。</p>
-        <p class="hint" style="color: var(--error);">注意：恢复后服务配置将自动重新加载。</p>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="ghost-btn" data-close-modal="backup-restore-modal">取消</button>
-        <button type="button" id="backup-restore-confirm-btn" class="primary-btn">确认恢复</button>
-      </div>
-    </div>
-  </div>
-
-  <script type="module" src="/_admin/static/admin.js"></script>
+<script type="module" src="/_admin/static/admin.js"></script>
 </body>
 </html>

@@ -7,8 +7,15 @@
 
 export function setValue(id, value) {
   const el = document.getElementById(id);
-  if (el) {
-    el.value = value ?? "";
+  if (!el) return;
+  el.value = value ?? "";
+  // 升级为自定义下拉的 select：同步 trigger 文案与选项选中态
+  if (el.tagName === "SELECT" && el._csTrig) {
+    const label = el._csTrig.querySelector("span");
+    if (label) label.textContent = el.options[el.selectedIndex].textContent;
+    if (el._csPop) {
+      el._csPop.querySelectorAll(".cs-opt").forEach((o) => o.classList.toggle("sel", o.dataset.val === el.value));
+    }
   }
 }
 

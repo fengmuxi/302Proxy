@@ -24,6 +24,7 @@ export const state = {
   banTotalPages: 1,
   banPageSize: 20,
   routeFilter: { keyword: "", status: "", isDefault: "" },
+  rulesFilter: { keyword: "", status: "", host: "" },
   logAutoScroll: true,
   logLastScrollTop: 0,
   logLastLineCount: 0,
