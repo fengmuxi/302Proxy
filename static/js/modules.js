@@ -176,14 +176,19 @@ function relativeTime(ts) {
   return `${Math.floor(diff / 86400)} 天前`;
 }
 
-function renderTrendSvg(series) {
+function renderTrendSvg(hours) {
   const container = document.getElementById("trendChart");
   if (!container) return;
-  const counts = series.counts || [];
-  const redirects = series.redirects || [];
-  const failed = series.failed || [];
+  const h = Array.isArray(hours) ? hours : [];
+  const counts = h.map((x) => x.count || 0);
+  const redirects = h.map((x) => x.redirects || 0);
+  const failed = h.map((x) => x.failed || 0);
   const n = Math.max(counts.length, 1);
   const W = 680, H = 210, padL = 6, padR = 6, padT = 14, padB = 22;
+  if (n < 2) {
+    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px"><text x="${W / 2}" y="${H / 2 + 4}" fill="var(--text-3)" font-size="12" text-anchor="middle">暂无 24 小时趋势数据</text></svg>`;
+    return;
+  }
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
   const stepX = innerW / (n - 1);
@@ -212,10 +217,20 @@ function renderTrendSvg(series) {
   }
   let labels = "";
   [0, 6, 12, 18, 23].forEach((i) => {
+    if (i >= n) return;
     const x = padL + i * stepX;
-    const hoursAgo = n - 1 - i;
     const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
-    labels += `<text x="${x.toFixed(1)}" y="${H - 6}" fill="var(--text-3)" font-size="10" text-anchor="${anchor}">${hoursAgo === 0 ? "现在" : "-" + hoursAgo + "h"}</text>`;
+    const ts = h[i] && h[i].ts;
+    let label;
+    if (ts) {
+      // 桶内 ts 为 UTC 整点；按浏览器本地时区呈现为正常时钟时间（HH:00）
+      const d = new Date(ts * 1000);
+      label = String(d.getHours()).padStart(2, "0") + ":00";
+    } else {
+      const hoursAgo = n - 1 - i;
+      label = hoursAgo === 0 ? "现在" : "-" + hoursAgo + "h";
+    }
+    labels += `<text x="${x.toFixed(1)}" y="${H - 6}" fill="var(--text-3)" font-size="10" text-anchor="${anchor}">${label}</text>`;
   });
   const lastX = padL + (n - 1) * stepX;
   const lastY = yOf(counts[n - 1] || 0);
@@ -275,13 +290,9 @@ export async function renderOverview() {
       : `近 24 小时 · ${ov.latency_sample_count ?? 0} 个样本`;
   }
 
-  // 趋势三序列（总请求 / 302 跟随 / 失败拦截），24 个整点桶
+  // 趋势三序列（总请求 / 302 跟随 / 失败拦截），24 个整点桶（含 UTC ts，供 x 轴呈现本地时钟时间）
   const hours = Array.isArray(ov.hours) ? ov.hours : [];
-  renderTrendSvg({
-    counts: hours.map((h) => h.count || 0),
-    redirects: hours.map((h) => h.redirects || 0),
-    failed: hours.map((h) => h.failed || 0),
-  });
+  renderTrendSvg(hours);
 
   // 服务健康
   const healthBody = document.getElementById("healthBody");
@@ -366,6 +377,7 @@ export function getRulesForGroup(pathPrefix, requestHost = "") {
 
 export function renderRouteGroups(groups) {
   state.routeGroups = groups || [];
+  setText("navCountRouting", String(state.routeGroups.length));
   const tbody = document.getElementById("groupBody");
   setText("groupCountPill", `${state.routeGroups.length} 个`);
   if (!tbody) return;
@@ -496,6 +508,7 @@ export function renderRules(rules) {
   populateRuleHostFilter(state.rules);
   const tbody = document.getElementById("rulesBody");
   if (!tbody) return;
+  tbody.innerHTML = "";
 
   const keyword = String(getValue("ruleSearch") || "").trim().toLowerCase();
   const status = getValue("ruleFilter") || "";
@@ -1351,7 +1364,7 @@ export async function loadAppLogContent(isAutoRefresh = false) {
     const matched = data.matched_lines != null ? data.matched_lines : data.total_lines;
     lineInfoEl.textContent = keyword ? `匹配: ${matched} / 总计: ${data.total_lines} 行` : `共 ${data.total_lines} 行`;
   }
-  if (state.logAutoScroll) contentEl.scrollTop = contentEl.scrollHeight;
+  if (!isAutoRefresh || state.logAutoScroll) contentEl.scrollTop = contentEl.scrollHeight;
 }
 
 export function startAppLogAutoRefresh() {
@@ -1370,6 +1383,24 @@ export function stopAppLogAutoRefresh() {
 export async function refreshAppLogModule() {
   await loadAppLogFiles();
   initLogScrollDetection();
+  loadLoggingSettings().catch(() => {});
+}
+
+export async function loadLoggingSettings() {
+  const data = await apiFetch("/_admin/api/logging-settings");
+  if (data && typeof data.retention_days === "number") {
+    setValue("disk_log_retention_days", String(data.retention_days));
+  }
+}
+
+export async function saveDiskLogRetention() {
+  const days = getNonNegativeIntValue("disk_log_retention_days", 30);
+  const result = await apiFetch("/_admin/api/logging-settings", {
+    method: "PUT",
+    body: JSON.stringify({ retention_days: days }),
+  });
+  setText("disk-log-retention-status", `已保存：磁盘日志保留 ${result.retention_days} 天。`);
+  showToast("磁盘日志保留策略已保存。");
 }
 
 export function initLogScrollDetection() {
@@ -1388,7 +1419,10 @@ export function initLogScrollDetection() {
 }
 
 export async function cleanupAppLogFiles() {
-  const result = await apiFetch("/_admin/api/log-file-cleanup", { method: "POST" });
+  const result = await apiFetch("/_admin/api/log-file-cleanup", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
   showToast(`清理完成，删除了 ${result.deleted_count} 个过期日志文件。`);
   await refreshAppLogModule();
 }
@@ -1817,6 +1851,7 @@ export async function loadBannedIpList() {
   try {
     const data = await apiFetch("/_admin/api/banned-ips");
     state.bannedIps = data.items || [];
+    setText("navCountSecurity", String(state.bannedIps.length));
     renderBannedIpListPage();
   } catch (_) {}
 }

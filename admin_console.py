@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import inspect
+import logging
 import os
 import shutil
 import sqlite3
@@ -17,6 +18,9 @@ from aiohttp import web
 from config import Config
 from config_store import ConfigStore
 from geo_service import GeoResolver
+
+# 模块级日志器，与项目其他模块保持一致（config.py 等使用 "proxy" 作为 logger 名）
+logger = logging.getLogger("proxy")
 
 
 class AdminConsole:
@@ -67,6 +71,8 @@ class AdminConsole:
         app.router.add_delete("/_admin/api/logs", self.delete_route_logs)
         app.router.add_get("/_admin/api/log-settings", self.get_route_log_settings)
         app.router.add_put("/_admin/api/log-settings", self.update_route_log_settings)
+        app.router.add_get("/_admin/api/logging-settings", self.get_logging_settings)
+        app.router.add_put("/_admin/api/logging-settings", self.update_logging_settings)
         app.router.add_get("/_admin/api/app-logs", self.list_app_log_files)
         app.router.add_get("/_admin/api/app-logs/content", self.get_app_log_content)
         app.router.add_get("/_admin/api/ip-cache-settings", self.get_ip_cache_settings)
@@ -360,6 +366,24 @@ class AdminConsole:
     async def update_route_log_settings(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
         return await self._run_protected(request, lambda: self.config_store.update_route_log_settings(payload))
+
+    async def get_logging_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_logging_settings())
+
+    async def update_logging_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_logging_settings(payload))
+
+    def _update_logging_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_logging_settings(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return result
 
     async def list_app_log_files(self, request: web.Request) -> web.Response:
         config = self.config_store.load_runtime_config()
@@ -944,8 +968,6 @@ class AdminConsole:
         return await self._run_protected(request, operation)
 
     async def cleanup_log_files(self, request: web.Request) -> web.Response:
-        await self._read_json(request)
-
         async def operation():
             if self.log_cleanup_callback is None:
                 raise ValueError("日志清理服务不可用。")
@@ -954,8 +976,6 @@ class AdminConsole:
         return await self._run_protected(request, operation)
 
     async def cleanup_log_files_on_disk(self, request: web.Request) -> web.Response:
-        await self._read_json(request)
-
         async def operation():
             if self.log_file_cleanup_callback is None:
                 raise ValueError("日志文件清理服务不可用。")

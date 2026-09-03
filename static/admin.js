@@ -28,7 +28,7 @@ import {
   loadRouteLogs, refreshRouteLogModule, saveLogRetention, cleanupLogs,
   getAutoRefreshConfig, saveAutoRefreshConfig, startAutoRefresh, stopAutoRefresh,
   loadAppLogContent, startAppLogAutoRefresh, stopAppLogAutoRefresh,
-  refreshAppLogModule, cleanupAppLogFiles,
+  refreshAppLogModule, cleanupAppLogFiles, loadLoggingSettings, saveDiskLogRetention,
   loadIpCacheSettings, loadIpCacheStats, openIpCacheSettings, clearIpCache,
   loadDedupSettings, loadDedupStats, openDedupSettings, clearDedupCache,
   loadAutoBanSettings, loadAutoBanStats, openAutoBanSettings,
@@ -57,7 +57,20 @@ function confirmAsync(title, message, fn) {
 
 // ============ 导航 ============
 
+function applySavedSidebarState() {
+  try {
+    if (
+      localStorage.getItem("sidebarCollapsed") === "1" &&
+      !window.matchMedia("(max-width:820px)").matches
+    ) {
+      document.querySelector(".app")?.classList.add("collapsed");
+    }
+  } catch (_) {}
+}
+
 function bindNavigation() {
+  applySavedSidebarState();
+
   document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
     item.addEventListener("click", () => activatePage(item.dataset.page));
   });
@@ -68,9 +81,15 @@ function bindNavigation() {
     if (target) activatePage(target.dataset.goto);
   });
 
-  // 移动端侧边栏开关
+  // 侧边栏开关：移动端滑入/滑出(.open)，桌面端收起/展开(.collapsed)
   $("menuToggle")?.addEventListener("click", () => {
-    $("sidebar")?.classList.toggle("open");
+    const app = document.querySelector(".app");
+    if (window.matchMedia("(max-width:820px)").matches) {
+      $("sidebar")?.classList.toggle("open");
+    } else if (app) {
+      const collapsed = app.classList.toggle("collapsed");
+      try { localStorage.setItem("sidebarCollapsed", collapsed ? "1" : "0"); } catch (_) {}
+    }
   });
 }
 
@@ -267,6 +286,10 @@ function switchLogTab(tabName) {
   document.querySelectorAll("#page-logs [data-panel]").forEach((p) => {
     p.hidden = p.dataset.panel !== tabName;
   });
+  if (tabName === "app") {
+    const contentEl = document.getElementById("appLogContent");
+    if (contentEl) contentEl.scrollTop = contentEl.scrollHeight;
+  }
 }
 
 function bindLogs() {
@@ -383,6 +406,7 @@ function bindLogs() {
   // 应用日志
   $("app-log-refresh-btn")?.addEventListener("click", () => refreshAppLogModule().catch((e) => showToast(e.message, true)));
   $("app-log-cleanup-btn")?.addEventListener("click", () => cleanupAppLogFiles().catch((e) => showToast(e.message, true)));
+  $("saveDiskLogRetention")?.addEventListener("click", () => saveDiskLogRetention().catch((e) => showToast(e.message, true)));
   $("app-log-search-btn")?.addEventListener("click", () => loadAppLogContent().catch((e) => showToast(e.message, true)));
   $("app-log-tail-lines")?.addEventListener("change", () => loadAppLogContent().catch((e) => showToast(e.message, true)));
   $("app-log-keyword")?.addEventListener("keydown", (e) => {
@@ -474,6 +498,8 @@ function bindGlobalShortcuts() {
       closeDrawer();
       const sidebar = $("sidebar");
       if (sidebar && sidebar.classList.contains("open")) sidebar.classList.remove("open");
+      const app = document.querySelector(".app");
+      if (app && app.classList.contains("collapsed")) app.classList.remove("collapsed");
     }
   });
 }

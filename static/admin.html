@@ -232,10 +232,22 @@
       </div>
 
       <div data-panel="app" hidden>
-        <div class="grid cols-2">
+        <div class="grid cols-2 app-log-grid">
           <div>
             <div class="card"><div class="panel-head"><div class="panel-title">日志文件</div><div class="panel-head-actions"><button class="btn btn-sm" id="app-log-refresh-btn">刷新</button><button class="btn btn-sm btn-danger" id="app-log-cleanup-btn">清理</button></div></div>
-              <div class="panel-body" id="appLogFiles"></div>
+              <div class="panel-body">
+                <div id="appLogFiles"></div>
+                <div class="log-retention-box">
+                  <label class="retention-title" for="disk_log_retention_days">磁盘日志保留天数</label>
+                  <div class="retention-row">
+                    <input class="input inline retention-input" type="number" id="disk_log_retention_days" min="1" value="30" aria-describedby="disk-log-retention-status">
+                    <span class="hint">天</span>
+                    <span style="flex:1"></span>
+                    <button class="btn btn-primary btn-sm" id="saveDiskLogRetention">保存策略</button>
+                  </div>
+                  <div id="disk-log-retention-status" class="hint retention-status"></div>
+                </div>
+              </div>
             </div>
           </div>
           <div>

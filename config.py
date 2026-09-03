@@ -438,6 +438,55 @@ class Config:
 
     @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> "Config":
+        # 兼容旧版本升级：配置文件可能缺失某些段，或顶层/段不是映射/列表类型。
+        # 这里统一归一化——缺失或类型错误的段回退到默认值（dataclass 默认值），
+        # 避免因「信息未填写 / 写坏」导致加载旧配置时崩溃、程序无法启动。
+        log = logging.getLogger("proxy")
+        if not isinstance(data, dict):
+            log.warning(
+                "配置文件根节点不是映射类型（实际为 %s），已忽略并使用全部默认值。",
+                type(data).__name__,
+            )
+            data = {}
+
+        # 各顶层段应为映射；若写成字符串/数字/列表等非映射类型，则忽略该段用默认值。
+        # 覆盖全部从 YAML 读取的映射段（含自带 isinstance 守卫的 ip_result_cache/auto_ban/email），
+        # 保证任一旧配置段类型写坏都能回退默认，且对未来重构也具备防御性。
+        for _key in (
+            "server",
+            "ssl",
+            "logging",
+            "admin_auth",
+            "streaming",
+            "geoip",
+            "database",
+            "region_matching",
+            "remote_config",
+            "ip_result_cache",
+            "auto_ban",
+            "email",
+        ):
+            if _key in data and not isinstance(data[_key], dict):
+                log.warning("配置段 %r 不是映射类型，已忽略该段并使用默认值。", _key)
+                data[_key] = {}
+
+        # 这两个段应为列表。
+        for _key in ("proxy_rules", "route_groups"):
+            if _key in data and not isinstance(data[_key], (list, tuple)):
+                log.warning("配置段 %r 不是列表类型，已忽略该段。", _key)
+                data[_key] = []
+
+        # geoip 内部嵌套段同样做类型兜底，防止 offline/primary 被误写导致崩溃。
+        _geoip = data.get("geoip")
+        if isinstance(_geoip, dict):
+            for _sub in ("primary", "offline"):
+                if _sub in _geoip and not isinstance(_geoip[_sub], dict):
+                    log.warning("配置段 geoip.%s 不是映射类型，已忽略并使用默认值。", _sub)
+                    _geoip[_sub] = {}
+            if "sources" in _geoip and not isinstance(_geoip["sources"], (list, tuple)):
+                log.warning("配置段 geoip.sources 不是列表类型，已忽略。")
+                _geoip["sources"] = []
+
         config = cls()
 
         server_data = data.get("server", {})

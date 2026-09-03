@@ -1224,6 +1224,34 @@ class ConfigStore:
         self.prune_route_logs(force=True)
         return self.get_route_log_settings()
 
+    def get_logging_settings(self) -> Dict[str, Any]:
+        """读取磁盘运行日志文件的保留配置（来自 system_settings）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT logging_retention_days, logging_file_path FROM system_settings WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return {"retention_days": 30, "file_path": ""}
+        return {
+            "retention_days": int(row["logging_retention_days"] or 30),
+            "file_path": row["logging_file_path"] or "",
+        }
+
+    def update_logging_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新磁盘运行日志文件的保留天数（最小 1 天），返回最新设置。"""
+        retention_days = max(1, int(payload.get("retention_days", 30) or 30))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE system_settings
+                SET logging_retention_days = ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (retention_days, now),
+            )
+        return self.get_logging_settings()
+
     def insert_route_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         created_at = str(payload.get("created_at", "")).strip() or utc_now()
         with self._connect() as connection:
