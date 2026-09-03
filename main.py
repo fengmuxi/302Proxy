@@ -112,6 +112,7 @@ class ProxyServer:
         self.app.router.add_get('/_health', self.health_check)
         self.app.router.add_get('/json/version', self.docker_version)
         self.app.router.add_get('/_admin/api/stats', self.get_stats)
+        self.app.router.add_get('/_admin/api/overview-stats', self.get_overview_stats)
         self.app.router.add_get('/_admin/api/ip-cache/stats', self.get_ip_cache_stats)
         self.app.router.add_post('/_admin/api/ip-cache/clear', self.clear_ip_cache)
         self.app.router.add_get('/_admin/api/ban/list', self.list_bans)
@@ -921,6 +922,20 @@ class ProxyServer:
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats).encode()
+        ))
+
+    async def get_overview_stats(self, request: web.Request) -> web.Response:
+        """概览页聚合统计（24h 分桶/今日请求/平均延迟），SQL 全量聚合。
+
+        SQLite 聚合虽快但仍可能读盘，按项目约定丢线程池执行，不阻塞事件循环。
+        """
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
+        overview = await asyncio.to_thread(self.config_store.get_overview_stats)
+        return self._add_security_headers(web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(overview).encode()
         ))
 
     async def get_ip_cache_stats(self, request: web.Request) -> web.Response:

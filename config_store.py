@@ -1394,6 +1394,79 @@ class ConfigStore:
             },
         }
 
+    def get_overview_stats(self) -> Dict[str, Any]:
+        """概览页聚合统计：24h 分桶（总请求/302跟随/失败）、今日请求、平均延迟。
+
+        route_logs.created_at 为 UTC ISO 字符串（'2026-09-02T02:55:50+00:00'，
+        由 main._build_route_log_payload 写入），因此：
+        - 用 substr(created_at,1,13) 按 UTC 小时分桶，SQL 直算不受 list 接口
+          limit=500 截断影响（此前前端取最近 500 条自行分桶，趋势图与平均
+          延迟只反映最近 500 条且 Number(ISO) 为 NaN 导致趋势恒为空）；
+        - "今日"按本地时区 0 点换算成对应 UTC 时刻再比较。
+        """
+        from datetime import datetime, timedelta, timezone as tz
+
+        now_utc = datetime.now(tz.utc)
+        hour0 = now_utc.replace(minute=0, second=0, microsecond=0)
+        cutoff_24h = (now_utc - timedelta(hours=24)).isoformat(timespec="seconds")
+        # 本地今日 0 点对应的 UTC 时刻（库内 created_at 均为 UTC）
+        local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_cutoff_utc = local_midnight.astimezone(tz.utc).isoformat(timespec="seconds")
+
+        with self._connect() as connection:
+            requests_total = connection.execute("SELECT COUNT(*) FROM route_logs").fetchone()[0]
+            requests_24h = connection.execute(
+                "SELECT COUNT(*) FROM route_logs WHERE created_at >= ?", (cutoff_24h,)
+            ).fetchone()[0]
+            requests_today = connection.execute(
+                "SELECT COUNT(*) FROM route_logs WHERE created_at >= ?", (today_cutoff_utc,)
+            ).fetchone()[0]
+            lat_row = connection.execute(
+                "SELECT AVG(operation_duration_ms), COUNT(*) FROM route_logs "
+                "WHERE created_at >= ? AND operation_duration_ms > 0",
+                (cutoff_24h,),
+            ).fetchone()
+            bucket_rows = connection.execute(
+                """
+                SELECT substr(created_at, 1, 13) AS hour_key,
+                       COUNT(*) AS cnt,
+                       SUM(CASE WHEN redirect_count > 0 THEN 1 ELSE 0 END) AS redirects,
+                       SUM(CASE WHEN upstream_status >= 400 THEN 1 ELSE 0 END) AS failed
+                FROM route_logs
+                WHERE created_at >= ?
+                GROUP BY hour_key
+                """,
+                (cutoff_24h,),
+            ).fetchall()
+
+        avg_latency = lat_row[0] if lat_row and lat_row[0] is not None else None
+
+        # 24 个小时桶：索引 0 = 23 小时前的整点，23 = 当前小时（UTC 整点对齐）
+        buckets = [
+            {"ts": int((hour0 - timedelta(hours=23 - i)).timestamp()), "count": 0, "redirects": 0, "failed": 0}
+            for i in range(24)
+        ]
+        for row in bucket_rows:
+            try:
+                hour_start = datetime.strptime(str(row["hour_key"]), "%Y-%m-%dT%H").replace(tzinfo=tz.utc)
+            except (ValueError, TypeError):
+                continue  # 兼容异格式/旧数据，跳过不入桶
+            idx = 23 - int((hour0 - hour_start).total_seconds() // 3600)
+            if 0 <= idx < 24:
+                bucket = buckets[idx]
+                bucket["count"] += row["cnt"] or 0
+                bucket["redirects"] += row["redirects"] or 0
+                bucket["failed"] += row["failed"] or 0
+
+        return {
+            "requests_total": requests_total,
+            "requests_24h": requests_24h,
+            "requests_today": requests_today,
+            "avg_latency_ms": round(avg_latency, 1) if avg_latency is not None else None,
+            "latency_sample_count": lat_row[1] if lat_row else 0,
+            "hours": buckets,
+        }
+
     def delete_route_logs(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         ids = payload.get("ids") or []
         delete_all = coerce_bool(payload.get("delete_all"), False)
