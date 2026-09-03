@@ -1471,7 +1471,7 @@ function renderIpCacheSettings(data) {
     pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral");
     pill.textContent = data.enabled ? "启用" : "停用";
   }
-  const body = document.getElementById("ipCacheBody");
+  const body = document.getElementById("ipCacheSettings");
   if (body) {
     body.innerHTML = `
       <div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "已启用" : "已禁用"}</div></div>
@@ -1483,14 +1483,13 @@ function renderIpCacheSettings(data) {
 export async function loadIpCacheStats() {
   try {
     const stats = await apiFetch("/_admin/api/ip-cache/stats");
-    const body = document.getElementById("ipCacheBody");
+    const body = document.getElementById("ipCacheStats");
     if (!body || !stats) return;
-    // 先移除旧统计行，再重新插入，避免多次调用后重复显示
-    body.querySelectorAll(".ip-cache-stat").forEach((el) => el.remove());
-    body.insertAdjacentHTML("beforeend", `
-      <div class="kv ip-cache-stat"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
-      <div class="kv ip-cache-stat"><div class="k">命中 / 未命中</div><div class="val">${esc(String(stats.hits))} / ${esc(String(stats.misses))}</div></div>
-      <div class="kv ip-cache-stat"><div class="k">命中率</div><div class="val">${esc(String(stats.hit_rate))}</div></div>`);
+    // 独立的 ipCacheStats 容器，直接 innerHTML 替换即可，无重复风险
+    body.innerHTML = `
+      <div class="kv"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
+      <div class="kv"><div class="k">命中 / 未命中</div><div class="val">${esc(String(stats.hits))} / ${esc(String(stats.misses))}</div></div>
+      <div class="kv"><div class="k">命中率</div><div class="val">${esc(String(stats.hit_rate))}</div></div>`;
   } catch (_) {}
 }
 
