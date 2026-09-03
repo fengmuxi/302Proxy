@@ -503,9 +503,21 @@ export function populateRuleHostFilter(rules) {
   syncSelect(select);
 }
 
+export function populateRuleGroupFilter() {
+  const select = document.getElementById("ruleGroup");
+  if (!select) return;
+  const options = buildRuleGroupOptions(state.routeGroups);
+  const current = select.value;
+  select.innerHTML = '<option value="">全部路由组</option>' +
+    options.map((o) => `<option value="${esc(o.path_prefix)}|${esc(o.request_host)}">${esc(o.label)}</option>`).join("");
+  if (current && options.some((o) => `${o.path_prefix}|${o.request_host}` === current)) select.value = current;
+  syncSelect(select);
+}
+
 export function renderRules(rules) {
   state.rules = rules || [];
   populateRuleHostFilter(state.rules);
+  populateRuleGroupFilter();
   const tbody = document.getElementById("rulesBody");
   if (!tbody) return;
   tbody.innerHTML = "";
@@ -513,6 +525,14 @@ export function renderRules(rules) {
   const keyword = String(getValue("ruleSearch") || "").trim().toLowerCase();
   const status = getValue("ruleFilter") || "";
   const host = getValue("ruleHost") || "";
+  const groupValue = getValue("ruleGroup") || "";
+  let groupPath = "";
+  let groupHost = "";
+  if (groupValue) {
+    const idx = groupValue.indexOf("|");
+    groupPath = idx >= 0 ? groupValue.slice(0, idx) : groupValue;
+    groupHost = idx >= 0 ? groupValue.slice(idx + 1) : "";
+  }
 
   const filtered = state.rules.filter((rule) => {
     const requestHost = normalizeRequestHost(rule.request_host);
@@ -529,13 +549,17 @@ export function renderRules(rules) {
     if (status === "disabled" && rule.enabled) return false;
     if (status === "default" && !rule.is_default) return false;
     if (host && host !== requestHost) return false;
+    if (groupValue) {
+      if (rule.path_prefix !== groupPath) return false;
+      if (groupHost && requestHost !== groupHost) return false;
+    }
     return true;
   });
 
   const summaryEl = document.getElementById("rulesSummary");
   if (summaryEl) {
     const total = state.rules.length;
-    summaryEl.textContent = (keyword || status || host)
+    summaryEl.textContent = (keyword || status || host || groupValue)
       ? `共 ${total} 条规则，当前匹配 ${filtered.length} 条`
       : `共 ${total} 条转发规则`;
   }
@@ -1461,10 +1485,12 @@ export async function loadIpCacheStats() {
     const stats = await apiFetch("/_admin/api/ip-cache/stats");
     const body = document.getElementById("ipCacheBody");
     if (!body || !stats) return;
-    body.innerHTML += `
-      <div class="kv"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
-      <div class="kv"><div class="k">命中 / 未命中</div><div class="val">${esc(String(stats.hits))} / ${esc(String(stats.misses))}</div></div>
-      <div class="kv"><div class="k">命中率</div><div class="val">${esc(String(stats.hit_rate))}</div></div>`;
+    // 先移除旧统计行，再重新插入，避免多次调用后重复显示
+    body.querySelectorAll(".ip-cache-stat").forEach((el) => el.remove());
+    body.insertAdjacentHTML("beforeend", `
+      <div class="kv ip-cache-stat"><div class="k">当前条目</div><div class="val">${esc(String(stats.current_entries))}</div></div>
+      <div class="kv ip-cache-stat"><div class="k">命中 / 未命中</div><div class="val">${esc(String(stats.hits))} / ${esc(String(stats.misses))}</div></div>
+      <div class="kv ip-cache-stat"><div class="k">命中率</div><div class="val">${esc(String(stats.hit_rate))}</div></div>`);
   } catch (_) {}
 }
 

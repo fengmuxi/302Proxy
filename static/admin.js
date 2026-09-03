@@ -122,10 +122,12 @@ function bindRouting() {
   $("ruleSearch")?.addEventListener("input", applyRulesFilter);
   $("ruleFilter")?.addEventListener("change", applyRulesFilter);
   $("ruleHost")?.addEventListener("change", applyRulesFilter);
+  $("ruleGroup")?.addEventListener("change", applyRulesFilter);
   $("resetFilter")?.addEventListener("click", () => {
     setValue("ruleSearch", "");
     setValue("ruleFilter", "");
     setValue("ruleHost", "");
+    setValue("ruleGroup", "");
     applyRulesFilter();
   });
 
