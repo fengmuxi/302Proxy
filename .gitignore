@@ -29,3 +29,6 @@ config.yaml
 # 忽略操作系统文件
 Thumbs.db
 .DS_Store
+
+# 忽略临时诊断脚本归档（测试产物，非项目代码）
+_diagnostics/
