@@ -8,8 +8,9 @@ import random
 import re
 import ssl
 import time
+from aiohttp.http_exceptions import ContentLengthError, TransferEncodingError
 from dataclasses import dataclass
-from typing import AsyncGenerator, Dict, List, Optional, Tuple
+from typing import AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlparse
 
 from config import Config, ProxyRule, normalize_request_host, split_request_hosts
@@ -1255,6 +1256,148 @@ class ProxyRequestHandler:
         finally:
             response.close()
 
+    # 流中断后续传重试上限；超过则按原行为正常截断（客户端会感知长度不符）
+    _STREAM_RESUME_MAX_RETRIES = 3
+
+    # 上游流中断的可续传异常：连接断开 / 载荷不完整（提前 EOF）/ 长度或分帧校验失败 / 读停滞
+    _RESUMABLE_EXCEPTIONS = (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientPayloadError,
+        ContentLengthError,
+        TransferEncodingError,
+        asyncio.TimeoutError,
+    )
+
+    async def _pump_with_resume(
+        self,
+        response: aiohttp.ClientResponse,
+        chunk_size: int,
+        resume_factory: Optional[Callable[[int], Awaitable[Optional[aiohttp.ClientResponse]]]],
+    ) -> AsyncGenerator[bytes, None]:
+        """流式泵 + 断点续传。
+
+        不稳定 CDN 可能在流中途断连或提前 EOF；客户端已按 Content-Length 期待完整
+        字节流，直接结束会让播放器抛 ProtocolException (unexpected end of stream)。
+        这里记录已发送字节数，中断时用 `Range: bytes=<received>-` 向上游续传并继续
+        泵送，对客户端完全透明。续传次数用尽或上游不支持续传时维持原行为（截断）。
+        """
+        received = 0
+        resumes = 0
+        current = response
+        try:
+            while True:
+                try:
+                    async for chunk in current.content.iter_chunked(chunk_size):
+                        received += len(chunk)
+                        yield chunk
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except self._RESUMABLE_EXCEPTIONS as exc:
+                    resumes += 1
+                    if resume_factory is None or resumes > self._STREAM_RESUME_MAX_RETRIES:
+                        logger.warning(
+                            "上游流中断且无法续传，提前结束（已传 %s 字节）: %s",
+                            received, type(exc).__name__,
+                        )
+                        return
+                    logger.warning(
+                        "上游流中断（已传 %s 字节），第 %s 次续传: %s",
+                        received, resumes, type(exc).__name__,
+                    )
+                    current.close()
+                    current = await resume_factory(received)
+                    if current is None:
+                        logger.warning("续传失败，流式提前结束（已传 %s 字节）", received)
+                        return
+        finally:
+            current.close()
+
+    def _make_resume_factory(
+        self,
+        *,
+        url: str,
+        base_headers: Dict[str, str],
+        session: aiohttp.ClientSession,
+        redirect_handler: "RedirectHandler",
+    ) -> Callable[[int], Awaitable[Optional[aiohttp.ClientResponse]]]:
+        """构造续传函数：以 `Range: bytes=<offset>-` 重新请求上游并校验起点。
+
+        offset>0 时必须返回 206 且 Content-Range 起点精确匹配；上游若忽略 Range
+        回 200，继续泵送会造成字节错位，必须拒绝。offset=0 时显式用 bytes=0-（该
+        CDN 对无 Range 的 GET 回空 200 chunked，只有 bytes=0- 能拿到全量流）。
+        """
+        async def resume(offset: int) -> Optional[aiohttp.ClientResponse]:
+            headers = {k: v for k, v in base_headers.items() if k.lower() != "range"}
+            headers["Range"] = f"bytes={offset}-"
+            try:
+                resp, _info = await redirect_handler.follow_redirects_streaming(
+                    url=url,
+                    method="GET",
+                    headers=headers,
+                    body=None,
+                    session=session,
+                )
+            except Exception as exc:
+                logger.warning("续传请求失败: %s", exc)
+                return None
+            if resp is None:
+                return None
+            if offset > 0:
+                if resp.status != 206:
+                    resp.close()
+                    logger.warning("续传响应状态 %s（期望 206），放弃续传", resp.status)
+                    return None
+                content_range = resp.headers.get("Content-Range", "").replace(" ", "")
+                if not content_range.startswith(f"bytes{offset}-"):
+                    resp.close()
+                    logger.warning("续传响应起点不匹配（%s，期望 %s），放弃续传", content_range, offset)
+                    return None
+            elif resp.status not in (200, 206):
+                resp.close()
+                logger.warning("续传响应状态 %s，放弃续传", resp.status)
+                return None
+            return resp
+        return resume
+
+    def _make_restart_factory(
+        self,
+        *,
+        url: str,
+        base_headers: Dict[str, str],
+        session: aiohttp.ClientSession,
+        redirect_handler: "RedirectHandler",
+    ) -> Callable[[], Awaitable[Optional[aiohttp.ClientResponse]]]:
+        """构造全量重拉函数：以 `Range: bytes=0-` 从字节 0 重新下载全量资源。
+
+        该 CDN 只支持从字节 0 顺序下载（非零偏移 Range 会回空 206），中断后无法
+        从任意偏移续传，只能重新从 0 拉全量，再由裁剪逻辑跳过已发送字节。
+        """
+        async def restart() -> Optional[aiohttp.ClientResponse]:
+            headers = {k: v for k, v in base_headers.items() if k.lower() != "range"}
+            headers["Range"] = "bytes=0-"
+            try:
+                resp, _info = await redirect_handler.follow_redirects_streaming(
+                    url=url,
+                    method="GET",
+                    headers=headers,
+                    body=None,
+                    session=session,
+                )
+            except Exception as exc:
+                logger.warning("全量重拉请求失败: %s", exc)
+                return None
+            if resp is None or resp.status not in (200, 206):
+                if resp is not None:
+                    resp.close()
+                logger.warning(
+                    "全量重拉响应状态 %s（期望 200/206），放弃重拉",
+                    resp.status if resp is not None else "无响应",
+                )
+                return None
+            return resp
+        return restart
+
     @staticmethod
     def _parse_byte_range(range_header: str) -> Optional[Tuple]:
         """解析 Range 请求头，支持 bytes=START-END / bytes=START- / bytes=-N。
@@ -1275,36 +1418,114 @@ class ProxyRequestHandler:
             return ("suffix", int(m.group(1)), None)
         return None
 
-    async def _slice_range(
+    @staticmethod
+    def _parse_content_range(header: Optional[str]) -> Optional[Tuple[int, int, int]]:
+        """解析 Content-Range 响应头 `bytes START-END/TOTAL`，返回 (start, end, total)。"""
+        if not header:
+            return None
+        m = re.match(r"\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$", header)
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    async def _serve_range(
         self,
-        upstream_response: aiohttp.ClientResponse,
+        response: aiohttp.ClientResponse,
+        response_start: int,
         start: int,
         end: int,
+        resume_factory: Optional[Callable[[int], Awaitable[Optional[aiohttp.ClientResponse]]]],
+        restart_factory: Optional[Callable[[], Awaitable[Optional[aiohttp.ClientResponse]]]],
     ) -> AsyncGenerator[bytes, None]:
-        """从上游全量响应中跳过前 start 字节，仅转发 [start, end] 区间，用于以 206 返回。
+        """服务 [start, end] 区间字节；输入流起点为绝对偏移 response_start。
 
-        调用方负责在响应头里写入对应的 Content-Range / Content-Length。上游响应在此
-        生成器结束时关闭，客户端断连也会触发 finally 释放连接。
+        response_start 可能小于 start（全量下载场景，需先跳过 start-response_start 字节），
+        也可能等于 start（健康 206 直接泵送）。调用方负责在响应头里写入对应的
+        Content-Range / Content-Length；生成器结束时关闭上游响应。
+
+        中断恢复分两级：
+        1. 快路径：绝对偏移续传 `bytes=<start+已发>-`，适用于支持任意偏移的 CDN；
+        2. 慢路径：全量重拉 `bytes=0-` + 重新跳过，适用于只支持字节 0 顺序下载的
+           CDN（非零偏移 Range 回空 206）。
+        若绝对偏移续传后流无进展（续传响应也是空体），自动标记该 CDN 不支持偏移续传，
+        后续一律走全量重拉。重试耗尽或两级都失败时按原行为截断。
         """
         chunk_size = self.config.streaming.chunk_size
-        skip = start
+        current = response
+        next_abs = response_start
+        delivered = 0
+        retries = 0
+        offset_resume_ok = True
+        last_recovered_delivered = -1
         try:
-            while skip > 0:
-                chunk = await upstream_response.content.read(min(skip, chunk_size))
-                if not chunk:
+            while next_abs <= end:
+                interrupt_name = "unknown"
+                try:
+                    if next_abs < start + delivered:
+                        data = await current.content.read(min(start + delivered - next_abs, chunk_size))
+                        if data:
+                            next_abs += len(data)
+                            continue
+                        raise aiohttp.ClientPayloadError("EOF before range start")
+                    want = end - next_abs + 1
+                    data = await current.content.read(min(want, chunk_size))
+                    if data:
+                        next_abs += len(data)
+                        delivered += len(data)
+                        yield data
+                        continue
+                    raise aiohttp.ClientPayloadError("EOF before range satisfied")
+                except asyncio.CancelledError:
+                    raise
+                except self._RESUMABLE_EXCEPTIONS as exc:
+                    interrupt_name = type(exc).__name__
+
+                # —— 恢复逻辑 ——
+                if retries >= self._STREAM_RESUME_MAX_RETRIES:
+                    logger.warning(
+                        "Range 流中断且重试耗尽，提前结束（已发 %s/%s 字节）: %s",
+                        delivered, end - start + 1, interrupt_name,
+                    )
                     return
-                skip -= len(chunk)
-            remaining = end - start + 1
-            while remaining > 0:
-                chunk = await upstream_response.content.read(min(remaining, chunk_size))
-                if not chunk:
-                    return
-                if len(chunk) > remaining:
-                    chunk = chunk[:remaining]
-                yield chunk
-                remaining -= len(chunk)
+                retries += 1
+
+                # 上次恢复后无进展 → 绝对偏移续传不可用（该 CDN 非零偏移回空 206）
+                if delivered == last_recovered_delivered:
+                    offset_resume_ok = False
+                last_recovered_delivered = delivered
+
+                target_abs = start + delivered
+                if delivered > 0 and offset_resume_ok and resume_factory is not None:
+                    resumed = await resume_factory(target_abs)
+                    if resumed is not None:
+                        logger.warning(
+                            "Range 流中断（已发 %s/%s 字节），按绝对偏移 %s 续传: %s",
+                            delivered, end - start + 1, target_abs, interrupt_name,
+                        )
+                        current.close()
+                        current = resumed
+                        next_abs = target_abs
+                        continue
+
+                if restart_factory is not None:
+                    fresh = await restart_factory()
+                    if fresh is not None:
+                        logger.warning(
+                            "Range 流中断（已发 %s/%s 字节），第 %s 次全量重拉: %s",
+                            delivered, end - start + 1, retries, interrupt_name,
+                        )
+                        current.close()
+                        current = fresh
+                        next_abs = 0
+                        continue
+
+                logger.warning(
+                    "Range 流中断且无法恢复，提前结束（已发 %s/%s 字节）",
+                    delivered, end - start + 1,
+                )
+                return
         finally:
-            upstream_response.close()
+            current.close()
 
     async def handle_request_streaming(
         self,
@@ -1335,6 +1556,16 @@ class ProxyRequestHandler:
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+
+        # 缓存命中路径与正常路径的流式续传都需要 redirect_handler，提前构造
+        redirect_handler = RedirectHandler(
+            max_redirects=rule.max_redirects,
+            timeout=rule.timeout,
+            stream_timeout=self.config.streaming.stream_timeout,
+            follow_redirects=rule.follow_redirects,
+            ssl=self._ssl_mode(),
+            session_provider=self.get_stream_session,
+        )
 
         if self.ip_cache:
             cached = await self.ip_cache.get(client_ip, target_url)
@@ -1373,46 +1604,68 @@ class ProxyRequestHandler:
                             connect=rule.timeout,
                             sock_read=self.config.streaming.read_timeout,
                         )
-                        async with session.get(
+                        # 不能用 async with：__aexit__ 会 release() 未读完的响应，
+                        # 生成器稍后再读 content 只能拿到缓冲区残留（截断流，播放器报
+                        # unexpected end of stream）。响应生命周期交给泵生成器（finally 关闭）。
+                        direct_response = await session.get(
                             cached.final_url,
                             headers=request_headers,
                             allow_redirects=False,
                             timeout=direct_timeout,
                             ssl=ssl_mode,
-                        ) as direct_response:
-                            if direct_response.status in (200, 206):
-                                resp_headers = dict(direct_response.headers)
-                                filtered_headers = self.filter_headers(resp_headers, is_request=False)
-                                self._apply_route_headers(filtered_headers, route_decision)
-                                self._apply_range_headers(filtered_headers, resp_headers, direct_response.status)
-                                content_length = None
-                                if "Content-Length" in resp_headers:
-                                    try:
-                                        content_length = int(resp_headers["Content-Length"])
-                                    except ValueError:
-                                        content_length = None
-                                return StreamingResponse(
-                                    status=direct_response.status,
-                                    headers=filtered_headers,
-                                    body_stream=self.stream_response(direct_response, self.config.streaming.chunk_size),
-                                    redirect_info=None,
-                                    content_length=content_length,
-                                    route_decision=route_decision,
-                                    cache_status="HIT_STREAMING",
+                        )
+                        if direct_response.status not in (200, 206):
+                            direct_response.close()
+                        else:
+                            resp_headers = dict(direct_response.headers)
+                            filtered_headers = self.filter_headers(resp_headers, is_request=False)
+                            self._apply_route_headers(filtered_headers, route_decision)
+                            self._apply_range_headers(filtered_headers, resp_headers, direct_response.status)
+                            content_length = None
+                            if "Content-Length" in resp_headers:
+                                try:
+                                    content_length = int(resp_headers["Content-Length"])
+                                except ValueError:
+                                    content_length = None
+                            resume_factory = self._make_resume_factory(
+                                url=cached.final_url,
+                                base_headers=request_headers,
+                                session=session,
+                                redirect_handler=redirect_handler,
+                            )
+                            restart_factory = self._make_restart_factory(
+                                url=cached.final_url,
+                                base_headers=request_headers,
+                                session=session,
+                                redirect_handler=redirect_handler,
+                            )
+                            body_stream = None
+                            if direct_response.status == 206 and "Range" in request_headers:
+                                cr = self._parse_content_range(resp_headers.get("Content-Range"))
+                                if cr is not None:
+                                    start, end, _total = cr
+                                    body_stream = self._serve_range(
+                                        direct_response, start, start, end, resume_factory, restart_factory,
+                                    )
+                            if body_stream is None:
+                                body_stream = self._pump_with_resume(
+                                    direct_response,
+                                    self.config.streaming.chunk_size,
+                                    resume_factory,
                                 )
+                            return StreamingResponse(
+                                status=direct_response.status,
+                                headers=filtered_headers,
+                                body_stream=body_stream,
+                                redirect_info=None,
+                                content_length=content_length,
+                                route_decision=route_decision,
+                                cache_status="HIT_STREAMING",
+                            )
                     except Exception as exc:
                         logger.warning("请求结果缓存直接请求失败，回退到正常流程: %s", exc)
 
         logger.debug("IP缓存未命中: IP=%s 目标=%s", client_ip, target_url)
-
-        redirect_handler = RedirectHandler(
-            max_redirects=rule.max_redirects,
-            timeout=rule.timeout,
-            stream_timeout=self.config.streaming.stream_timeout,
-            follow_redirects=rule.follow_redirects,
-            ssl=self._ssl_mode(),
-            session_provider=self.get_stream_session,
-        )
 
         retry_count = 0
         last_error = None
@@ -1448,39 +1701,45 @@ class ProxyRequestHandler:
                         cache_status="BYPASS",
                     )
 
-                # 上游返回 416（Range 不可满足）时，去掉 Range 头拉取全量，再在本地把请求区间
-                # 裁剪出来以 206 返回。直接转发 200 全量会让播放器拿到无 Content-Length 的 chunked
-                # 响应，导致视频无法播放；裁剪为 206 可同时保持 Range 语义与可播放性。
+                # 上游返回 416（Range 不可满足）时，用 `Range: bytes=0-` 拉全量，再在本地把请求
+                # 区间裁剪出来以 206 返回。该 CDN 对无 Range 的 GET 会回空 200 chunked，必须显式
+                # 用 bytes=0- 才能拿到带 Content-Range/Content-Length 的全量流；裁剪为 206 可同时
+                # 保持 Range 语义与可播放性。
                 if response.status == 416 and "Range" in request_headers:
                     range_header = request_headers["Range"]
                     logger.warning(
                         "上游返回 416（Range 不可满足），拉取全量后本地裁剪为 206 返回: %s", target_url,
                     )
-                    no_range_headers = {k: v for k, v in request_headers.items() if k.lower() != "range"}
+                    full_headers = {k: v for k, v in request_headers.items() if k.lower() != "range"}
+                    full_headers["Range"] = "bytes=0-"
                     try:
                         retry_response, retry_info = await redirect_handler.follow_redirects_streaming(
                             url=target_url,
                             method=method,
-                            headers=no_range_headers,
+                            headers=full_headers,
                             body=body,
                             session=session,
                         )
-                        if retry_response is None or retry_response.status != 200:
+                        if retry_response is None or retry_response.status not in (200, 206):
                             if retry_response is not None:
                                 retry_response.close()
                             logger.warning(
-                                "去掉 Range 重试返回 %s，沿用原 416 响应",
+                                "拉全量重试返回 %s，沿用原 416 响应",
                                 retry_response.status if retry_response is not None else "无响应",
                             )
                         else:
-                            total_raw = retry_response.headers.get("Content-Length")
-                            total = int(total_raw) if total_raw and total_raw.strip().isdigit() else None
+                            cr = self._parse_content_range(retry_response.headers.get("Content-Range"))
+                            if cr is not None:
+                                total = cr[2]
+                            else:
+                                total_raw = retry_response.headers.get("Content-Length")
+                                total = int(total_raw) if total_raw and total_raw.strip().isdigit() else None
                             parsed = self._parse_byte_range(range_header)
                             # 上游若对全量响应做了压缩编码，字节偏移裁剪会落在压缩流上产生
-                            # 乱码；此时放弃裁剪，直接转发 200 全量（透传压缩字节，头与体一致）
+                            # 乱码；此时放弃裁剪，直接转发全量（透传压缩字节，头与体一致）
                             if total is None or parsed is None or "Content-Encoding" in retry_response.headers:
                                 # 无法获知总长 / 区间无法解析 / 上游压缩了全量响应，
-                                # 退化为直接转发 200 全量（auto_decompress=False 保证字节透传一致）
+                                # 退化为直接转发全量（auto_decompress=False 保证字节透传一致）
                                 response.close()
                                 response = retry_response
                                 redirect_info = retry_info
@@ -1513,14 +1772,26 @@ class ProxyRequestHandler:
                                     return StreamingResponse(
                                         status=206,
                                         headers=filtered_headers,
-                                        body_stream=self._slice_range(retry_response, start, end),
+                                        body_stream=self._serve_range(
+                                            retry_response,
+                                            0,
+                                            start,
+                                            end,
+                                            None,
+                                            self._make_restart_factory(
+                                                url=str(retry_response.url) if retry_response.url else target_url,
+                                                base_headers=request_headers,
+                                                session=session,
+                                                redirect_handler=redirect_handler,
+                                            ),
+                                        ),
                                         redirect_info=retry_info,
                                         content_length=content_length,
                                         route_decision=route_decision,
                                         cache_status="BYPASS",
                                     )
                     except Exception as exc:
-                        logger.warning("去掉 Range 重试失败，沿用原 416 响应: %s", exc)
+                        logger.warning("拉全量重试失败，沿用原 416 响应: %s", exc)
 
                 response_headers = dict(response.headers)
                 filtered_headers = self.filter_headers(response_headers, is_request=False)
@@ -1547,10 +1818,39 @@ class ProxyRequestHandler:
                         redirect_info.redirect_url,
                     )
 
+                resume_factory = self._make_resume_factory(
+                    url=final_url,
+                    base_headers=request_headers,
+                    session=session,
+                    redirect_handler=redirect_handler,
+                )
+                restart_factory = self._make_restart_factory(
+                    url=final_url,
+                    base_headers=request_headers,
+                    session=session,
+                    redirect_handler=redirect_handler,
+                )
+
+                # Range 请求且上游回 206 时，走区间泵送：该 CDN 对非零偏移 Range 会回
+                # 「头正常但 body 空」的 206，播放器拖动即触发；空体时 _serve_range 自动
+                # 回退全量下载 + 本地裁剪，否则按区间泵送（含绝对偏移续传与终点约束）。
+                body_stream = None
+                if response.status == 206 and "Range" in request_headers:
+                    cr = self._parse_content_range(response_headers.get("Content-Range"))
+                    if cr is not None:
+                        start, end, _total = cr
+                        body_stream = self._serve_range(
+                            response, start, start, end, resume_factory, restart_factory,
+                        )
+                if body_stream is None:
+                    body_stream = self._pump_with_resume(
+                        response, self.config.streaming.chunk_size, resume_factory,
+                    )
+
                 return StreamingResponse(
                     status=response.status,
                     headers=filtered_headers,
-                    body_stream=self.stream_response(response, self.config.streaming.chunk_size),
+                    body_stream=body_stream,
                     redirect_info=redirect_info,
                     content_length=content_length,
                     route_decision=route_decision,
