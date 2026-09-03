@@ -1247,6 +1247,57 @@ class ProxyRequestHandler:
         finally:
             response.close()
 
+    @staticmethod
+    def _parse_byte_range(range_header: str) -> Optional[Tuple]:
+        """解析 Range 请求头，支持 bytes=START-END / bytes=START- / bytes=-N。
+
+        返回 ("absolute", start, end|None) 或 ("suffix", n, None)；无法解析返回 None。
+        """
+        if not range_header:
+            return None
+        m = re.match(r"\s*bytes=(\d+)-(\d*)\s*$", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else None
+            if end is not None and end < start:
+                return None
+            return ("absolute", start, end)
+        m = re.match(r"\s*bytes=-(\d+)\s*$", range_header)
+        if m:
+            return ("suffix", int(m.group(1)), None)
+        return None
+
+    async def _slice_range(
+        self,
+        upstream_response: aiohttp.ClientResponse,
+        start: int,
+        end: int,
+    ) -> AsyncGenerator[bytes, None]:
+        """从上游全量响应中跳过前 start 字节，仅转发 [start, end] 区间，用于以 206 返回。
+
+        调用方负责在响应头里写入对应的 Content-Range / Content-Length。上游响应在此
+        生成器结束时关闭，客户端断连也会触发 finally 释放连接。
+        """
+        chunk_size = self.config.streaming.chunk_size
+        skip = start
+        try:
+            while skip > 0:
+                chunk = await upstream_response.content.read(min(skip, chunk_size))
+                if not chunk:
+                    return
+                skip -= len(chunk)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = await upstream_response.content.read(min(remaining, chunk_size))
+                if not chunk:
+                    return
+                if len(chunk) > remaining:
+                    chunk = chunk[:remaining]
+                yield chunk
+                remaining -= len(chunk)
+        finally:
+            upstream_response.close()
+
     async def handle_request_streaming(
         self,
         method: str,
@@ -1389,12 +1440,13 @@ class ProxyRequestHandler:
                         cache_status="BYPASS",
                     )
 
-                # 上游返回 416（Range 不可满足）时，去掉客户端 Range 头重试整段下载，
-                # 兼容上游拒绝该区间 / 目标实为错误页却带 Range 的场景；重试成功则改用 200 全量响应。
-                # 否则会把 416（常带 Connection: close）直接抛给流式泵，触发 "Connection closed" 崩溃。
+                # 上游返回 416（Range 不可满足）时，去掉 Range 头拉取全量，再在本地把请求区间
+                # 裁剪出来以 206 返回。直接转发 200 全量会让播放器拿到无 Content-Length 的 chunked
+                # 响应，导致视频无法播放；裁剪为 206 可同时保持 Range 语义与可播放性。
                 if response.status == 416 and "Range" in request_headers:
+                    range_header = request_headers["Range"]
                     logger.warning(
-                        "上游返回 416（Range 不可满足），去掉 Range 头重试整段下载: %s", target_url,
+                        "上游返回 416（Range 不可满足），拉取全量后本地裁剪为 206 返回: %s", target_url,
                     )
                     no_range_headers = {k: v for k, v in request_headers.items() if k.lower() != "range"}
                     try:
@@ -1405,15 +1457,54 @@ class ProxyRequestHandler:
                             body=body,
                             session=session,
                         )
-                        if retry_response is not None and retry_response.status != 416:
-                            response.close()
-                            response = retry_response
-                            redirect_info = retry_info
-                        else:
+                        if retry_response is None or retry_response.status != 200:
+                            if retry_response is not None:
+                                retry_response.close()
                             logger.warning(
-                                "去掉 Range 重试仍返回 %s，沿用原 416 响应",
+                                "去掉 Range 重试返回 %s，沿用原 416 响应",
                                 retry_response.status if retry_response is not None else "无响应",
                             )
+                        else:
+                            total_raw = retry_response.headers.get("Content-Length")
+                            total = int(total_raw) if total_raw and total_raw.strip().isdigit() else None
+                            parsed = self._parse_byte_range(range_header)
+                            if total is None or parsed is None:
+                                # 无法获知总长或区间无法解析，退化为直接转发 200 全量
+                                response.close()
+                                response = retry_response
+                                redirect_info = retry_info
+                            else:
+                                kind, a, b = parsed
+                                if kind == "suffix":
+                                    start = max(0, total - a)
+                                else:
+                                    start = a
+                                if kind == "absolute" and b is not None and b < total:
+                                    end = b
+                                else:
+                                    end = total - 1
+                                if start > end:
+                                    retry_response.close()
+                                    logger.warning(
+                                        "请求区间越界（start=%s > end=%s），沿用原 416 响应", start, end,
+                                    )
+                                else:
+                                    content_length = end - start + 1
+                                    filtered_headers = self.filter_headers(dict(retry_response.headers), is_request=False)
+                                    self._apply_route_headers(filtered_headers, route_decision)
+                                    filtered_headers.pop("Accept-Ranges", None)
+                                    filtered_headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+                                    filtered_headers["Content-Length"] = str(content_length)
+                                    response.close()
+                                    return StreamingResponse(
+                                        status=206,
+                                        headers=filtered_headers,
+                                        body_stream=self._slice_range(retry_response, start, end),
+                                        redirect_info=retry_info,
+                                        content_length=content_length,
+                                        route_decision=route_decision,
+                                        cache_status="BYPASS",
+                                    )
                     except Exception as exc:
                         logger.warning("去掉 Range 重试失败，沿用原 416 响应: %s", exc)
 
