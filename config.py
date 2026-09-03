@@ -395,6 +395,9 @@ class Config:
     trust_forward_headers: bool = True
     # 上游证书校验。关闭后上游 HTTPS 可被中间人劫持，仅在自签证书场景下临时关闭
     verify_upstream_ssl: bool = True
+    # 自定义上游 CA 证书包路径（PEM）。留空时若启用校验则回退到 certifi 的 Mozilla CA
+    # bundle，用于解决 Windows/Python 默认信任库缺失中间 CA 导致的 CERTIFICATE_VERIFY_FAILED
+    upstream_ca_bundle: Optional[str] = None
     # 是否信任 X-Real-IP / CF-Connecting-IP。只有明确由前置代理覆盖时才应开启
     trust_upstream_ip_headers: bool = False
     # 可信代理网段：只有直连来源位于这些网段时，才解析 X-Forwarded-For
@@ -600,6 +603,8 @@ class Config:
             data.get("verify_upstream_ssl"),
             config.verify_upstream_ssl,
         )
+        ca_bundle = data.get("upstream_ca_bundle")
+        config.upstream_ca_bundle = str(ca_bundle).strip() if ca_bundle else None
         config.trust_upstream_ip_headers = coerce_bool(
             data.get("trust_upstream_ip_headers"),
             config.trust_upstream_ip_headers,

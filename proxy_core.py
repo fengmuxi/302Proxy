@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import random
 import re
+import ssl
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
@@ -18,6 +19,43 @@ from ip_ban_manager import IpBanManager
 
 
 logger = logging.getLogger("proxy")
+
+# certifi 提供 Mozilla 维护的 CA 信任库，覆盖 Windows/Python 自带 OpenSSL 默认信任库
+# 缺失的中间 CA，用于在不关闭证书校验的前提下修复上游证书链验证失败的问题。
+try:
+    import certifi
+    _CERTIFI_AVAILABLE = True
+except ImportError:  # pragma: no cover - 极少数未安装 certifi 的环境
+    certifi = None
+    _CERTIFI_AVAILABLE = False
+
+
+def _make_verify_ssl_context(ca_bundle: Optional[str] = None) -> Optional[ssl.SSLContext]:
+    """构造用于上游 HTTPS 证书校验的 SSL 上下文。
+
+    优先级：
+    1. 用户显式指定的 ca_bundle（config.upstream_ca_bundle）；
+    2. 否则若 certifi 可用，使用其 Mozilla CA bundle；
+    3. 二者皆无则回退到 None（由 aiohttp 使用系统默认信任库）。
+
+    Windows 下 Python 自带 OpenSSL 的默认信任库常常缺少某些中间 CA，
+    导致上游 CDN 证书链验证失败（CERTIFICATE_VERIFY_FAILED: unable to get
+    local issuer certificate）。certifi 的 bundle 覆盖面更广，可在保持证书校验
+    开启的前提下解决该问题，避免以 verify_upstream_ssl=false 关闭校验带来的
+    中间人劫持风险。
+    """
+    cafile = ca_bundle
+    if cafile is None and _CERTIFI_AVAILABLE:
+        try:
+            cafile = certifi.where()
+        except Exception:  # pragma: no cover - certifi 异常时回退默认信任库
+            cafile = None
+    if cafile:
+        try:
+            return ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=cafile)
+        except (FileNotFoundError, ssl.SSLError) as exc:
+            logger.warning("指定的 CA 证书包不可用（%s），回退到系统默认信任库: %s", cafile, exc)
+    return None
 
 
 def _retry_delay(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
@@ -226,12 +264,14 @@ class RedirectHandler:
         timeout: int = 30,
         stream_timeout: int = 3600,
         follow_redirects: bool = True,
-        verify_ssl: bool = True,
+        ssl: Optional[Union[bool, ssl.SSLContext]] = None,
         session_provider=None,
     ):
         self.max_redirects = max_redirects
         self.follow_redirects_enabled = follow_redirects
-        self.verify_ssl = verify_ssl
+        # ssl=False 关闭校验；ssl 为 SSLContext 时按指定 CA 校验；
+        # ssl=None 时由 aiohttp 使用系统默认信任库
+        self._ssl = ssl
         # 自建 session 会随响应一起逃逸出方法作用域，永远等不到 close；
         # 改为由外部提供共享 session，彻底消除泄漏面
         self._session_provider = session_provider
@@ -284,8 +324,9 @@ class RedirectHandler:
         # 规则级超时此前从未传给 request，rule.timeout 是死配置；
         # 这里显式传入，standard 走 timeout，streaming 走 stream_timeout
         request_timeout = self.stream_timeout if streaming else self.timeout
-        # ssl=None 表示沿用默认校验，ssl=False 才是关闭校验
-        ssl_mode = None if self.verify_ssl else False
+        # self._ssl 由构造时传入：False=关闭校验，SSLContext=按指定 CA 校验，
+        # None=沿用 aiohttp 默认信任库
+        ssl_mode = self._ssl
 
         try:
             while redirect_count < self.max_redirects:
@@ -383,7 +424,7 @@ class ProxyRequestHandler:
             timeout=self.config.default_timeout,
             stream_timeout=self.config.streaming.stream_timeout,
             follow_redirects=self.config.follow_redirects,
-            verify_ssl=self.config.verify_upstream_ssl,
+            ssl=self._ssl_mode(),
             session_provider=self.get_session,
         )
 
@@ -649,9 +690,17 @@ class ProxyRequestHandler:
         if status == 206 or "bytes" in upstream_accepts or "Content-Range" in upstream_headers:
             filtered_headers["Accept-Ranges"] = "bytes"
 
-    def _ssl_mode(self) -> Optional[bool]:
-        """ssl=None 沿用默认证书校验，ssl=False 才是关闭校验。"""
-        return None if self.config.verify_upstream_ssl else False
+    def _ssl_mode(self) -> Optional[Union[bool, ssl.SSLContext]]:
+        """返回上游请求的 ssl 参数。
+
+        verify_upstream_ssl=false 时返回 False（关闭校验，存在中间人劫持风险，
+        main.py 已告警）；否则返回带 CA 信任库的 SSLContext（优先用户自定义
+        upstream_ca_bundle，其次 certifi 的 Mozilla bundle），保持证书校验的同时
+        兼容更多上游证书链，避免 Windows 下缺失中间 CA 导致的 CERTIFICATE_VERIFY_FAILED。
+        """
+        if not self.config.verify_upstream_ssl:
+            return False
+        return _make_verify_ssl_context(self.config.upstream_ca_bundle)
 
     def _should_stream_by_content(self, response_headers: Dict[str, str], status: int) -> bool:
         """标准模式下按响应头判断是否应升级为流式。
@@ -1187,6 +1236,11 @@ class ProxyRequestHandler:
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
             logger.info("下游连接已关闭: %s", type(exc).__name__)
             raise
+        except aiohttp.ClientConnectionError as exc:
+            # 上游在流式传输中途断开连接，属上游不稳定。已发出的分片已写给客户端，
+            # 此处正常结束流式泵而非抛错，避免刷出完整堆栈（原 "Connection closed" ERROR 日志）
+            logger.warning("上游连接中途断开，流式传输提前终止: %s", type(exc).__name__)
+            return
         except Exception as exc:
             logger.error("流式响应失败: %s", exc)
             raise
@@ -1297,7 +1351,7 @@ class ProxyRequestHandler:
             timeout=rule.timeout,
             stream_timeout=self.config.streaming.stream_timeout,
             follow_redirects=rule.follow_redirects,
-            verify_ssl=self.config.verify_upstream_ssl,
+            ssl=self._ssl_mode(),
             session_provider=self.get_stream_session,
         )
 
@@ -1334,6 +1388,34 @@ class ProxyRequestHandler:
                         route_decision=route_decision,
                         cache_status="BYPASS",
                     )
+
+                # 上游返回 416（Range 不可满足）时，去掉客户端 Range 头重试整段下载，
+                # 兼容上游拒绝该区间 / 目标实为错误页却带 Range 的场景；重试成功则改用 200 全量响应。
+                # 否则会把 416（常带 Connection: close）直接抛给流式泵，触发 "Connection closed" 崩溃。
+                if response.status == 416 and "Range" in request_headers:
+                    logger.warning(
+                        "上游返回 416（Range 不可满足），去掉 Range 头重试整段下载: %s", target_url,
+                    )
+                    no_range_headers = {k: v for k, v in request_headers.items() if k.lower() != "range"}
+                    try:
+                        retry_response, retry_info = await redirect_handler.follow_redirects_streaming(
+                            url=target_url,
+                            method=method,
+                            headers=no_range_headers,
+                            body=body,
+                            session=session,
+                        )
+                        if retry_response is not None and retry_response.status != 416:
+                            response.close()
+                            response = retry_response
+                            redirect_info = retry_info
+                        else:
+                            logger.warning(
+                                "去掉 Range 重试仍返回 %s，沿用原 416 响应",
+                                retry_response.status if retry_response is not None else "无响应",
+                            )
+                    except Exception as exc:
+                        logger.warning("去掉 Range 重试失败，沿用原 416 响应: %s", exc)
 
                 response_headers = dict(response.headers)
                 filtered_headers = self.filter_headers(response_headers, is_request=False)
@@ -1470,7 +1552,7 @@ class ProxyRequestHandler:
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
             follow_redirects=rule.follow_redirects,
-            verify_ssl=self.config.verify_upstream_ssl,
+            ssl=self._ssl_mode(),
             session_provider=self.get_session,
         )
 
