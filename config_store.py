@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -66,6 +66,43 @@ def deep_get(data: Any, path: str, default: Any = None) -> Any:
 
 
 class ConfigStore:
+    # 旧库列补齐清单：CREATE TABLE IF NOT EXISTS 对已存在的表不会新增列，
+    # 这些列由后续 migration 演进而来（007/010/011/013/016），创建于对应
+    # 功能上线之前的旧库会缺列，导致裸 UPDATE/SELECT 报 no such column。
+    # 启动时按此清单幂等补齐（全部带 DEFAULT，可安全 ADD COLUMN）。
+    LEGACY_SYSTEM_SETTINGS_COLUMNS: Tuple[Tuple[str, str], ...] = (
+        ("ip_cache_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("ip_cache_ttl_seconds", "INTEGER NOT NULL DEFAULT 300"),
+        ("ip_cache_max_entries", "INTEGER NOT NULL DEFAULT 5000"),
+        ("logging_retention_days", "INTEGER NOT NULL DEFAULT 30"),
+        ("auto_ban_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("auto_ban_window_seconds", "INTEGER NOT NULL DEFAULT 60"),
+        ("auto_ban_max_requests", "INTEGER NOT NULL DEFAULT 100"),
+        ("auto_ban_ban_duration_seconds", "INTEGER NOT NULL DEFAULT 3600"),
+        ("auto_ban_max_404", "INTEGER NOT NULL DEFAULT 20"),
+        ("auto_ban_auto_ban_on_404", "INTEGER NOT NULL DEFAULT 1"),
+        ("auto_ban_whitelist", "TEXT NOT NULL DEFAULT ''"),
+        ("auto_ban_email_on_ban", "INTEGER NOT NULL DEFAULT 0"),
+        ("email_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("email_smtp_host", "TEXT NOT NULL DEFAULT ''"),
+        ("email_smtp_port", "INTEGER NOT NULL DEFAULT 465"),
+        ("email_smtp_ssl", "INTEGER NOT NULL DEFAULT 1"),
+        ("email_sender", "TEXT NOT NULL DEFAULT ''"),
+        ("email_sender_name", "TEXT NOT NULL DEFAULT ''"),
+        ("email_password", "TEXT NOT NULL DEFAULT ''"),
+        ("email_recipients", "TEXT NOT NULL DEFAULT ''"),
+        ("email_block_link_base_url", "TEXT NOT NULL DEFAULT ''"),
+        ("email_alert_window_seconds", "INTEGER NOT NULL DEFAULT 60"),
+        ("email_alert_max_requests", "INTEGER NOT NULL DEFAULT 80"),
+        ("email_alert_max_404", "INTEGER NOT NULL DEFAULT 15"),
+        ("email_alert_cooldown_minutes", "INTEGER NOT NULL DEFAULT 30"),
+        ("session_secret", "TEXT NOT NULL DEFAULT ''"),
+        ("rsa_private_key", "TEXT NOT NULL DEFAULT ''"),
+        ("dedup_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("dedup_window_seconds", "REAL NOT NULL DEFAULT 2.0"),
+        ("dedup_max_cache_entries", "INTEGER NOT NULL DEFAULT 10000"),
+    )
+
     def __init__(self, db_path: Optional[str] = None, bootstrap_config: Optional[Config] = None):
         if bootstrap_config and db_path is None:
             db_path = bootstrap_config.database_path
@@ -369,25 +406,34 @@ class ConfigStore:
 
     def _run_migrations(self) -> None:
         """Execute yoyo database migrations for fresh databases only.
-        Existing databases already have the full schema from CREATE TABLE IF NOT EXISTS."""
+
+        Existing databases skip yoyo migrations (their base schema comes from
+        CREATE TABLE IF NOT EXISTS), but that statement cannot add columns to
+        existing tables — so backfill any columns introduced by later
+        migrations via LEGACY_SYSTEM_SETTINGS_COLUMNS instead.
+        """
         with self._connect() as connection:
             try:
                 count = connection.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0]
             except Exception:
                 count = 0
 
-        if count > 0:
+        if count == 0:
+            from yoyo import read_migrations, get_backend
+
+            migrations_dir = Path(__file__).parent / "migrations"
+            if not migrations_dir.exists():
+                return
+
+            backend = get_backend(f"sqlite:///{self.db_path}")
+            migrations = read_migrations(str(migrations_dir))
+            backend.apply_migrations(migrations)
             return
 
-        from yoyo import read_migrations, get_backend
-
-        migrations_dir = Path(__file__).parent / "migrations"
-        if not migrations_dir.exists():
-            return
-
-        backend = get_backend(f"sqlite:///{self.db_path}")
-        migrations = read_migrations(str(migrations_dir))
-        backend.apply_migrations(migrations)
+        # 旧库：幂等补齐后续迁移新增的列，避免 UPDATE/SELECT 报 no such column
+        with self._connect() as connection:
+            for column_name, definition in self.LEGACY_SYSTEM_SETTINGS_COLUMNS:
+                self._ensure_column(connection, "system_settings", column_name, definition)
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
