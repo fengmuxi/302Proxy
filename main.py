@@ -57,6 +57,47 @@ def format_bytes(bytes_value: int) -> str:
         return f"{bytes_value} B"
 
 
+def read_net_interface_bytes() -> Optional[Tuple[int, int]]:
+    """读取所有物理网卡的累计 (发送字节数, 接收字节数)，网卡级吞吐采样用。
+
+    跨平台纯标准库实现：
+    - Linux / Docker：解析 /proc/net/dev，排除 lo 回环口；
+    - Windows：解析 netstat -e 的「接口统计」字节数行（中英文输出均兼容）；
+    - 均不可用时返回 None，前端据此显示「不支持」。
+    """
+    proc_net_dev = Path("/proc/net/dev")
+    if proc_net_dev.exists():
+        try:
+            sent = recv = 0
+            for line in proc_net_dev.read_text(encoding="utf-8", errors="ignore").splitlines()[2:]:
+                parts = line.split()
+                # 字段布局: iface: recv_bytes packets ... (field 9 = sent_bytes)
+                if len(parts) < 10 or parts[0].rstrip(":") == "lo":
+                    continue
+                try:
+                    recv += int(parts[1])
+                    sent += int(parts[9])
+                except ValueError:
+                    continue
+            return sent, recv
+        except OSError:
+            pass
+    try:
+        import subprocess
+        # 中文 Windows 的 netstat 输出为 GBK：不用 text=True，手动容错解码（仅需 ASCII 数字与 Bytes/字节 关键词）
+        raw = subprocess.run(["netstat", "-e"], capture_output=True, timeout=3).stdout
+        candidates = [(raw or b"").decode("gbk", errors="ignore"), (raw or b"").decode("utf-8", errors="ignore")]
+        for out in candidates:
+            # 中文输出为「字节/字节数」，英文为「Bytes」；两列依次为 接收 / 发送
+            m = re.search(r"(?:Bytes|字节数|字节)\s+(\d+)\s+(\d+)", out)
+            if m:
+                recv, sent = int(m.group(1)), int(m.group(2))
+                return sent, recv
+    except Exception:
+        pass
+    return None
+
+
 class ProxyServer:
     def __init__(self, config: Config, config_store: ConfigStore):
         self.config = config
@@ -112,6 +153,7 @@ class ProxyServer:
         self.app.router.add_get('/_health', self.health_check)
         self.app.router.add_get('/json/version', self.docker_version)
         self.app.router.add_get('/_admin/api/stats', self.get_stats)
+        self.app.router.add_get('/_admin/api/net-throughput', self.get_net_throughput)
         self.app.router.add_get('/_admin/api/overview-stats', self.get_overview_stats)
         self.app.router.add_get('/_admin/api/ip-cache/stats', self.get_ip_cache_stats)
         self.app.router.add_post('/_admin/api/ip-cache/clear', self.clear_ip_cache)
@@ -922,6 +964,52 @@ class ProxyServer:
             status=200,
             headers={'Content-Type': 'application/json'},
             body=json.dumps(stats).encode()
+        ))
+
+    async def get_net_throughput(self, request: web.Request) -> web.Response:
+        """服务器网卡网络吞吐：累计收发字节数 + 基于上次采样的瞬时速率（bytes/s）。
+
+        服务端保存上次采样做差分，前端首次打开即可显示速率（前端无需等第二次
+        请求算差值）。采样间隔过短（<0.5s，如手动刷新紧跟轮询）时沿用上次速率，
+        避免极短间隔放大抖动。
+        """
+        if not await self.check_admin_auth(request):
+            return self._add_security_headers(web.Response(status=401, headers={'Content-Type': 'application/json'}, body=json.dumps({"error": "未授权"}).encode()))
+        sample = await asyncio.to_thread(read_net_interface_bytes)
+        if sample is None:
+            return self._add_security_headers(web.Response(
+                status=200,
+                headers={'Content-Type': 'application/json'},
+                body=json.dumps({"ok": False, "reason": "unsupported_platform"}).encode()
+            ))
+        sent, recv = sample
+        now = time.monotonic()
+        last = getattr(self, "_net_last_sample", None)
+        sent_rate = recv_rate = None
+        if last:
+            dt = now - last[0]
+            if dt >= 0.5:
+                sent_rate = max(0, sent - last[1]) / dt
+                recv_rate = max(0, recv - last[2]) / dt
+                self._net_last_sample = (now, sent, recv)
+                self._net_last_rates = (sent_rate, recv_rate)
+            else:
+                # 采样过密：沿用上次速率，不更新基线
+                sent_rate, recv_rate = getattr(self, "_net_last_rates", (None, None))
+        else:
+            self._net_last_sample = (now, sent, recv)
+            self._net_last_rates = (None, None)
+        payload = {
+            "ok": True,
+            "bytes_sent": sent,
+            "bytes_recv": recv,
+            "sent_rate": round(sent_rate, 1) if sent_rate is not None else None,
+            "recv_rate": round(recv_rate, 1) if recv_rate is not None else None,
+        }
+        return self._add_security_headers(web.Response(
+            status=200,
+            headers={'Content-Type': 'application/json'},
+            body=json.dumps(payload).encode()
         ))
 
     async def get_overview_stats(self, request: web.Request) -> web.Response:

@@ -54,10 +54,12 @@ export function activatePage(page) {
   stopAutoRefresh();
   stopAppLogAutoRefresh();
   stopBanAutoRefresh();
+  stopNetAutoRefresh();
 
   switch (page) {
     case "overview":
       renderOverview().catch(() => {});
+      startNetAutoRefresh();
       break;
     case "routing":
       refreshRouting();
@@ -252,7 +254,68 @@ function renderTrendSvg(hours) {
     </svg>`;
 }
 
+// ============ 网络吞吐（概览 KPI，2s 轮询差分速率由服务端计算） ============
+
+function formatRate(bytesPerSec) {
+  if (bytesPerSec == null || !Number.isFinite(bytesPerSec)) return null;
+  if (bytesPerSec >= 1024 * 1024 * 1024) return (bytesPerSec / 1024 / 1024 / 1024).toFixed(2) + " GB/s";
+  if (bytesPerSec >= 1024 * 1024) return (bytesPerSec / 1024 / 1024).toFixed(2) + " MB/s";
+  if (bytesPerSec >= 1024) return (bytesPerSec / 1024).toFixed(1) + " KB/s";
+  return Math.round(bytesPerSec) + " B/s";
+}
+
+function formatBytesTotal(bytes) {
+  if (bytes == null || !Number.isFinite(bytes)) return null;
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(2) + " GB";
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " B";
+}
+
+export async function loadNetThroughput() {
+  const valueEl = document.getElementById("kpiNet");
+  const deltaEl = document.getElementById("kpiNetDelta");
+  if (!valueEl) return;
+  try {
+    const d = await apiFetch("/_admin/api/net-throughput");
+    if (!d || !d.ok) {
+      valueEl.textContent = "—";
+      if (deltaEl) deltaEl.textContent = "当前平台不支持网卡统计";
+      return;
+    }
+    const recvText = formatRate(d.recv_rate);
+    if (recvText == null) {
+      valueEl.textContent = "…";
+      if (deltaEl) deltaEl.textContent = "正在采样网络速率…";
+      return;
+    }
+    // 主值取下行速率（代理场景下行为主），上行与累计收发进副标题
+    valueEl.innerHTML = `<span style="color:var(--info);font-size:13px;font-weight:600">↓ </span>${esc(recvText)}`;
+    if (deltaEl) {
+      const sentText = formatRate(d.sent_rate) || "—";
+      const recvTotal = formatBytesTotal(d.bytes_recv);
+      deltaEl.textContent = `↑ ${sentText} · 累计收 ${recvTotal}`;
+    }
+  } catch (_) {
+    valueEl.textContent = "—";
+    if (deltaEl) deltaEl.textContent = "吞吐数据不可用";
+  }
+}
+
+let _netAutoRefreshTimer = null;
+export function stopNetAutoRefresh() {
+  if (_netAutoRefreshTimer) { clearInterval(_netAutoRefreshTimer); _netAutoRefreshTimer = null; }
+}
+function startNetAutoRefresh() {
+  stopNetAutoRefresh();
+  _netAutoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "overview") { stopNetAutoRefresh(); return; }
+    loadNetThroughput().catch(() => {});
+  }, 2000);
+}
+
 export async function renderOverview() {
+  loadNetThroughput().catch(() => {});
   const [stats, overviewResp, cacheResp] = await Promise.all([
     apiFetch("/_admin/api/stats").catch(() => null),
     apiFetch("/_admin/api/overview-stats").catch(() => null),

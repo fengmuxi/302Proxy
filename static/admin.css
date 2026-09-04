@@ -94,7 +94,7 @@ body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Micros
 .btn-sm{padding:5px 11px;font-size:12px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
 .grid{display:grid;gap:16px}
-.kpi-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+.kpi-grid{grid-template-columns:repeat(5,minmax(0,1fr))}
 .kpi{padding:16px 18px}
 .kpi-label{font-size:12px;color:var(--text-2);display:flex;align-items:center;gap:6px}
 .kpi-value{font-size:26px;font-weight:500;margin-top:6px;letter-spacing:-.01em}
