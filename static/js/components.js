@@ -324,10 +324,6 @@ export function refreshTrigger(sel) {
   if (!sel || !sel._csTrig) return;
   const label = sel._csTrig.querySelector(".cs-label");
   if (label) label.textContent = sel.options[sel.selectedIndex].textContent;
-  // trigger 上的勾选标记：仅在「当前值 ≠ 默认值」时显示，避免默认项也多一个无意义的勾
-  const isDefault = String(sel.value) === String(sel.dataset.default || "");
-  const check = sel._csTrig.querySelector(".cs-check");
-  if (check) check.style.opacity = isDefault ? "0" : "1";
   if (sel._csPop) {
     sel._csPop.querySelectorAll(".cs-opt").forEach((o) => o.classList.toggle("sel", o.dataset.val === sel.value));
   }
@@ -368,10 +364,7 @@ export function upgradeSelect(sel) {
   trig.type = "button";
   trig.className = "cs-trigger";
   const caret = '<svg class="cs-caret" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-  const check = '<svg class="cs-check" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
-  const isDefault = String(sel.value) === String(sel.dataset.default || "");
-  trig.innerHTML = `${check}<span class="cs-label">${escapeHtml(sel.options[sel.selectedIndex].textContent)}</span>${caret}`;
-  if (isDefault) trig.querySelector(".cs-check").style.opacity = "0";
+  trig.innerHTML = `<span class="cs-label">${escapeHtml(sel.options[sel.selectedIndex].textContent)}</span>${caret}`;
   const pop = document.createElement("div");
   pop.className = "cs-pop";
   pop._sel = sel;
