@@ -1524,10 +1524,11 @@ def main():
     if config.geoip.offline.db_path:
         Path(config.geoip.offline.db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    if args.port is None:
-        config.server.port = bootstrap_config.server.port
-    if args.host is None:
-        config.server.host = bootstrap_config.server.host
+    # CLI 显式覆盖（原逻辑写反：仅当参数为 None 时才赋值，导致 -p/--host 永远不生效）
+    if args.port is not None:
+        config.server.port = args.port
+    if args.host is not None:
+        config.server.host = args.host
     
     if args.verbose:
         config.logging.level = 'DEBUG'
