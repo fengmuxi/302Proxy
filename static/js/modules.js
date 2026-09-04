@@ -422,6 +422,18 @@ const GROUP_SCHEMA = [
   { key: "region_matching_enabled", label: "地区匹配", type: "switch", hint: "该前缀下所有规则按地区过滤命中" },
 ];
 
+// 后台/系统保留路径：这些路由由后台控制台或系统内置接口直接处理，不经过代理兜底，
+// 若被设置为路由组路径前缀将永远无法命中，故在创建/编辑时拦截。
+const RESERVED_BACKEND_PATHS = ["/_admin", "/_health", "/json/version", "/_block"];
+
+function matchReservedPath(pathPrefix) {
+  let p = String(pathPrefix || "").trim();
+  if (!p) return null;
+  if (!p.startsWith("/")) p = "/" + p;
+  p = p.replace(/\/+$/, "") || "/";
+  return RESERVED_BACKEND_PATHS.find((res) => p === res || p.startsWith(res + "/") || res.startsWith(p + "/")) || null;
+}
+
 export function openRouteGroupModal(group) {
   const isEdit = Boolean(group);
   const values = group ? {
@@ -441,7 +453,10 @@ export function openRouteGroupModal(group) {
     schema: GROUP_SCHEMA,
     values,
     validate: (out) => {
-      if (!String(out.path_prefix || "").trim()) return "路径前缀不能为空";
+      const pp = String(out.path_prefix || "").trim();
+      if (!pp) return "路径前缀不能为空";
+      const reserved = matchReservedPath(pp);
+      if (reserved) return `路径前缀不能使用后台保留路径「${reserved}」，该路径由系统内部占用，转发规则不会生效。`;
       return null;
     },
     onSave: async (out) => {
@@ -1945,7 +1960,7 @@ export function openBanModal(options = {}) {
     title: mode === "from-log" ? "从日志封禁 IP" : "封禁 IP",
     schema: [
       { key: "ip", label: "IP 地址 / 网段", type: "text", required: true, placeholder: "1.2.3.4 或 192.168.1.0/24" },
-      { key: "path_prefix", label: "路径前缀（可选）", type: "text", placeholder: "留空表示全局封禁" },
+      { key: "path_prefix", label: "路径前缀（可选）", type: "text", placeholder: "留空表示全局封禁", hint: "留空拦截该 IP 的所有代理请求；填写如 /play 仅拦截该前缀。封禁只影响代理转发，不影响后台管理 /_admin 访问。" },
       { key: "reason", label: "封禁原因", type: "text" },
       { key: "permanent", label: "封禁类型", type: "select", options: [{ value: "1", label: "永久封禁" }, { value: "0", label: "临时封禁" }] },
       { key: "duration", label: "封禁时长（小时）", type: "number", default: 1, hint: "临时封禁时生效" },

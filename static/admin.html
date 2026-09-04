@@ -114,6 +114,10 @@
     <!-- ===== Security ===== -->
     <div class="page" id="page-security" hidden>
       <div class="page-head"><div><h1 class="page-title">安全与封禁</h1><p class="page-desc">查看封禁名单、配置自动封禁策略与白名单。</p></div></div>
+      <div class="hint" style="margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--info);background:var(--surface-2);border-radius:6px;color:var(--text-2);line-height:1.7;font-size:13px">
+        <strong style="color:var(--text)">封禁规则说明：</strong>IP 封禁只拦截<strong>代理转发路径</strong>（命中路由组 / 规则的请求），<strong>不影响后台管理</strong>（<code class="mono">/_admin</code>）及系统内置接口（<code class="mono">/_health</code>、<code class="mono">/json/version</code>、<code class="mono">/_block</code>）的访问，被封禁的 IP 仍可正常打开后台。<br>
+        「路径前缀」留空 = 全局封禁（拦截该 IP 的所有代理请求）；填写如 <code class="mono">/play</code> = 仅拦截该前缀下的代理请求。
+      </div>
       <div class="grid cols-2">
         <div class="card">
           <div class="panel-head"><div class="panel-title">封禁名单</div><div class="panel-head-actions"><span class="pill pill-neutral" id="banSummary"></span><button class="btn btn-sm btn-danger" id="clearBans">清空封禁</button><button class="btn btn-sm" id="manualBanBtn">+ 手动封禁</button></div></div>
