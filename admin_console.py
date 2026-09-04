@@ -23,6 +23,20 @@ from geo_service import GeoResolver
 logger = logging.getLogger("proxy")
 
 
+@web.middleware
+async def static_no_cache_middleware(request: web.Request, handler):
+    """管理后台静态资源使用协商缓存（no-cache + ETag/Last-Modified）。
+
+    add_static 默认不带 Cache-Control，浏览器按启发式策略长期缓存 JS/CSS，
+    导致前端修复后用户刷新仍拿到旧文件（如封禁弹窗勾选不同步的旧版逻辑）。
+    no-cache 表示可缓存但每次必须 revalidate，未变更时 304，开销极小。
+    """
+    response = await handler(request)
+    if request.path.startswith("/_admin/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 class AdminConsole:
     def __init__(
         self,
@@ -48,6 +62,8 @@ class AdminConsole:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def register(self, app: web.Application) -> None:
+        if static_no_cache_middleware not in app.middlewares:
+            app.middlewares.append(static_no_cache_middleware)
         app.router.add_get("/_admin", self.index)
         app.router.add_get("/_admin/", self.index)
         app.router.add_static("/_admin/static/", str(self.static_dir), show_index=False)
