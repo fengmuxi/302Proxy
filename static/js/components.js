@@ -212,6 +212,10 @@ export function openFormModal(opts) {
     <div class="modal-head"><div><div class="modal-title">${escapeHtml(title)}</div>${sub ? `<div class="modal-sub">${escapeHtml(sub)}</div>` : ""}</div><button class="icon-btn" id="modalClose">✕</button></div>
     <div class="modal-body">${schema.map((f) => fieldRow(f, values)).join("")}</div>
     <div class="modal-foot"><button class="btn" id="modalCancel">取消</button><button class="btn btn-primary" id="modalSave">保存</button></div>`;
+  // 防累积：innerHTML 重建后，上一轮弹窗的下拉弹层已成孤儿（其 select 已断连），立即清掉
+  document.querySelectorAll(".cs-pop").forEach((p) => {
+    if (p._sel && !p._sel.isConnected) p.remove();
+  });
   modalEl.querySelectorAll(".switch[data-fkey]").forEach((s) => {
     const toggle = () => s.classList.toggle("on");
     s.addEventListener("click", toggle);
@@ -335,7 +339,8 @@ function buildPopOptions(sel, pop) {
     const op = document.createElement("div");
     op.className = "cs-opt" + (o.value === sel.value ? " sel" : "");
     op.dataset.val = o.value;
-    op.innerHTML = `<span>${escapeHtml(o.textContent)}</span>` + (o.value === sel.value ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : "");
+    // 勾选图标由 .cs-opt.sel::after 按 .sel 状态绘制（见 admin.css），保证与高亮严格同步
+    op.innerHTML = `<span>${escapeHtml(o.textContent)}</span>`;
     op.addEventListener("click", (e) => {
       e.stopPropagation();
       sel.value = o.value;

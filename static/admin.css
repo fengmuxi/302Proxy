@@ -148,6 +148,7 @@ textarea{resize:vertical;min-height:64px}
 .cs-opt:hover{background:var(--surface-2)}
 .cs-opt.sel{background:var(--brand);color:#fff}
 .cs-opt.sel:hover{background:var(--brand)}
+.cs-opt.sel::after{content:"";flex:0 0 auto;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);margin-left:4px}
 .chipbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;min-height:0}
 .chipbar:empty{display:none}
 .chip{display:inline-flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand-text);border:1px solid var(--brand-soft);border-radius:999px;padding:4px 6px 4px 12px;font-size:12px}
