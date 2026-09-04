@@ -57,12 +57,79 @@ def format_bytes(bytes_value: int) -> str:
         return f"{bytes_value} B"
 
 
-def read_net_interface_bytes() -> Optional[Tuple[int, int]]:
-    """读取所有物理网卡的累计 (发送字节数, 接收字节数)，网卡级吞吐采样用。
+def _read_net_bytes_windows() -> Optional[Tuple[int, int]]:
+    """GetIfTable 按网卡累计字节数（ctypes 调 iphlpapi，纯标准库），排除回环口。
 
-    跨平台纯标准库实现：
-    - Linux / Docker：解析 /proc/net/dev，排除 lo 回环口；
-    - Windows：解析 netstat -e 的「接口统计」字节数行（中英文输出均兼容）；
+    此前用 netstat -e 的「接口统计」汇总，它包含回环接口：本机代理场景下
+    浏览器↔代理的回环流量来回双计，吞吐严重虚高（实测约 6 倍），故弃用。
+    计数器为 32 位无符号，高速率下数分钟环绕一次，差分处需按环绕修正。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    MAX_INTERFACE_NAME_LEN = 256
+    MAXLEN_PHYSADDR = 8
+    IF_TYPE_SOFTWARE_LOOPBACK = 24
+
+    class MIB_IFROW(ctypes.Structure):
+        _fields_ = [
+            ("wszName", ctypes.c_wchar * MAX_INTERFACE_NAME_LEN),
+            ("dwIndex", wintypes.DWORD),
+            ("dwType", wintypes.DWORD),
+            ("dwMtu", wintypes.DWORD),
+            ("dwSpeed", wintypes.DWORD),
+            ("dwPhysAddrLen", wintypes.DWORD),
+            ("bPhysAddr", ctypes.c_ubyte * MAXLEN_PHYSADDR),
+            ("dwAdminStatus", wintypes.DWORD),
+            ("dwOperStatus", wintypes.DWORD),
+            ("dwLastChange", wintypes.DWORD),
+            ("dwInOctets", wintypes.DWORD),
+            ("dwInUcastPkts", wintypes.DWORD),
+            ("dwInNUcastPkts", wintypes.DWORD),
+            ("dwInDiscards", wintypes.DWORD),
+            ("dwInErrors", wintypes.DWORD),
+            ("dwInUnknownProtos", wintypes.DWORD),
+            ("dwOutOctets", wintypes.DWORD),
+            ("dwOutUcastPkts", wintypes.DWORD),
+            ("dwOutNUcastPkts", wintypes.DWORD),
+            ("dwOutDiscards", wintypes.DWORD),
+            ("dwOutErrors", wintypes.DWORD),
+            ("dwOutQLen", wintypes.DWORD),
+            ("dwDescrPtr", ctypes.c_void_p),
+        ]
+
+    class MIB_IFTABLE(ctypes.Structure):
+        _fields_ = [("dwNumEntries", wintypes.DWORD), ("table", MIB_IFROW * 1)]
+
+    try:
+        iphlpapi = ctypes.windll.iphlpapi
+        size = wintypes.ULONG(0)
+        # 第一次调用取所需缓冲区大小
+        if iphlpapi.GetIfTable(None, ctypes.byref(size), False) != 0 or not size.value:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if iphlpapi.GetIfTable(ctypes.cast(buf, ctypes.POINTER(MIB_IFTABLE)), ctypes.byref(size), True) != 0:
+            return None
+        table = ctypes.cast(buf, ctypes.POINTER(MIB_IFTABLE)).contents
+        rows = ctypes.cast(ctypes.byref(table.table[0]), ctypes.POINTER(MIB_IFROW))
+        sent = recv = 0
+        for i in range(table.dwNumEntries):
+            row = rows[i]
+            if row.dwType == IF_TYPE_SOFTWARE_LOOPBACK:
+                continue
+            recv += row.dwInOctets
+            sent += row.dwOutOctets
+        return sent, recv
+    except Exception:
+        return None
+
+
+def read_net_interface_bytes() -> Optional[Tuple[int, int, int]]:
+    """读取物理网卡累计 (发送字节数, 接收字节数, 计数器位数)，网卡级吞吐采样用。
+
+    必须排除回环口：本机代理场景下浏览器↔代理走回环且来回双计，吞吐会虚高数倍。
+    - Linux / Docker：解析 /proc/net/dev（排除 lo，64 位计数器）；
+    - Windows：GetIfTable（排除回环，32 位计数器）；netstat -e 仅作兜底；
     - 均不可用时返回 None，前端据此显示「不支持」。
     """
     proc_net_dev = Path("/proc/net/dev")
@@ -79,9 +146,12 @@ def read_net_interface_bytes() -> Optional[Tuple[int, int]]:
                     sent += int(parts[9])
                 except ValueError:
                     continue
-            return sent, recv
+            return sent, recv, 64
         except OSError:
             pass
+    win = _read_net_bytes_windows()
+    if win is not None:
+        return win[0], win[1], 32
     try:
         import subprocess
         # 中文 Windows 的 netstat 输出为 GBK：不用 text=True，手动容错解码（仅需 ASCII 数字与 Bytes/字节 关键词）
@@ -92,7 +162,7 @@ def read_net_interface_bytes() -> Optional[Tuple[int, int]]:
             m = re.search(r"(?:Bytes|字节数|字节)\s+(\d+)\s+(\d+)", out)
             if m:
                 recv, sent = int(m.group(1)), int(m.group(2))
-                return sent, recv
+                return sent, recv, 32
     except Exception:
         pass
     return None
@@ -185,6 +255,26 @@ class ProxyServer:
             response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
         return response
     
+    REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+    def _infer_response_kind(self, request: web.Request, status: int) -> str:
+        """推断响应类型，用于访问日志标注：重定向结果 / 代理转发 / 拦截等。
+
+        302 既可能是「规则不跟随重定向、直接把上游 302 回给客户端」的重定向结果，
+        也可能是后台登录跳转等内部行为；日志里显式标注后用户可一眼分辨。
+        """
+        if request.path.startswith("/_"):
+            return "内部接口"
+        if status in self.REDIRECT_STATUS_CODES:
+            return "重定向结果"
+        if request.get("_route_miss") or status == 404:
+            return "未匹配路由"
+        if status == 403:
+            return "访问拦截"
+        if status >= 500:
+            return "代理异常"
+        return "代理转发"
+
     def _setup_middleware(self):
         @web.middleware
         async def logging_middleware(request: web.Request, handler):
@@ -201,8 +291,9 @@ class ProxyServer:
                 response = await handler(request)
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 logger.info(
-                    "%s %s %d %.1fms %s",
+                    "%s %s %d %.1fms %s [%s]",
                     request.method, full_url, response.status, duration_ms, client_ip,
+                    self._infer_response_kind(request, response.status),
                 )
                 logger.debug("UA=%s", user_agent[:120] if user_agent else "-")
                 if client_ip:
@@ -982,15 +1073,24 @@ class ProxyServer:
                 headers={'Content-Type': 'application/json'},
                 body=json.dumps({"ok": False, "reason": "unsupported_platform"}).encode()
             ))
-        sent, recv = sample
+        sent, recv, counter_bits = sample
         now = time.monotonic()
         last = getattr(self, "_net_last_sample", None)
         sent_rate = recv_rate = None
         if last:
             dt = now - last[0]
             if dt >= 0.5:
-                sent_rate = max(0, sent - last[1]) / dt
-                recv_rate = max(0, recv - last[2]) / dt
+                d_sent = sent - last[1]
+                d_recv = recv - last[2]
+                if counter_bits == 32:
+                    # 32 位计数器环绕：差分为负时按模 2^32 修正（如 Windows GetIfTable）；
+                    # 多网卡求和后可能同时环绕多次，用循环补足
+                    while d_sent < 0:
+                        d_sent += 1 << counter_bits
+                    while d_recv < 0:
+                        d_recv += 1 << counter_bits
+                sent_rate = max(0, d_sent) / dt
+                recv_rate = max(0, d_recv) / dt
                 self._net_last_sample = (now, sent, recv)
                 self._net_last_rates = (sent_rate, recv_rate)
             else:
