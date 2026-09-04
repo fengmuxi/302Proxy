@@ -94,6 +94,10 @@ export function initHashRouting() {
   const hash = window.location.hash.replace(/^#\/?/, "");
   if (hash && VALID_PAGES.includes(hash) && hash !== state.activeModule) {
     activatePage(hash);
+  } else if (state.activeModule === "overview") {
+    // 无 hash（或 hash 即 overview）的初始加载不经过 activatePage，概览页虽为默认
+    // 显示但轮询不会启动，网络吞吐卡会永远停在「正在采样」——此处补启
+    startNetAutoRefresh();
   }
   if (!_hashRoutingInitialized) {
     _hashRoutingInitialized = true;
@@ -306,7 +310,7 @@ let _netAutoRefreshTimer = null;
 export function stopNetAutoRefresh() {
   if (_netAutoRefreshTimer) { clearInterval(_netAutoRefreshTimer); _netAutoRefreshTimer = null; }
 }
-function startNetAutoRefresh() {
+export function startNetAutoRefresh() {
   stopNetAutoRefresh();
   _netAutoRefreshTimer = setInterval(() => {
     if (state.activeModule !== "overview") { stopNetAutoRefresh(); return; }
@@ -1244,6 +1248,12 @@ export function renderRouteLogs(payload) {
       ? `<button class="btn btn-sm" data-action="unban-ip-from-log" data-ip="${esc(banIp)}">解禁IP</button>`
       : `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(banIp)}" data-path-prefix="${esc(log.path_prefix || "")}">封禁IP</button>`;
     const cacheStatusInfo = formatCacheStatus(log.cache_status);
+    // 结果类型徽章：3xx 或有 302地址 = 重定向结果（规则不跟随/缓存命中直接回 302）；
+    // 有上游状态且非 3xx = 代理转发（跟随重定向后回传内容）
+    const upstream = Number(log.upstream_status || 0);
+    const resultKindBadge = [301, 302, 303, 307, 308].includes(upstream) || log.redirect_location
+      ? '<span class="pill pill-warn">重定向结果</span>'
+      : (upstream > 0 ? '<span class="pill pill-ok">代理转发</span>' : "");
     const card = document.createElement("article");
     card.className = "route-log-item";
     card.innerHTML = `
@@ -1262,7 +1272,7 @@ export function renderRouteLogs(payload) {
             <div class="route-log-field"><span class="route-log-field-label">地区</span><div class="route-log-field-value"><strong>${esc(log.geo_summary || "-")}</strong><span class="hint">命中: ${esc(log.matched_region || "-")}</span><span class="hint">源: ${esc(log.geo_source || "-")}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">匹配</span><div class="route-log-field-value"><strong>${esc(formatMatchStrategy(log.match_strategy))}</strong><span class="hint">${esc(formatMatchDetail(log.match_detail))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.redirect_location || "")}">${esc(log.redirect_location || "-")}</strong></div></div>
-            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${resultKindBadge}<strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
           </div>
         </div>
