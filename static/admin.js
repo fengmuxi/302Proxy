@@ -375,7 +375,8 @@ function bindLogs() {
     } else if (action === "ban-ip-from-log") {
       const ip = btn.dataset.ip;
       if (!ip || ip === "-") { showToast("该日志没有可封禁的 IP 地址", true); return; }
-      banIpFromLog(ip);
+      // 带上该条日志命中的路径前缀，封禁时自动预填（全局封禁可手动清空）
+      banIpFromLog(ip, btn.dataset.pathPrefix || "");
     } else if (action === "unban-ip-from-log") {
       const ip = btn.dataset.ip;
       if (!ip || ip === "-") { showToast("该日志没有可解禁的 IP 地址", true); return; }

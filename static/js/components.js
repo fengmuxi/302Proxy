@@ -198,7 +198,8 @@ function fieldRow(f, values) {
   } else {
     ctrl = `<input class="input" type="${esc(f.type || "text")}" data-fkey="${esc(f.key)}" value="${esc(raw)}" placeholder="${esc(f.placeholder || "")}">`;
   }
-  return `<div class="form-field">${lab}${ctrl}${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ""}</div>`;
+  const fieldId = `form-field-${esc(f.key)}`;
+  return `<div class="form-field" id="${fieldId}">${lab}${ctrl}${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ""}</div>`;
 }
 
 export function openFormModal(opts) {
@@ -218,6 +219,29 @@ export function openFormModal(opts) {
   });
   // 弹窗内 select 统一升级为自定义下拉（展开面板可脱离 modal 裁剪）
   modalEl.querySelectorAll(".modal-body select[data-fkey]").forEach((s) => upgradeSelect(s));
+
+  // select 联动：监听 schema 字段中带 dependsOn 的 select，值变更时显隐其他字段
+  const depends = (modalEl.__depends = []);
+  schema.forEach((f) => {
+    if (f.dependsOn) depends.push(f);
+  });
+  const applyDeps = () => {
+    depends.forEach((f) => {
+      const dep = modalEl.querySelector(`[data-fkey="${f.dependsOn.field}"]`);
+      if (!dep) return;
+      const val = dep.tagName === "SELECT" ? dep.value : dep.value;
+      const visible = String(val) === String(f.dependsOn.value);
+      const row = document.getElementById(`form-field-${f.key}`);
+      if (row) row.style.display = visible ? "" : "none";
+    });
+  };
+  modalEl.querySelectorAll("[data-fkey]").forEach((el) => {
+    if (el.tagName === "SELECT" || el.tagName === "INPUT") {
+      el.addEventListener("change", applyDeps);
+      el.addEventListener("input", applyDeps);
+    }
+  });
+  applyDeps();
   document.getElementById("modalClose").onclick = closeModal;
   document.getElementById("modalCancel").onclick = closeModal;
   document.getElementById("modalSave").onclick = async () => {
@@ -294,8 +318,12 @@ function getDefaultOption(sel) {
 
 export function refreshTrigger(sel) {
   if (!sel || !sel._csTrig) return;
-  const label = sel._csTrig.querySelector("span");
+  const label = sel._csTrig.querySelector(".cs-label");
   if (label) label.textContent = sel.options[sel.selectedIndex].textContent;
+  // trigger 上的勾选标记：仅在「当前值 ≠ 默认值」时显示，避免默认项也多一个无意义的勾
+  const isDefault = String(sel.value) === String(sel.dataset.default || "");
+  const check = sel._csTrig.querySelector(".cs-check");
+  if (check) check.style.opacity = isDefault ? "0" : "1";
   if (sel._csPop) {
     sel._csPop.querySelectorAll(".cs-opt").forEach((o) => o.classList.toggle("sel", o.dataset.val === sel.value));
   }
@@ -335,7 +363,10 @@ export function upgradeSelect(sel) {
   trig.type = "button";
   trig.className = "cs-trigger";
   const caret = '<svg class="cs-caret" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-  trig.innerHTML = `<span>${escapeHtml(sel.options[sel.selectedIndex].textContent)}</span>${caret}`;
+  const check = '<svg class="cs-check" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+  const isDefault = String(sel.value) === String(sel.dataset.default || "");
+  trig.innerHTML = `${check}<span class="cs-label">${escapeHtml(sel.options[sel.selectedIndex].textContent)}</span>${caret}`;
+  if (isDefault) trig.querySelector(".cs-check").style.opacity = "0";
   const pop = document.createElement("div");
   pop.className = "cs-pop";
   pop._sel = sel;

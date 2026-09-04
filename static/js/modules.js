@@ -1179,7 +1179,7 @@ export function renderRouteLogs(payload) {
     const ipBanned = banIp !== "-" && isIpBanned(banIp, state.bannedIps);
     const banButtonHtml = ipBanned
       ? `<button class="btn btn-sm" data-action="unban-ip-from-log" data-ip="${esc(banIp)}">解禁IP</button>`
-      : `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(banIp)}">封禁IP</button>`;
+      : `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(banIp)}" data-path-prefix="${esc(log.path_prefix || "")}">封禁IP</button>`;
     const cacheStatusInfo = formatCacheStatus(log.cache_status);
     const card = document.createElement("article");
     card.className = "route-log-item";
@@ -1919,7 +1919,7 @@ function renderBannedIpList(items) {
   if (!tbody) return;
   tbody.innerHTML = "";
   if (!items.length) {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty" style="padding:26px 0">暂无封禁 IP 记录。</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty" style="padding:26px 0">暂无封禁 IP 记录。</td></tr>`;
     return;
   }
   const nowSec = Math.floor(Date.now() / 1000);
@@ -1943,11 +1943,17 @@ function renderBannedIpList(items) {
       statusBadge = '<span class="pill pill-neutral">未知</span>';
     }
     const extendBtn = item.permanent ? "" : `<button class="btn btn-sm" data-action="extend-ban-ip" data-ip="${esc(item.ip)}" data-expire="${item.expire_at || 0}">延长</button>`;
+    // 封禁路径：空=全局封禁，非空=仅拦截该路径前缀
+    const pathCell = item.path_prefix
+      ? `<code class="mono">${esc(item.path_prefix)}</code>`
+      : '<span class="pill pill-neutral">全局</span>';
+    const sourceText = item.banned_by ? `<div class="hint">来源: ${esc(item.banned_by)}</div>` : "";
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><strong>${esc(item.ip)}</strong>${item.path_prefix ? `<div class="hint">路径: ${esc(item.path_prefix)}</div>` : ""}</td>
+      <td><strong>${esc(item.ip)}</strong></td>
+      <td>${pathCell}</td>
       <td>${statusBadge}</td>
-      <td>${esc(item.reason || "-")}</td>
+      <td>${esc(item.reason || "-")}${sourceText}</td>
       <td>${expireText}</td>
       <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">${extendBtn}<button class="btn btn-sm btn-danger" data-action="unban-ip" data-ip="${esc(item.ip)}">解封</button></div></td>`;
     tbody.appendChild(tr);
@@ -1963,9 +1969,9 @@ export function openBanModal(options = {}) {
       { key: "path_prefix", label: "路径前缀（可选）", type: "text", placeholder: "留空表示全局封禁", hint: "留空拦截该 IP 的所有代理请求；填写如 /play 仅拦截该前缀。封禁只影响代理转发，不影响后台管理 /_admin 访问。" },
       { key: "reason", label: "封禁原因", type: "text" },
       { key: "permanent", label: "封禁类型", type: "select", options: [{ value: "1", label: "永久封禁" }, { value: "0", label: "临时封禁" }] },
-      { key: "duration", label: "封禁时长（小时）", type: "number", default: 1, hint: "临时封禁时生效" },
+      { key: "duration", label: "封禁时长（小时）", type: "number", default: 1, hint: "仅临时封禁时生效", dependsOn: { field: "permanent", value: "0" } },
     ],
-    values: { ip: options.ip || "", path_prefix: options.pathPrefix || "", reason: options.reason || "", permanent: "1", duration: 1 },
+    values: { ip: options.ip || "", path_prefix: options.pathPrefix || "", reason: options.reason || "", permanent: "0", duration: 1 },
     validate: (out) => {
       if (!String(out.ip || "").trim()) return "IP 地址不能为空";
       if (!isValidIpOrCidr(String(out.ip).trim())) return "IP 格式无效，请输入单个 IP 或 CIDR 网段";
@@ -2003,8 +2009,9 @@ export function openBanExtendModal(ip, currentExpireAt) {
   });
 }
 
-export async function banIpFromLog(ip) {
-  openBanModal({ ip, reason: "从日志手动封禁", mode: "from-log" });
+export async function banIpFromLog(ip, pathPrefix = "") {
+  // pathPrefix 来自日志条目命中的路由组前缀，预填后用户可清空改为全局封禁
+  openBanModal({ ip, pathPrefix: pathPrefix || "", reason: "从日志手动封禁", mode: "from-log" });
 }
 
 export async function unbanIp(ip) {
