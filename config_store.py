@@ -121,6 +121,7 @@ class ConfigStore:
         ("referer", "TEXT NOT NULL DEFAULT ''"),
         ("user_agent", "TEXT NOT NULL DEFAULT ''"),
         ("bytes_transferred", "INTEGER NOT NULL DEFAULT 0"),
+        ("chain", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # forward_rules 的演进列（018/019/022 引入）：Referer 防盗链 + UA 黑白名单
@@ -350,6 +351,7 @@ class ConfigStore:
                     operation_duration_ms INTEGER NOT NULL DEFAULT 0,
                     result_status TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
+                    chain TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
 
@@ -1460,9 +1462,9 @@ class ConfigStore:
                     geo_source, geo_summary, geo_country, geo_region, geo_city,
                     configured_ip_whitelist, matched_ip_whitelist, configured_regions, matched_region, match_strategy, match_detail,
                     upstream_status, cache_status, redirect_count, transport_mode,
-                    operation_duration_ms, result_status, error_message, referer, user_agent, bytes_transferred, created_at
+                    operation_duration_ms, result_status, error_message, referer, user_agent, bytes_transferred, chain, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1502,6 +1504,7 @@ class ConfigStore:
                     str(payload.get("referer", "")).strip(),
                     str(payload.get("user_agent", "")).strip(),
                     int(payload.get("bytes_transferred", 0) or 0),
+                    str(payload.get("chain", "")).strip(),
                     created_at,
                 ),
             )
@@ -1535,10 +1538,11 @@ class ConfigStore:
                 "("
                 "request_path LIKE ? OR request_host LIKE ? OR rule_request_host LIKE ? OR "
                 "path_prefix LIKE ? OR rule_name LIKE ? OR target_url LIKE ? OR redirect_location LIKE ? OR "
-                "geo_summary LIKE ? OR matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ?"
+                "geo_summary LIKE ? OR matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ? OR "
+                "chain LIKE ?"
                 ")"
             )
-            params.extend([like_value] * 11)
+            params.extend([like_value] * 12)
 
         path_prefix = str(filters.get("path_prefix", "")).strip()
         if path_prefix:
@@ -2984,6 +2988,8 @@ class ConfigStore:
             "referer": row["referer"] if "referer" in row.keys() else "",
             "user_agent": row["user_agent"] if "user_agent" in row.keys() else "",
             "bytes_transferred": int(row["bytes_transferred"] or 0) if "bytes_transferred" in row.keys() else 0,
+            # 请求链路节点（迁移 025）：「签名重入:通过 → 签名重入:缓存命中(内部代理) → 代理:200」
+            "chain": row["chain"] if "chain" in row.keys() else "",
             "created_at": row["created_at"],
         }
 

@@ -243,3 +243,19 @@ client_ip, config) -> str`，统一拼 base_url、resource_id、_st/_sig。
 > 注意：`_ip` 现仅含**盲化令牌**（HMAC(secret, "ip:"+client_ip) 的十六进制摘要，非明文 IP），
 > 用于验签时以「当前 IP 重算令牌」区分「换 IP 使用」（ip_mismatch）；真实 IP 仍纳入主 HMAC 防篡改。
 > 需在反代层正确传递客户端真实 IP（trusted_proxy_networks 可信网段内），否则 IP 绑定误伤。
+
+### 6.1 四次修复：流式结果缓存绕过封堵（2026-09-05）
+
+**现象**：B 模式下播放器拿到签名链接并重入成功后，再次请求**原始 `/play` 地址**会命中
+`ip_cache` 流式结果缓存（重入时写入，键 `client_ip+target_url`）直接回 200 媒体——
+无需签名链接即可拿到内容，签名 URL 被整体绕过。
+
+**修复**：`proxy_core.py` 流式缓存命中分支加守卫——`force_external_redirect=True`（首次
+请求）且加签开启时，命中流式缓存也改为现签签名链接（快照照常登记，重入凭快照仍复用
+`final_url` 缓存直连，起播性能不丢）；`force_external_redirect=False`（重入/常规）与加签
+关闭时行为完全不变。至此首次请求三条路径（redirect 缓存 / streaming 缓存 / 实时 302）
+全部收口为「必签发签名链接」。
+
+**配套（日志可辨性，迁移 025）**：`route_logs` 新增 `chain` 链路列，链路口志随日志落库；
+B 模式重入新增「内部跟随:N跳」节点；前端对含「签名重入」的记录加紫色徽章并展示完整链路，
+快照命中与降级重匹配一眼可辨。

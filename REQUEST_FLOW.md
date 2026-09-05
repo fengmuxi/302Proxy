@@ -139,6 +139,14 @@ flowchart TD
      使路由日志 `redirect_location` 如实记录**实际返回给客户端的签名链接**，而非上游裸 CDN 地址。
      注意：流式实时改写（`:2136`）用独立 `log_redirect_info` 变量、不原地改 `redirect_info`，
      以免污染 `ip_cache.put_redirect`（`:2167`）误存签名链接、破坏后续重入重签。
+   - **关键（2026-09-05 四次修复：流式结果缓存绕过封堵）**：B 模式重入会把 200 结果写进
+     `ip_cache`（键 `client_ip+target_url`），播放器随后再请求**原始 /play 地址**时命中
+     流式缓存分支（`proxy_core.py` streaming 命中）直接回 200 媒体，**无需签名链接即可拿到
+     内容——签名 URL 被整体绕过**。修复：该分支在 `force_external_redirect=True` 且加签
+     开启时不走缓存直出，改为 `_build_rewritten_redirect` 现签签名链接（快照照常登记）；
+     重入/常规请求（`force_external_redirect=False`）与加签关闭时行为不变（缓存收益保留）。
+     至此首次 `/play` 请求的三条路径（redirect 缓存命中 / streaming 缓存命中 / 实时 302）
+     全部收口为「必签发签名链接」。
 3. 代理打上游 → 上游返回 `302`，`Location = 裸 CDN 地址`
 4. `_build_rewritten_redirect`（`proxy_core.py:557`）改写 `Location` 为 `302 /_signed/{id}`，
    同时 `_remember_signed_redirect`（`proxy_core.py:488`）登记快照（`kind` 由 `follow_redirects` 决定）：
@@ -229,6 +237,29 @@ flowchart TD
 | 后续 403 | — | — | 流量封禁：窗口内累计字节超 `auto_ban.max_bytes`，自动封禁该 IP（可邮件告警） |
 
 \* `proxy_error` 行的区别靠 `error_message` 字段区分。
+
+**链路列（迁移 025，`route_logs.chain`）**：`_build_route_log_payload` 把链路口志节点
+（`request["_chain"]`，` → ` 连接）随日志落库，日志页每条记录新增「链路」字段：
+- 首次请求：`… → 重定向:返回302(加签) → 字节:…`
+- B 模式签名重入：`签名重入:通过 → 签名重入:缓存命中(内部代理) → 路由:签名快照 → … → 上游耗时 → 代理:200 → 内部跟随:1跳→{最终上游URL}`
+- 快照缺失降级：chain 无「签名重入:缓存命中」、出现常规 `路由:地区规则` 节点，一眼可辨。
+- `_do_send_streaming_response` 新增「内部跟随:N跳」节点：B 模式内部代理穿流时上游 302
+  跳数与最终上游地址可见，且不与对外「重定向结果」混淆（`redirect_count`/`redirect_location`
+  仍按三次修复语义对重入归零）。
+- `chain` 已纳入日志关键字搜索（如搜「签名重入」直接筛出所有签名领取请求）；
+  前端对含「签名重入」的记录在「转发结果」前加紫色「签名重入」徽章。
+
+**上游错误响应体摘录**：流式/标准路径在上游返回 `>=400` 时抓取响应体前 512B，路由日志
+`error_message` 为空时以 `上游返回{status}: {摘录}` 充实（`result_status` 推断不受影响，
+透传错误仍是 `upstream_error`）。日志页新增「错误」字段展示——透传的上游 500 与本服务
+合成的 500（重试耗尽，`redirect_info=None`、无「上游耗时」节点）从此一眼可辨。
+
+**上游 5xx 统一错误页**：上游返回 `>=500` 时**不透传**上游错误响应体（防止内部堆栈/地址
+泄漏给客户端），替换为系统统一错误页（`_build_500_bytes("上游服务返回{status}")`）；
+状态码保留上游原值（500/502/503/504 语义对排障有用），`redirect_info` 保留（「上游耗时」
+诊断不丢），上游原始响应体摘录随 `StreamingResponse.upstream_error_snippet` 进路由日志
+`error_message`。流式实时路径、流式缓存直连回退路径、标准路径三处收口。上游 `>=500` 时
+应用日志打 WARNING `上游返回N(异常,已替换统一错误页)`。
 
 ---
 

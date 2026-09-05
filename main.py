@@ -659,6 +659,15 @@ class ProxyServer:
             and str(geo_source).startswith("online:")
         ):
             geo_source = f"{geo_source}|cache_hit"
+        # 上游错误响应体摘录（流式/标准路径在 >=400 时抓取前 512B 挂到 request）：
+        # 仅用于充实 error_message 展示，result_status 推断仍以调用方 error_message
+        # 为准（透传的上游错误必须是 upstream_error，不得误判为 proxy_error）。
+        upstream_error_snippet = str(request.get("_upstream_error_snippet", "") or "").strip()
+        display_error_message = error_message or (
+            f"上游返回{upstream_status}: {upstream_error_snippet[:200]}"
+            if upstream_status >= 400 and upstream_error_snippet
+            else ""
+        )
         payload = {
             "request_id": request.get("_request_id", ""),
             "request_method": request.method,
@@ -705,7 +714,11 @@ class ProxyServer:
                 cache_status=cache_status,
                 error_message=error_message,
             ),
-            "error_message": error_message,
+            "error_message": display_error_message,
+            # 请求链路节点（迁移 025）：B 模式签名重入在 redirect_count/redirect_location
+            # 归零后与普通代理请求无法区分，这里把链路口志一并落库，供日志页展示完整链路
+            # （如「签名重入:通过 → 签名重入:缓存命中(内部代理) → 代理:200」）。
+            "chain": " → ".join(request.get("_chain", []) or [])[-800:],
             # 盗链监控数据源（HOTLINK_PROTECTION.md 阶段 1）：Referer / UA 用于识别
             # 外部网页引用，bytes_transferred 由流式通道在落库前写入 request 上下文。
             "referer": (request.headers.get("Referer", "") or ""),
@@ -1108,6 +1121,12 @@ class ProxyServer:
                 # 非流式标准路径补记传输字节数（HOTLINK_PROTECTION.md 1.4 低优先项），
                 # 使非流式下载也进入「单 IP 流量 TOP10」统计
                 request["_bytes_transferred"] = len(response_body) if response_body else 0
+                if status >= 500:
+                    # >=500 已被 proxy_core 替换为统一错误页，response_body 是本服务页面
+                    # 文本，不摘录；上游原始响应体只在服务日志 WARNING 里
+                    request["_upstream_error_snippet"] = f"上游服务返回{status}（响应体已替换为统一错误页）"
+                elif status >= 400 and response_body:
+                    request["_upstream_error_snippet"] = response_body[:512].decode("utf-8", "ignore")
                 self._chain_step(request, f"字节:{format_bytes(request['_bytes_transferred'])}")
                 await self._record_route_log(
                     request,
@@ -1217,6 +1236,26 @@ class ProxyServer:
             self._chain_step(request, f"重定向:返回{streaming_response.status}(加签)")
         else:
             self._chain_step(request, f"代理:{streaming_response.status}")
+            # 内部跟随标注（B 模式本地代理）：redirect_count 是服务器内部跟随上游 302
+            # 的跳数，客户端实际拿到的是本状态码。单列一跳节点（含最终上游地址）让
+            # 「本地代理穿流」链路在日志里可辨，又不会与对外「重定向结果」混淆。
+            if redirect_info and redirect_info.redirect_count > 0:
+                last_to = ""
+                if redirect_info.redirect_chain:
+                    last_to = str(redirect_info.redirect_chain[-1].get("to", ""))[:100]
+                self._chain_step(
+                    request,
+                    f"内部跟随:{redirect_info.redirect_count}跳" + (f"→{last_to}" if last_to else ""),
+                )
+
+        # 上游 5xx：proxy_core 已把响应体替换为系统统一错误页（状态码保留上游原值）。
+        # 这里告警提示运维去排查上游服务本身，别误判为本服务故障。
+        if streaming_response.status >= 500:
+            _err_target = streaming_response.route_decision.target_url if streaming_response.route_decision else "?"
+            logger.warning(
+                "上游返回%d(异常,已替换统一错误页): 目标=%s",
+                streaming_response.status, _err_target,
+            )
         
         if redirect_info and redirect_info.redirect_count > 0:
             response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
@@ -1236,9 +1275,15 @@ class ProxyServer:
         
         bytes_transferred = 0
         write_timeout = self.config.streaming.write_timeout
+        # 上游错误响应体摘录（>=400 时抓取前 512B）：路由日志 error_message 为空时
+        # 用它标明「这个 4xx/5xx 是上游真实返回的、内容是什么」，否则透传的 500 与
+        # 本服务合成的 500 在日志页无法区分（本次排查 127.0.0.1:13366 的痛点）。
+        error_snippet: bytearray = bytearray() if streaming_response.status >= 400 else None
         try:
             async for chunk in streaming_response.body_stream:
                 try:
+                    if error_snippet is not None and len(error_snippet) < 512:
+                        error_snippet.extend(chunk[: 512 - len(error_snippet)])
                     # write_timeout 此前是死配置；这里接入为下游写超时，防止客户端
                     # 停止消费导致 response.write 永久阻塞、协程与内存被慢客户端拖垮
                     if write_timeout and write_timeout > 0:
@@ -1286,6 +1331,12 @@ class ProxyServer:
             # 把本次流式传输的真实字节数挂到 request 上下文，供 _record_route_log
             # 经 _build_route_log_payload 写入 route_logs.bytes_transferred（盗链监控用）。
             request["_bytes_transferred"] = bytes_transferred
+            if error_snippet:
+                request["_upstream_error_snippet"] = bytes(error_snippet).decode("utf-8", "ignore")
+            # 上游 5xx 已被 proxy_core 替换为统一错误页：路由日志记录的是上游**原始**
+            # 响应体摘录（随 StreamingResponse 带回），而非我们自己的错误页文本
+            if getattr(streaming_response, "upstream_error_snippet", ""):
+                request["_upstream_error_snippet"] = streaming_response.upstream_error_snippet
             await self._record_route_log(
                 request,
                 route_decision=streaming_response.route_decision,

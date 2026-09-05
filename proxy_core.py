@@ -258,6 +258,9 @@ class StreamingResponse:
     content_length: Optional[int] = None
     route_decision: Optional[RouteDecision] = None
     cache_status: str = ""
+    # 上游 5xx 统一错误页替换时携带的原始响应体摘录（仅入路由日志 error_message，
+    # 不下发给客户端）
+    upstream_error_snippet: str = ""
 
 
 class RedirectHandler:
@@ -1926,6 +1929,40 @@ class ProxyRequestHandler:
                         cache_status="HIT_REDIRECT",
                     )
                 elif cached.result_type == "streaming" and cached.final_url and rule.follow_redirects:
+                    # 302 加签守卫（修复绕过）：首次请求（非 /_signed 重入）即使命中流式
+                    # 结果缓存，也不得直接回 200 媒体——B 模式重入会把 200 结果写进本缓存
+                    # （ip_cache 键为 (client_ip, target_url)），播放器随后再请求原始 /play
+                    # 地址时全部命中缓存、无需签名即可拿到内容，签名链接被整体绕过。
+                    # 因此改签签名链接；重入内部代理时仍会命中本缓存（final_url 直连），
+                    # 缓存收益不丢。改写失败（路径超长等）→ 落到下方原逻辑按缓存直连，
+                    # 与关闭开关时行为一致。
+                    if force_external_redirect and self.config.signed_redirect.enabled:
+                        _cached_signed = self._build_rewritten_redirect(
+                            path, query_string, client_ip, scheme, headers,
+                            route_decision=route_decision,
+                            original_location="",
+                            original_status=302,
+                        )
+                        if _cached_signed:
+                            logger.info(
+                                "请求结果缓存命中(流式)→302加签: IP=%s 目标=%s",
+                                client_ip, target_url,
+                            )
+                            signed_info = RedirectInfo(
+                                original_url=target_url,
+                                redirect_url=_cached_signed,
+                                status_code=302,
+                                redirect_count=1,
+                                redirect_chain=[],
+                            )
+                            return StreamingResponse(
+                                status=302,
+                                headers={"Location": _cached_signed},
+                                body_stream=self._empty_stream(),
+                                redirect_info=signed_info,
+                                route_decision=route_decision,
+                                cache_status="HIT_REDIRECT",
+                            )
                     logger.info(
                             "请求结果缓存命中(流式): IP=%s 目标=%s 最终URL=%s",
                             client_ip, target_url, cached.final_url,
@@ -2156,6 +2193,37 @@ class ProxyRequestHandler:
                         content_length = int(response_headers["Content-Length"])
                     except ValueError:
                         content_length = None
+
+                # 上游 5xx 统一错误处理：不透传上游错误响应体（可能暴露内部堆栈/地址），
+                # 改用系统统一错误页返回客户端。状态码保留上游原值（500/502/503/504 语义
+                # 对排障有用），原始响应体摘录经 upstream_error_snippet 进路由日志。
+                if response.status >= 500:
+                    upstream_status = response.status
+                    upstream_snippet = ""
+                    try:
+                        upstream_snippet = (await response.content.read(512)).decode("utf-8", "ignore").strip()
+                    except Exception:
+                        pass
+                    response.close()
+                    logger.warning(
+                        "上游返回%d，替换为统一500错误页: 目标=%s 摘录=%s",
+                        upstream_status, target_url, upstream_snippet[:200],
+                    )
+
+                    async def _unified_error_stream(_status: int = upstream_status):
+                        yield _build_500_bytes(f"上游服务返回{_status}")
+
+                    return StreamingResponse(
+                        status=upstream_status,
+                        headers={"Content-Type": "text/html; charset=utf-8"},
+                        body_stream=_unified_error_stream(),
+                        redirect_info=redirect_info,
+                        route_decision=route_decision,
+                        cache_status="BYPASS",
+                        upstream_error_snippet=(
+                            f"上游原始响应体: {upstream_snippet[:200]}" if upstream_snippet else "上游原始响应体为空"
+                        ),
+                    )
 
                 final_url = str(response.url) if response.url else target_url
                 if self.ip_cache and response.status in (200, 206):
@@ -2419,6 +2487,17 @@ class ProxyRequestHandler:
                     if rewritten:
                         filtered_headers["Location"] = rewritten
                         return_redirect_info = replace(redirect_info, redirect_url=rewritten)
+
+                # 上游 5xx 统一错误处理（同流式路径）：不透传上游错误响应体，改用系统
+                # 统一错误页；状态码保留上游原值，摘录只进服务日志。
+                if response.status >= 500:
+                    upstream_snippet = (response_body or b"")[:512].decode("utf-8", "ignore").strip()
+                    logger.warning(
+                        "上游返回%d，替换为统一500错误页: 目标=%s 摘录=%s",
+                        response.status, target_url, upstream_snippet[:200],
+                    )
+                    response_body = _build_500_bytes(f"上游服务返回{response.status}")
+                    filtered_headers = {"Content-Type": "text/html; charset=utf-8"}
 
                 return response.status, filtered_headers, response_body, return_redirect_info, route_decision
             except asyncio.TimeoutError as exc:
