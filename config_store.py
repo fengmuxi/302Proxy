@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -25,6 +26,7 @@ from config import (
     RequestDedupConfig,
     RouteGroupConfig,
     RemoteConfigSettings,
+    SignedUrlConfig,
     SSLConfig,
     ServerConfig,
     StreamingConfig,
@@ -83,6 +85,8 @@ class ConfigStore:
         ("auto_ban_auto_ban_on_404", "INTEGER NOT NULL DEFAULT 1"),
         ("auto_ban_whitelist", "TEXT NOT NULL DEFAULT ''"),
         ("auto_ban_email_on_ban", "INTEGER NOT NULL DEFAULT 0"),
+        ("auto_ban_max_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("streaming_max_concurrent_per_ip", "INTEGER NOT NULL DEFAULT 0"),
         ("email_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ("email_smtp_host", "TEXT NOT NULL DEFAULT ''"),
         ("email_smtp_port", "INTEGER NOT NULL DEFAULT 465"),
@@ -101,6 +105,25 @@ class ConfigStore:
         ("dedup_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ("dedup_window_seconds", "REAL NOT NULL DEFAULT 2.0"),
         ("dedup_max_cache_entries", "INTEGER NOT NULL DEFAULT 10000"),
+        ("signed_url_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("signed_url_secret", "TEXT NOT NULL DEFAULT ''"),
+        ("signed_url_ttl_seconds", "INTEGER NOT NULL DEFAULT 3600"),
+    )
+
+    # route_logs 的演进列（017 引入）：旧库 base schema（CREATE TABLE IF NOT EXISTS）
+    # 不含这些列，启动时必须按此清单幂等补齐，否则 SELECT/INSERT 报 no such column。
+    LEGACY_ROUTE_LOGS_COLUMNS: Tuple[Tuple[str, str], ...] = (
+        ("referer", "TEXT NOT NULL DEFAULT ''"),
+        ("user_agent", "TEXT NOT NULL DEFAULT ''"),
+        ("bytes_transferred", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
+    # forward_rules 的演进列（018/019/022 引入）：Referer 防盗链 + UA 黑白名单
+    LEGACY_FORWARD_RULES_COLUMNS: Tuple[Tuple[str, str], ...] = (
+        ("referer_whitelist", "TEXT NOT NULL DEFAULT ''"),
+        ("referer_policy", "TEXT NOT NULL DEFAULT 'allow'"),
+        ("ua_blacklist", "TEXT NOT NULL DEFAULT ''"),
+        ("ua_whitelist", "TEXT NOT NULL DEFAULT ''"),
     )
 
     def __init__(self, db_path: Optional[str] = None, bootstrap_config: Optional[Config] = None):
@@ -159,6 +182,8 @@ class ConfigStore:
                     auto_ban_auto_ban_on_404 INTEGER NOT NULL DEFAULT 1,
                     auto_ban_whitelist TEXT NOT NULL DEFAULT '',
                     auto_ban_email_on_ban INTEGER NOT NULL DEFAULT 0,
+                    auto_ban_max_bytes INTEGER NOT NULL DEFAULT 0,
+                    streaming_max_concurrent_per_ip INTEGER NOT NULL DEFAULT 0,
                     email_enabled INTEGER NOT NULL DEFAULT 0,
                     email_smtp_host TEXT NOT NULL DEFAULT '',
                     email_smtp_port INTEGER NOT NULL DEFAULT 465,
@@ -390,6 +415,27 @@ class ConfigStore:
                 """
             )
         self._run_migrations()
+        # 旧库补齐后，确保签名 URL 密钥非空（幂等：仅当为空时生成）
+        with self._connect() as connection:
+            self._ensure_signed_url_secret(connection)
+
+    def _ensure_signed_url_secret(self, connection: sqlite3.Connection) -> None:
+        """确保 system_settings.signed_url_secret 非空（旧库启动时幂等生成）。
+
+        新库由 _bootstrap_if_needed 在 INSERT 时直接生成；旧库经
+        LEGACY_SYSTEM_SETTINGS_COLUMNS 补齐后该列为空串，此处回填。
+        """
+        import secrets as secrets_module
+
+        row = connection.execute(
+            "SELECT signed_url_secret FROM system_settings WHERE id = 1"
+        ).fetchone()
+        if row is None or row["signed_url_secret"]:
+            return
+        connection.execute(
+            "UPDATE system_settings SET signed_url_secret = ? WHERE id = 1",
+            (secrets_module.token_hex(32),),
+        )
 
     def _ensure_column(
         self,
@@ -427,13 +473,26 @@ class ConfigStore:
 
             backend = get_backend(f"sqlite:///{self.db_path}")
             migrations = read_migrations(str(migrations_dir))
-            backend.apply_migrations(migrations)
+            # yoyo 在记录迁移日志时会调用 socket.getfqdn() 做反向 DNS，在无 DNS 的
+            # 主机/沙箱环境会阻塞数十秒甚至卡死启动。该值仅用于日志 hostname 字段，
+            # 此处临时替换为 gethostname()（读本机名、不触发 DNS），迁移完成后还原。
+            import socket as _socket
+            _original_getfqdn = _socket.getfqdn
+            _socket.getfqdn = lambda name="": _socket.gethostname()
+            try:
+                backend.apply_migrations(migrations)
+            finally:
+                _socket.getfqdn = _original_getfqdn
             return
 
         # 旧库：幂等补齐后续迁移新增的列，避免 UPDATE/SELECT 报 no such column
         with self._connect() as connection:
             for column_name, definition in self.LEGACY_SYSTEM_SETTINGS_COLUMNS:
                 self._ensure_column(connection, "system_settings", column_name, definition)
+            for column_name, definition in self.LEGACY_ROUTE_LOGS_COLUMNS:
+                self._ensure_column(connection, "route_logs", column_name, definition)
+            for column_name, definition in self.LEGACY_FORWARD_RULES_COLUMNS:
+                self._ensure_column(connection, "forward_rules", column_name, definition)
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
@@ -521,6 +580,7 @@ class ConfigStore:
 
             import secrets as secrets_module
             session_secret = secrets_module.token_hex(32)
+            signed_url_secret = secrets_module.token_hex(32)
             
             # 生成 RSA 密钥对
             rsa_private_key = ""
@@ -560,11 +620,11 @@ class ConfigStore:
                     email_block_link_base_url, email_alert_window_seconds, email_alert_max_requests,
                     email_alert_max_404, email_alert_cooldown_minutes,
                     default_timeout, max_redirects, follow_redirects, trust_forward_headers,
-                    database_path, updated_at, session_secret, rsa_private_key
+                    database_path, updated_at, session_secret, rsa_private_key, signed_url_secret
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -622,6 +682,7 @@ class ConfigStore:
                     now,
                     session_secret,
                     rsa_private_key,
+                    signed_url_secret,
                 ),
             )
 
@@ -777,8 +838,9 @@ class ConfigStore:
                 source, external_id, name, request_host, path_prefix, target_url, strip_prefix, timeout,
                 max_redirects, follow_redirects, retry_times, enable_streaming, ip_whitelist, region_filters,
                 is_default, enabled, priority, notes, path_rewrite_pattern, path_rewrite_replacement,
-                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist,
+                referer_whitelist, referer_policy, ua_blacklist, ua_whitelist, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
@@ -805,6 +867,10 @@ class ConfigStore:
                 normalize_region_filter_value(rule.ip_blacklist),
                 normalize_region_filter_value(rule.region_whitelist),
                 normalize_region_filter_value(rule.region_blacklist),
+                normalize_region_filter_value(rule.referer_whitelist),
+                rule.normalized_referer_policy(),
+                normalize_region_filter_value(rule.ua_blacklist),
+                normalize_region_filter_value(rule.ua_whitelist),
                 now,
                 now,
             ),
@@ -1042,6 +1108,7 @@ class ConfigStore:
                 buffer_size=system_row["streaming_buffer_size"],
                 enable_range_support=bool(system_row["streaming_enable_range_support"]),
                 max_request_body_size=system_row["streaming_max_request_body_size"],
+                max_concurrent_per_ip=int(system_row["streaming_max_concurrent_per_ip"]) if "streaming_max_concurrent_per_ip" in system_row.keys() else 0,
             )
             config.ip_result_cache = IpResultCacheConfig(
                 enabled=bool(system_row["ip_cache_enabled"]),
@@ -1062,6 +1129,7 @@ class ConfigStore:
                 auto_ban_on_404=bool(system_row["auto_ban_auto_ban_on_404"]),
                 whitelist=system_row["auto_ban_whitelist"],
                 email_on_ban=bool(system_row["auto_ban_email_on_ban"]) if "auto_ban_email_on_ban" in system_row.keys() else False,
+                max_bytes=int(system_row["auto_ban_max_bytes"]) if "auto_ban_max_bytes" in system_row.keys() else 0,
             )
             config.email = EmailConfig(
                 enabled=bool(system_row["email_enabled"]),
@@ -1083,6 +1151,11 @@ class ConfigStore:
             config.follow_redirects = bool(system_row["follow_redirects"])
             config.trust_forward_headers = bool(system_row["trust_forward_headers"])
             config.database_path = system_row["database_path"]
+            config.signed_url = SignedUrlConfig(
+                enabled=bool(system_row["signed_url_enabled"]) if "signed_url_enabled" in system_row.keys() else False,
+                secret=system_row["signed_url_secret"] if "signed_url_secret" in system_row.keys() else "",
+                ttl_seconds=int(system_row["signed_url_ttl_seconds"]) if "signed_url_ttl_seconds" in system_row.keys() else 3600,
+            )
 
         if feature_row:
             config.region_matching_enabled = bool(feature_row["region_matching_enabled"])
@@ -1204,11 +1277,78 @@ class ConfigStore:
 
         config.proxy_rules = [self._row_to_rule(row) for row in rules]
         config.admin_auth = self.bootstrap_config.admin_auth
+        # yaml-only 字段：数据库不存储，从引导配置透传（upstream_ipv4_only 等）
+        config.upstream_ipv4_only = bool(getattr(self.bootstrap_config, "upstream_ipv4_only", False))
         # 从数据库读取安全密钥
         if system_row:
             config.admin_auth.session_secret = system_row["session_secret"] if "session_secret" in system_row.keys() else ""
             config.admin_auth.rsa_private_key = system_row["rsa_private_key"] if "rsa_private_key" in system_row.keys() else ""
         return config
+
+    # 启动信息（server/ssl/logging）字段 → system_settings 列名映射
+    _STARTUP_FIELD_COLUMNS: Dict[str, Dict[str, str]] = {
+        "server": {
+            "host": "host",
+            "port": "port",
+            "workers": "workers",
+            "keepalive_timeout": "keepalive_timeout",
+            "max_connections": "max_connections",
+            "max_connections_per_host": "max_connections_per_host",
+        },
+        "ssl": {
+            "enabled": "ssl_enabled",
+            "cert_file": "cert_file",
+            "key_file": "key_file",
+        },
+        "logging": {
+            "level": "logging_level",
+            "format": "logging_format",
+            "file_path": "logging_file_path",
+            "retention_days": "logging_retention_days",
+        },
+    }
+
+    def apply_file_startup_overrides(self, file_config: Config, runtime_config: Config) -> List[str]:
+        """启动信息以配置文件为最高优先级：yaml 显式配置的 server/ssl/logging 键覆盖数据库值。
+
+        - 仅覆盖配置文件里**显式出现**的键（空段/缺段不产生覆盖，避免默认值
+          意外回退后台已调整的配置）；
+        - 覆盖结果回写 system_settings，保证后台系统设置页与实际生效值一致；
+        - 优先级：CLI -p/--host > config.yaml > 数据库 system_settings。
+        返回人类可读的覆盖说明列表（供启动日志输出），无覆盖时返回空列表。
+        """
+        explicit = getattr(file_config, "yaml_explicit_keys", None) or {}
+        updates: Dict[str, Any] = {}
+        notes: List[str] = []
+
+        for section, field_columns in self._STARTUP_FIELD_COLUMNS.items():
+            section_keys = explicit.get(section)
+            if not section_keys:
+                continue
+            file_section = getattr(file_config, section)
+            runtime_section = getattr(runtime_config, section)
+            for field_name, column in field_columns.items():
+                if field_name not in section_keys:
+                    continue
+                value = getattr(file_section, field_name)
+                setattr(runtime_section, field_name, value)
+                updates[column] = int(bool(value)) if isinstance(value, bool) else value
+                notes.append(f"{section}.{field_name}={value}")
+
+        if not updates:
+            return notes
+
+        set_clause = ", ".join(f"{column} = ?" for column in updates)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    f"UPDATE system_settings SET {set_clause}, updated_at = ? WHERE id = 1",
+                    (*updates.values(), utc_now()),
+                )
+        except Exception:
+            # 回写失败不影响启动（内存值已覆盖），仅在日志层可见
+            logging.getLogger("proxy").warning("启动配置回写 system_settings 失败（不影响本次启动生效值）", exc_info=True)
+        return notes
 
     def get_dashboard_data(self) -> Dict[str, Any]:
         config = self.load_runtime_config()
@@ -1309,9 +1449,9 @@ class ConfigStore:
                     geo_source, geo_summary, geo_country, geo_region, geo_city,
                     configured_ip_whitelist, matched_ip_whitelist, configured_regions, matched_region, match_strategy, match_detail,
                     upstream_status, cache_status, redirect_count, transport_mode,
-                    operation_duration_ms, result_status, error_message, created_at
+                    operation_duration_ms, result_status, error_message, referer, user_agent, bytes_transferred, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1348,6 +1488,9 @@ class ConfigStore:
                     int(payload.get("operation_duration_ms", 0) or 0),
                     str(payload.get("result_status", "")).strip(),
                     str(payload.get("error_message", "")).strip(),
+                    str(payload.get("referer", "")).strip(),
+                    str(payload.get("user_agent", "")).strip(),
+                    int(payload.get("bytes_transferred", 0) or 0),
                     created_at,
                 ),
             )
@@ -1419,6 +1562,11 @@ class ConfigStore:
             clauses.append("result_status = ?")
             params.append(result_status)
 
+        referer = str(filters.get("referer", "")).strip()
+        if referer:
+            clauses.append("referer LIKE ?")
+            params.append(f"%{referer}%")
+
         date_from = str(filters.get("date_from", "")).strip()
         if date_from:
             clauses.append("created_at >= ?")
@@ -1463,9 +1611,96 @@ class ConfigStore:
                 "rule_request_host": raw_rule_request_host,
                 "match_strategy": match_strategy,
                 "result_status": result_status,
+                "referer": referer,
                 "date_from": date_from,
                 "date_to": date_to,
             },
+        }
+
+    def get_hotlink_stats(self, hours: int = 24) -> Dict[str, Any]:
+        """盗链监控聚合（HOTLINK_PROTECTION.md 阶段 1）。
+
+        返回近 N 小时：
+        - top_referrers：外部 Referer 域名 TOP10。route_logs 只存原始 Referer
+          字符串，SQLite 没有域名解析函数，因此在 Python 侧按 hostname 聚合；
+          排除空 Referer 与与请求命中域名相同的"自引用"（本站页面跳转不算盗链）。
+        - top_ips_by_bytes：单 IP 流量 TOP10（SUM(bytes_transferred)），纯 SQL 聚合。
+
+        列为 017 迁移新增，旧库已在 _run_migrations 补齐；为防极端情况下缺列，
+        参考列存在性后降级返回空结果而不是抛错。
+        """
+        from datetime import datetime, timedelta, timezone as tz
+        from urllib.parse import urlparse
+
+        hours = max(1, min(168, int(hours or 24)))
+        cutoff = (datetime.now(tz.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+        with self._connect() as connection:
+            log_columns = {row["name"] for row in connection.execute("PRAGMA table_info(route_logs)").fetchall()}
+            if "referer" not in log_columns or "bytes_transferred" not in log_columns:
+                return {
+                    "hours": hours,
+                    "external_referer_total": 0,
+                    "top_referrers": [],
+                    "top_ips_by_bytes": [],
+                }
+
+            ip_rows = connection.execute(
+                """
+                SELECT client_ip, SUM(bytes_transferred) AS total_bytes, COUNT(*) AS request_count
+                FROM route_logs
+                WHERE created_at >= ? AND client_ip != '' AND bytes_transferred > 0
+                GROUP BY client_ip
+                ORDER BY total_bytes DESC
+                LIMIT 10
+                """,
+                (cutoff,),
+            ).fetchall()
+            # Referer 聚合需要逐行解析域名；上限防极端日志量撑爆内存
+            referer_rows = connection.execute(
+                """
+                SELECT referer, request_host, client_ip
+                FROM route_logs
+                WHERE created_at >= ? AND referer != ''
+                LIMIT 20000
+                """,
+                (cutoff,),
+            ).fetchall()
+
+        referer_counts: Dict[str, Dict[str, Any]] = {}
+        external_referer_total = 0
+        for row in referer_rows:
+            referer = str(row["referer"] or "").strip()
+            if not referer:
+                continue
+            parsed = urlparse(referer)
+            host = (parsed.hostname or referer).strip().lower()
+            if not host:
+                continue
+            request_host = str(row["request_host"] or "").strip().lower()
+            if host == request_host:
+                continue  # 自引用（本站页面跳转），不算盗链
+            external_referer_total += 1
+            entry = referer_counts.setdefault(
+                host, {"host": host, "count": 0, "last_client_ip": str(row["client_ip"] or "")}
+            )
+            entry["count"] += 1
+            if row["client_ip"]:
+                entry["last_client_ip"] = str(row["client_ip"])
+
+        top_referrers = sorted(referer_counts.values(), key=lambda item: item["count"], reverse=True)[:10]
+        return {
+            "hours": hours,
+            "external_referer_total": external_referer_total,
+            "top_referrers": top_referrers,
+            "top_ips_by_bytes": [
+                {
+                    "client_ip": str(row["client_ip"]),
+                    "bytes_transferred": int(row["total_bytes"] or 0),
+                    "request_count": int(row["request_count"] or 0),
+                }
+                for row in ip_rows
+            ],
         }
 
     def get_overview_stats(self) -> Dict[str, Any]:
@@ -1807,6 +2042,7 @@ class ConfigStore:
             "auto_ban_on_404": config.auto_ban.auto_ban_on_404,
             "whitelist": config.auto_ban.whitelist,
             "email_on_ban": config.auto_ban.email_on_ban,
+            "max_bytes": config.auto_ban.max_bytes,
         }
 
     def update_auto_ban_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1818,6 +2054,7 @@ class ConfigStore:
         auto_ban_on_404 = coerce_bool(payload.get("auto_ban_on_404", True))
         whitelist = str(payload.get("whitelist", "") or "")
         email_on_ban = coerce_bool(payload.get("email_on_ban", False))
+        max_bytes = max(0, int(payload.get("max_bytes", 0) or 0))
         now = utc_now()
         with self._connect() as connection:
             connection.execute(
@@ -1825,12 +2062,68 @@ class ConfigStore:
                 UPDATE system_settings
                 SET auto_ban_enabled = ?, auto_ban_window_seconds = ?, auto_ban_max_requests = ?,
                     auto_ban_ban_duration_seconds = ?, auto_ban_max_404 = ?, auto_ban_auto_ban_on_404 = ?,
-                    auto_ban_whitelist = ?, auto_ban_email_on_ban = ?, updated_at = ?
+                    auto_ban_whitelist = ?, auto_ban_email_on_ban = ?, auto_ban_max_bytes = ?, updated_at = ?
                 WHERE id = 1
                 """,
-                (int(enabled), window_seconds, max_requests, ban_duration_seconds, max_404, int(auto_ban_on_404), whitelist, int(email_on_ban), now),
+                (int(enabled), window_seconds, max_requests, ban_duration_seconds, max_404, int(auto_ban_on_404), whitelist, int(email_on_ban), max_bytes, now),
             )
         return self.get_auto_ban_config()
+
+    def get_stream_guard_config(self) -> Dict[str, Any]:
+        """单 IP 并发限制配置（HOTLINK_PROTECTION.md 阶段 3.2）。"""
+        config = self.load_runtime_config()
+        return {"max_concurrent_per_ip": config.streaming.max_concurrent_per_ip}
+
+    def update_stream_guard_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        max_concurrent = max(0, int(payload.get("max_concurrent_per_ip", 0) or 0))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET streaming_max_concurrent_per_ip = ?, updated_at = ? WHERE id = 1",
+                (max_concurrent, now),
+            )
+        return self.get_stream_guard_config()
+
+    def get_signed_url_config(self) -> Dict[str, Any]:
+        """签名 URL 配置（HOTLINK_PROTECTION.md 阶段 4）。绝不返回 secret 明文。"""
+        config = self.load_runtime_config()
+        return {
+            "enabled": config.signed_url.enabled,
+            "ttl_seconds": config.signed_url.ttl_seconds,
+            "has_secret": bool(config.signed_url.secret),
+        }
+
+    def update_signed_url_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        import secrets as secrets_module
+
+        # 部分更新语义：未提供的字段保留现值，避免「只轮换密钥」顺带把开关关掉
+        current = self.load_runtime_config().signed_url
+        enabled = coerce_bool(payload.get("enabled", current.enabled))
+        ttl_seconds = max(60, int(payload.get("ttl_seconds", current.ttl_seconds) or current.ttl_seconds))
+        regenerate = coerce_bool(payload.get("regenerate_secret", False))
+        now = utc_now()
+
+        set_clause = "signed_url_enabled = ?, signed_url_ttl_seconds = ?, updated_at = ?"
+        params: List[Any] = [int(enabled), ttl_seconds, now]
+        if regenerate:
+            set_clause += ", signed_url_secret = ?"
+            params.append(secrets_module.token_hex(32))
+
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE system_settings SET {set_clause} WHERE id = 1",
+                params,
+            )
+        return self.get_signed_url_config()
+
+    def generate_signed_url(self, path: str) -> str:
+        """签出一个相对 URL。服务端持有 secret，绝不外泄。"""
+        from signed_url import sign_url
+
+        config = self.load_runtime_config()
+        if not config.signed_url.secret:
+            raise ValueError("签名密钥未初始化")
+        return sign_url(path, config.signed_url.secret, config.signed_url.ttl_seconds)
 
     def get_email_config(self) -> Dict[str, Any]:
         config = self.load_runtime_config()
@@ -2092,6 +2385,7 @@ class ConfigStore:
                     enable_streaming = ?, ip_whitelist = ?, region_filters = ?, is_default = ?, enabled = ?,
                     priority = ?, notes = ?, path_rewrite_pattern = ?, path_rewrite_replacement = ?,
                     access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                    referer_whitelist = ?, referer_policy = ?, ua_blacklist = ?, ua_whitelist = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -2120,6 +2414,10 @@ class ConfigStore:
                     normalize_region_filter_value(rule.ip_blacklist),
                     normalize_region_filter_value(rule.region_whitelist),
                     normalize_region_filter_value(rule.region_blacklist),
+                    normalize_region_filter_value(rule.referer_whitelist),
+                    rule.normalized_referer_policy(),
+                    normalize_region_filter_value(rule.ua_blacklist),
+                    normalize_region_filter_value(rule.ua_whitelist),
                     now,
                     rule_id,
                 ),
@@ -2572,6 +2870,12 @@ class ConfigStore:
             "ip_blacklist": rule.ip_blacklist,
             "region_whitelist": rule.region_whitelist,
             "region_blacklist": rule.region_blacklist,
+            # Referer 防盗链（HOTLINK_PROTECTION.md 阶段 2）
+            "referer_whitelist": rule.referer_whitelist,
+            "referer_policy": rule.normalized_referer_policy(),
+            # UA 黑名单（HOTLINK_PROTECTION.md 阶段 3.1）
+            "ua_blacklist": rule.ua_blacklist,
+            "ua_whitelist": rule.ua_whitelist,
         }
 
     def serialize_route_group(
@@ -2636,6 +2940,11 @@ class ConfigStore:
             "operation_duration_ms": row["operation_duration_ms"],
             "result_status": row["result_status"],
             "error_message": row["error_message"],
+            # 盗链监控字段（HOTLINK_PROTECTION.md 阶段 1），用 row.keys() 守卫以兼容
+            # 尚未运行迁移 017 的库（理论上 _run_migrations 已补齐，此处双保险）。
+            "referer": row["referer"] if "referer" in row.keys() else "",
+            "user_agent": row["user_agent"] if "user_agent" in row.keys() else "",
+            "bytes_transferred": int(row["bytes_transferred"] or 0) if "bytes_transferred" in row.keys() else 0,
             "created_at": row["created_at"],
         }
 
@@ -2666,6 +2975,12 @@ class ConfigStore:
             ip_blacklist=row["ip_blacklist"] if "ip_blacklist" in row.keys() else "",
             region_whitelist=row["region_whitelist"] if "region_whitelist" in row.keys() else "",
             region_blacklist=row["region_blacklist"] if "region_blacklist" in row.keys() else "",
+            # Referer 防盗链（018 列，row.keys() 守卫兼容未迁移的库）
+            referer_whitelist=row["referer_whitelist"] if "referer_whitelist" in row.keys() else "",
+            referer_policy=row["referer_policy"] if "referer_policy" in row.keys() else "allow",
+            # UA 黑名单（019 列）
+            ua_blacklist=row["ua_blacklist"] if "ua_blacklist" in row.keys() else "",
+            ua_whitelist=row["ua_whitelist"] if "ua_whitelist" in row.keys() else "",
         )
 
     def _payload_to_rule(self, payload: Dict[str, Any]) -> ProxyRule:
@@ -2704,6 +3019,16 @@ class ConfigStore:
             ip_blacklist=normalize_region_filter_value(payload.get("ip_blacklist", "")),
             region_whitelist=normalize_region_filter_value(payload.get("region_whitelist", "")),
             region_blacklist=normalize_region_filter_value(payload.get("region_blacklist", "")),
+            # Referer 防盗链：白名单走统一归一化；policy 用 ProxyRule.normalized_referer_policy
+            # 的同款守卫（非法值回退 allow），此处先行归一再入 dataclass
+            referer_whitelist=normalize_region_filter_value(payload.get("referer_whitelist", "")),
+            referer_policy=(
+                str(payload.get("referer_policy", "allow") or "allow").strip().lower()
+                if str(payload.get("referer_policy", "allow") or "allow").strip().lower() in ("allow", "deny")
+                else "allow"
+            ),
+            ua_blacklist=normalize_region_filter_value(payload.get("ua_blacklist", "")),
+            ua_whitelist=normalize_region_filter_value(payload.get("ua_whitelist", "")),
         )
 
     def _remote_item_to_rule(self, item: Dict[str, Any], remote: Dict[str, Any]) -> ProxyRule:

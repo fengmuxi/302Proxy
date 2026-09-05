@@ -85,6 +85,7 @@ class AdminConsole:
         app.router.add_post("/_admin/api/geoip/offline/rollback", self.rollback_offline_geoip)
         app.router.add_get("/_admin/api/logs", self.list_route_logs)
         app.router.add_delete("/_admin/api/logs", self.delete_route_logs)
+        app.router.add_get("/_admin/api/hotlink/stats", self.get_hotlink_stats)
         app.router.add_get("/_admin/api/log-settings", self.get_route_log_settings)
         app.router.add_put("/_admin/api/log-settings", self.update_route_log_settings)
         app.router.add_get("/_admin/api/logging-settings", self.get_logging_settings)
@@ -102,6 +103,11 @@ class AdminConsole:
         app.router.add_post("/_admin/api/banned-ips/{ip:.+}/extend", self.extend_banned_ip)
         app.router.add_get("/_admin/api/auto-ban", self.get_auto_ban_settings)
         app.router.add_put("/_admin/api/auto-ban", self.update_auto_ban_settings)
+        app.router.add_get("/_admin/api/stream-guard", self.get_stream_guard_settings)
+        app.router.add_put("/_admin/api/stream-guard", self.update_stream_guard_settings)
+        app.router.add_get("/_admin/api/signed-url", self.get_signed_url_settings)
+        app.router.add_put("/_admin/api/signed-url", self.update_signed_url_settings)
+        app.router.add_post("/_admin/api/signed-url/generate", self.generate_signed_url)
         app.router.add_get("/_admin/api/email", self.get_email_settings)
         app.router.add_put("/_admin/api/email", self.update_email_settings)
         app.router.add_post("/_admin/api/email/test", self.test_email)
@@ -119,7 +125,13 @@ class AdminConsole:
         app.router.add_post("/_admin/api/log-file-cleanup", self.cleanup_log_files_on_disk)
 
     async def index(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(self.static_dir / "admin.html")
+        # admin.html 也必须 no-cache 协商缓存：FileResponse 默认无 Cache-Control，
+        # 浏览器按启发式策略缓存旧 HTML，前端更新后（如新增盗链监控卡片）
+        # 用户普通刷新仍拿不到新页面（静态 JS/CSS 已由 c1b9041 修复，此处补齐 HTML）
+        return web.FileResponse(
+            self.static_dir / "admin.html",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     async def auth_status(self, request: web.Request) -> web.Response:
         config = self._get_auth_config()
@@ -365,12 +377,22 @@ class AdminConsole:
             "rule_request_host": request.query.get("rule_request_host", ""),
             "match_strategy": request.query.get("match_strategy", ""),
             "result_status": request.query.get("result_status", ""),
+            "referer": request.query.get("referer", ""),
             "date_from": request.query.get("date_from", ""),
             "date_to": request.query.get("date_to", ""),
             "limit": request.query.get("limit", "50"),
             "page": request.query.get("page", "1"),
         }
         return await self._run_protected(request, lambda: self.config_store.list_route_logs(filters))
+
+    async def get_hotlink_stats(self, request: web.Request) -> web.Response:
+        try:
+            hours = int(request.query.get("hours", "24") or 24)
+        except ValueError:
+            hours = 24
+        return await self._run_protected(
+            request, lambda: self.config_store.get_hotlink_stats(hours)
+        )
 
     async def delete_route_logs(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
@@ -580,6 +602,7 @@ class AdminConsole:
             "auto_ban_on_404": config.auto_ban.auto_ban_on_404,
             "whitelist": config.auto_ban.whitelist,
             "email_on_ban": config.auto_ban.email_on_ban,
+            "max_bytes": config.auto_ban.max_bytes,
         }
 
     async def update_auto_ban_settings(self, request: web.Request) -> web.Response:
@@ -596,6 +619,58 @@ class AdminConsole:
             else:
                 loop.run_until_complete(self.reload_callback())
         return {"message": "自动封禁配置已更新", **result}
+
+    async def get_stream_guard_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_stream_guard_config())
+
+    async def update_stream_guard_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_stream_guard_settings(payload))
+
+    def _update_stream_guard_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_stream_guard_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "单 IP 并发限制已更新", **result}
+
+    async def get_signed_url_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_signed_url_config())
+
+    async def update_signed_url_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_signed_url_settings(payload))
+
+    def _update_signed_url_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_signed_url_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "签名 URL 配置已更新", **result}
+
+    async def generate_signed_url(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        path = str(payload.get("path", "") or "").strip()
+        # 防御：仅允许以 / 开头的相对路径，禁止 // 与空字节，防止开放重定向注入
+        if not path.startswith("/") or path.startswith("//") or "\x00" in path:
+            return self._json({"error": "路径必须以单个 / 开头且不含非法字符"}, status=400)
+
+        def _generate() -> Dict[str, Any]:
+            try:
+                url = self.config_store.generate_signed_url(path)
+            except ValueError as exc:
+                return {"error": str(exc)}
+            return {"url": url}
+
+        return await self._run_protected(request, _generate)
 
     async def get_email_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self._get_email_settings())

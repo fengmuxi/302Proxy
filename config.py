@@ -121,6 +121,17 @@ class ProxyRule:
     ip_blacklist: str = ""
     region_whitelist: str = ""
     region_blacklist: str = ""
+    # Referer 防盗链（HOTLINK_PROTECTION.md 阶段 2）：
+    # referer_whitelist 为空 = 未启用校验（行为与旧版完全一致）；
+    # referer_policy 控制空 Referer 策略：allow 放行本地播放器 / deny 仅允许网页引用
+    referer_whitelist: str = ""        # 逗号分隔域名，支持前缀通配 *.example.com
+    referer_policy: str = "allow"      # 空 Referer 策略: allow / deny
+    # UA 黑名单（HOTLINK_PROTECTION.md 阶段 3.1）：逗号分隔子串，命中即 403，
+    # 为空 = 未启用；大小写不敏感，适合拦截 curl/python-requests 等爬虫 UA
+    ua_blacklist: str = ""
+    # UA 白名单（022）：逗号分隔子串，启用后 UA 必须命中任一条目，否则 403；
+    # 为空 = 未启用；启用后空 UA 一并拦截（否则不发 UA 即可绕过白名单）
+    ua_whitelist: str = ""
 
     def normalized_regions(self) -> List[str]:
         raw_regions = normalize_region_filter_value(self.region_filters)
@@ -160,6 +171,26 @@ class ProxyRule:
             if normalized:
                 regions.append(normalized)
         return regions
+
+    def normalized_referer_whitelist(self) -> List[str]:
+        """Referer 白名单：逗号分隔域名，统一小写便于匹配；条目形如 example.com 或 *.example.com。"""
+        raw = normalize_region_filter_value(self.referer_whitelist)
+        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
+
+    def normalized_referer_policy(self) -> str:
+        """空 Referer 策略守卫：非法值一律回退 allow，避免脏数据把本地播放器全拦掉。"""
+        policy = str(self.referer_policy or "").strip().lower()
+        return policy if policy in ("allow", "deny") else "allow"
+
+    def normalized_ua_blacklist(self) -> List[str]:
+        """UA 黑名单：逗号分隔子串，统一小写便于匹配。"""
+        raw = normalize_region_filter_value(self.ua_blacklist)
+        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
+
+    def normalized_ua_whitelist(self) -> List[str]:
+        """UA 白名单：逗号分隔子串，统一小写便于匹配；空列表 = 未启用校验。"""
+        raw = normalize_region_filter_value(self.ua_whitelist)
+        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
 
 
 @dataclass
@@ -211,6 +242,9 @@ class StreamingConfig:
     buffer_size: int = 64 * 1024
     enable_range_support: bool = True
     max_request_body_size: int = 0
+    # 单 IP 流式并发连接上限（HOTLINK_PROTECTION.md 阶段 3.2），0 = 不限制；
+    # 超限直接回 429，防止单 IP 开大量连接拖垮代理与上游带宽
+    max_concurrent_per_ip: int = 0
 
 
 
@@ -238,6 +272,9 @@ class AutoBanConfig:
     auto_ban_on_404: bool = True
     whitelist: str = ""
     email_on_ban: bool = False
+    # 流量封禁（HOTLINK_PROTECTION.md 阶段 3.3）：窗口内单 IP 累计传输字节上限，
+    # 0 = 不启用；主要针对流式拉流盗链刷流量
+    max_bytes: int = 0
 
 
 @dataclass
@@ -255,6 +292,18 @@ class EmailConfig:
     alert_max_requests: int = 80
     alert_max_404: int = 15
     alert_cooldown_minutes: int = 30
+
+
+@dataclass
+class SignedUrlConfig:
+    """签名 URL（HOTLINK_PROTECTION.md 阶段 4）：时效性 HMAC 签名防盗链。
+
+    enabled=False 时行为与旧版完全一致；secret 为 32 位 hex，启动时若为空
+    自动生成（不复用 session_secret，轮换签名密钥不影响后台会话）。
+    """
+    enabled: bool = False
+    secret: str = ""
+    ttl_seconds: int = 3600
 
 
 @dataclass
@@ -400,6 +449,11 @@ class Config:
     upstream_ca_bundle: Optional[str] = None
     # 是否信任 X-Real-IP / CF-Connecting-IP。只有明确由前置代理覆盖时才应开启
     trust_upstream_ip_headers: bool = False
+    # 上游连接强制 IPv4（默认开启）。上游域名含 AAAA 记录而本机 IPv6 出口不通时，
+    # 系统先试 IPv6 超时再回退 IPv4，单次连接可能卡数秒（起播慢的常见原因）。
+    # 如需启用 IPv6（上游仅 IPv6 或本机 IPv6 正常且更快），在 yaml 显式写 false。
+    # yaml 顶层配置项（启动时读取，后台/数据库不存储该键）
+    upstream_ipv4_only: bool = True
     # 可信代理网段：只有直连来源位于这些网段时，才解析 X-Forwarded-For
     trusted_proxy_networks: List[str] = field(
         default_factory=lambda: [
@@ -419,6 +473,12 @@ class Config:
     request_dedup: RequestDedupConfig = field(default_factory=RequestDedupConfig)
     auto_ban: AutoBanConfig = field(default_factory=AutoBanConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    signed_url: SignedUrlConfig = field(default_factory=SignedUrlConfig)
+    # 记录配置文件中**显式出现**的顶层段键（仅 from_yaml 解析真实文件时填充；
+    # admin_console 远程导入走 _parse_config 不受影响）。
+    # 用于启动时判断哪些键应以配置文件为准覆盖数据库运行时配置，
+    # 避免空段/缺段用 dataclass 默认值意外覆盖后台已调整的配置。
+    yaml_explicit_keys: Dict[str, set] = field(default_factory=dict, repr=False, compare=False)
     hop_by_hop_headers: List[str] = field(
         default_factory=lambda: [
             "Connection",
@@ -437,7 +497,14 @@ class Config:
     def from_yaml(cls, yaml_path: str) -> "Config":
         with open(yaml_path, "r", encoding="utf-8") as file_obj:
             data = yaml.safe_load(file_obj) or {}
-        return cls._parse_config(data)
+        config = cls._parse_config(data)
+        # 记录启动相关段里显式出现的键，供启动时以文件为准覆盖数据库配置
+        config.yaml_explicit_keys = {
+            section: set(data[section].keys())
+            for section in ("server", "ssl", "logging")
+            if isinstance(data.get(section), dict) and data[section]
+        }
+        return config
 
     @classmethod
     def _parse_config(cls, data: Dict[str, Any]) -> "Config":
@@ -608,6 +675,10 @@ class Config:
         config.trust_upstream_ip_headers = coerce_bool(
             data.get("trust_upstream_ip_headers"),
             config.trust_upstream_ip_headers,
+        )
+        config.upstream_ipv4_only = coerce_bool(
+            data.get("upstream_ipv4_only"),
+            config.upstream_ipv4_only,
         )
         networks_data = data.get("trusted_proxy_networks")
         if isinstance(networks_data, (list, tuple)):

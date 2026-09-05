@@ -186,6 +186,9 @@ export function renderPagination(currentPage, totalPages, containerId, onPageCha
 function fieldRow(f, values) {
   const raw = (values && values[f.key] != null) ? values[f.key] : (f.default != null ? f.default : "");
   const esc = (s) => escapeHtml(s == null ? "" : String(s));
+  if (f.type === "note") {
+    return `<div class="form-note">${esc(f.text)}</div>`;
+  }
   if (f.type === "switch") {
     return `<div class="form-field switch-row"><div class="fr-text"><label>${esc(f.label)}</label>${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ""}</div><div class="switch ${raw ? "on" : ""}" data-fkey="${esc(f.key)}" role="switch" tabindex="0"></div></div>`;
   }

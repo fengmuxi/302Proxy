@@ -42,6 +42,7 @@ from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
 from ip_result_cache import IpResultCache
 from ip_ban_manager import IpBanManager
 from request_dedup import RequestDedup, DedupConfig
+from signed_url import verify_signed_url, strip_signature_params
 
 logger = logging.getLogger('proxy')
 
@@ -57,81 +58,49 @@ def format_bytes(bytes_value: int) -> str:
         return f"{bytes_value} B"
 
 
-def _read_net_bytes_windows() -> Optional[Tuple[int, int]]:
-    """GetIfTable 按网卡累计字节数（ctypes 调 iphlpapi，纯标准库），排除回环口。
+def _read_net_bytes_psutil() -> Optional[Tuple[int, int]]:
+    """用 psutil 读取全部物理网卡累计收发字节数（排除回环口），跨平台、可靠。
 
-    此前用 netstat -e 的「接口统计」汇总，它包含回环接口：本机代理场景下
-    浏览器↔代理的回环流量来回双计，吞吐严重虚高（实测约 6 倍），故弃用。
-    计数器为 32 位无符号，高速率下数分钟环绕一次，差分处需按环绕修正。
+    此前手写 ctypes 调 GetIfTable：实测本机 Windows 返回的单行结构为 976 字节且
+    字段偏移随接口变化（第 0 行 dwType 在偏移 516，第 1 行却在 396），任何固定
+    ctypes 结构都读错，导致吞吐虚高数倍（如 428 MB/s）。psutil 已封装好各平台
+    实现（Windows 走 GetIfTable2Ex 取 64 位计数器），优先采用。
+    返回 (发送字节, 接收字节)；psutil 不可用时返回 None。
     """
-    import ctypes
-    from ctypes import wintypes
-
-    MAX_INTERFACE_NAME_LEN = 256
-    MAXLEN_PHYSADDR = 8
-    IF_TYPE_SOFTWARE_LOOPBACK = 24
-
-    class MIB_IFROW(ctypes.Structure):
-        _fields_ = [
-            ("wszName", ctypes.c_wchar * MAX_INTERFACE_NAME_LEN),
-            ("dwIndex", wintypes.DWORD),
-            ("dwType", wintypes.DWORD),
-            ("dwMtu", wintypes.DWORD),
-            ("dwSpeed", wintypes.DWORD),
-            ("dwPhysAddrLen", wintypes.DWORD),
-            ("bPhysAddr", ctypes.c_ubyte * MAXLEN_PHYSADDR),
-            ("dwAdminStatus", wintypes.DWORD),
-            ("dwOperStatus", wintypes.DWORD),
-            ("dwLastChange", wintypes.DWORD),
-            ("dwInOctets", wintypes.DWORD),
-            ("dwInUcastPkts", wintypes.DWORD),
-            ("dwInNUcastPkts", wintypes.DWORD),
-            ("dwInDiscards", wintypes.DWORD),
-            ("dwInErrors", wintypes.DWORD),
-            ("dwInUnknownProtos", wintypes.DWORD),
-            ("dwOutOctets", wintypes.DWORD),
-            ("dwOutUcastPkts", wintypes.DWORD),
-            ("dwOutNUcastPkts", wintypes.DWORD),
-            ("dwOutDiscards", wintypes.DWORD),
-            ("dwOutErrors", wintypes.DWORD),
-            ("dwOutQLen", wintypes.DWORD),
-            ("dwDescrPtr", ctypes.c_void_p),
-        ]
-
-    class MIB_IFTABLE(ctypes.Structure):
-        _fields_ = [("dwNumEntries", wintypes.DWORD), ("table", MIB_IFROW * 1)]
-
     try:
-        iphlpapi = ctypes.windll.iphlpapi
-        size = wintypes.ULONG(0)
-        # 第一次调用取所需缓冲区大小
-        if iphlpapi.GetIfTable(None, ctypes.byref(size), False) != 0 or not size.value:
-            return None
-        buf = ctypes.create_string_buffer(size.value)
-        if iphlpapi.GetIfTable(ctypes.cast(buf, ctypes.POINTER(MIB_IFTABLE)), ctypes.byref(size), True) != 0:
-            return None
-        table = ctypes.cast(buf, ctypes.POINTER(MIB_IFTABLE)).contents
-        rows = ctypes.cast(ctypes.byref(table.table[0]), ctypes.POINTER(MIB_IFROW))
-        sent = recv = 0
-        for i in range(table.dwNumEntries):
-            row = rows[i]
-            if row.dwType == IF_TYPE_SOFTWARE_LOOPBACK:
-                continue
-            recv += row.dwInOctets
-            sent += row.dwOutOctets
-        return sent, recv
+        import psutil
     except Exception:
         return None
+    try:
+        nic = psutil.net_io_counters(pernic=True)
+    except Exception:
+        return None
+    if not nic:
+        return None
+    sent = recv = 0
+    for name, c in nic.items():
+        if not name:
+            continue
+        nl = name.lower()
+        # 排除回环：代理场景下浏览器↔代理走回环且来回双计，吞吐会虚高数倍
+        if nl == "lo" or "loopback" in nl:
+            continue
+        recv += getattr(c, "bytes_recv", 0) or 0
+        sent += getattr(c, "bytes_sent", 0) or 0
+    return sent, recv
 
 
 def read_net_interface_bytes() -> Optional[Tuple[int, int, int]]:
     """读取物理网卡累计 (发送字节数, 接收字节数, 计数器位数)，网卡级吞吐采样用。
 
     必须排除回环口：本机代理场景下浏览器↔代理走回环且来回双计，吞吐会虚高数倍。
-    - Linux / Docker：解析 /proc/net/dev（排除 lo，64 位计数器）；
-    - Windows：GetIfTable（排除回环，32 位计数器）；netstat -e 仅作兜底；
+    优先级：
+    - Linux / Docker：解析 /proc/net/dev（排除 lo，64 位计数器），零依赖；
+    - 跨平台：psutil（64 位计数器，已封装各平台实现，最可靠）；
+    - 兜底：Windows netstat -e（含回环，精度最差，仅作最后手段，32 位）。
     - 均不可用时返回 None，前端据此显示「不支持」。
     """
+    # 1) Linux / Docker：/proc/net/dev（排除 lo，64 位计数器），零依赖
     proc_net_dev = Path("/proc/net/dev")
     if proc_net_dev.exists():
         try:
@@ -149,9 +118,11 @@ def read_net_interface_bytes() -> Optional[Tuple[int, int, int]]:
             return sent, recv, 64
         except OSError:
             pass
-    win = _read_net_bytes_windows()
-    if win is not None:
-        return win[0], win[1], 32
+    # 2) psutil：跨平台、可靠，优先于易错的 Windows ctypes 结构
+    ps = _read_net_bytes_psutil()
+    if ps is not None:
+        return ps[0], ps[1], 64
+    # 3) 兜底：Windows netstat -e（含回环，仅作最后手段）
     try:
         import subprocess
         # 中文 Windows 的 netstat 输出为 GBK：不用 text=True，手动容错解码（仅需 ASCII 数字与 Bytes/字节 关键词）
@@ -200,6 +171,9 @@ class ProxyServer:
         self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
+        # 单 IP 流式并发计数器（HOTLINK_PROTECTION.md 3.2）：内存态，进程单 worker 无需跨进程共享
+        self._stream_slots: Dict[str, int] = {}
+        self._stream_slots_lock = asyncio.Lock()
         self._ban_cleanup_task: Optional[asyncio.Task] = None
         self._auto_ban_cleanup_task: Optional[asyncio.Task] = None
         self._log_cleanup_task: Optional[asyncio.Task] = None
@@ -290,10 +264,15 @@ class ProxyServer:
             try:
                 response = await handler(request)
                 duration_ms = (time.perf_counter() - start_time) * 1000
+                # 链路摘要：handle_proxy 沿途把关键节点写进 request["_chain"]，
+                # 这里合成一行，配合格式里的 request_id 即可完整还原单个请求的路径
+                chain = request.get("_chain")
+                chain_suffix = (" | 链路: " + " → ".join(chain)) if chain else ""
                 logger.info(
-                    "%s %s %d %.1fms %s [%s]",
+                    "%s %s %d %.1fms %s [%s]%s",
                     request.method, full_url, response.status, duration_ms, client_ip,
                     self._infer_response_kind(request, response.status),
+                    chain_suffix,
                 )
                 logger.debug("UA=%s", user_agent[:120] if user_agent else "-")
                 if client_ip:
@@ -307,9 +286,12 @@ class ProxyServer:
                 return response
             except Exception as e:
                 duration_ms = (time.perf_counter() - start_time) * 1000
+                chain = request.get("_chain")
+                chain_suffix = (" | 链路: " + " → ".join(chain)) if chain else ""
                 logger.error(
-                    "%s %s ERROR:%s %.1fms %s",
+                    "%s %s ERROR:%s %.1fms %s%s",
                     request.method, full_url, e, duration_ms, client_ip,
+                    chain_suffix,
                 )
                 raise
             finally:
@@ -623,6 +605,17 @@ class ProxyServer:
         return "代理服务异常"
 
     def _infer_route_log_result_status(self, *, route_decision, upstream_status: int, cache_status: str, error_message: str = "") -> str:
+        # Referer 防盗链拦截（阶段 2）：置于 error_message 之前，保证审计里
+        # 能与通用异常区分（blocked 管道会带 block_reason 进 error_message）
+        if route_decision is not None and route_decision.match_strategy == "referer_block":
+            return "hotlink_blocked"
+        # UA 黑名单拦截（阶段 3.1）：同款置顶判断
+        if route_decision is not None and route_decision.match_strategy == "ua_block":
+            return "ua_blocked"
+        # 签名 URL 校验失败（阶段 4）：校验在 select_route 之前，无 route_decision，
+        # 用 error_message 前缀区分于通用 proxy_error
+        if route_decision is None and error_message.startswith("签名校验失败"):
+            return "signature_invalid"
         if error_message:
             return "proxy_error"
         if route_decision is None:
@@ -706,6 +699,11 @@ class ProxyServer:
                 error_message=error_message,
             ),
             "error_message": error_message,
+            # 盗链监控数据源（HOTLINK_PROTECTION.md 阶段 1）：Referer / UA 用于识别
+            # 外部网页引用，bytes_transferred 由流式通道在落库前写入 request 上下文。
+            "referer": (request.headers.get("Referer", "") or ""),
+            "user_agent": (request.headers.get("User-Agent", "") or "")[:200],
+            "bytes_transferred": int(request.get("_bytes_transferred", 0) or 0),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         return payload
@@ -734,6 +732,17 @@ class ProxyServer:
         except Exception as exc:
             logger.warning("记录路由日志失败: %s", exc)
 
+    @staticmethod
+    def _chain_step(request: web.Request, text: str) -> None:
+        """把链路关键节点追加到请求上下文；middleware 收尾时合成一行链路日志。
+
+        只做内存追加、无 I/O，异常静默（链路日志绝不能影响主流程）。
+        """
+        try:
+            request.setdefault("_chain", []).append(text)
+        except Exception:
+            pass
+
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse:
         route_decision = None
         try:
@@ -748,6 +757,34 @@ class ProxyServer:
                 body = await request.read()
             client_host = request.remote or ''
             scheme = request.scheme
+
+            # ===== 签名 URL 校验（HOTLINK_PROTECTION.md 阶段 4）=====
+            # 全局开关启用时，代理路径必须在 query 中携带有效 _st/_sig，否则 403。
+            # 校验在 select_route 之前：快速拒绝、不泄露规则存在性；通过后剥离
+            # _st/_sig，避免签名参数经 build_target_url 原样透传给上游。
+            signed_cfg = self.config.signed_url
+            if signed_cfg.enabled:
+                ok, reason = verify_signed_url(
+                    path_decoded,
+                    request.query.get("_st", ""),
+                    request.query.get("_sig", ""),
+                    signed_cfg.secret,
+                )
+                if not ok:
+                    self._chain_step(request, f"签名:失败({reason})")
+                    block_reason = f"签名校验失败: {reason}"
+                    logger.warning("签名校验失败: IP=%s 路径=%s 原因=%s", client_host, path_decoded, reason)
+                    await self._record_route_log(
+                        request,
+                        route_decision=None,
+                        upstream_status=403,
+                        cache_status="BLOCKED",
+                        transport_mode="none",
+                        error_message=block_reason,
+                    )
+                    return await self._render_403_page(block_reason)
+                query_string = strip_signature_params(query_string)
+                self._chain_step(request, "签名:通过")
 
             logger.debug("路由匹配开始: %s %s", method, raw_path)
 
@@ -764,8 +801,15 @@ class ProxyServer:
                     route_decision.rule.path_prefix, route_decision.target_url,
                     route_decision.match_strategy,
                 )
+                self._chain_step(
+                    request,
+                    f"路由:{route_decision.match_strategy}[{route_decision.rule.name}]",
+                )
+                if route_decision.blocked:
+                    self._chain_step(request, f"拦截:{route_decision.block_reason}")
             else:
                 logger.warning("无匹配路由: %s %s", method, raw_path)
+                self._chain_step(request, "路由:无匹配")
                 request["_route_miss"] = True
                 return await self._render_404_page("未找到匹配的代理规则")
 
@@ -794,6 +838,7 @@ class ProxyServer:
                     route_decision.client_ip, path_decoded
                 )
                 if ban_entry:
+                    self._chain_step(request, "IP封禁")
                     ban_reason = f"IP已被封禁: {route_decision.client_ip}"
                     if ban_entry.reason:
                         ban_reason += f" 原因: {ban_entry.reason}"
@@ -832,6 +877,9 @@ class ProxyServer:
             )
             if cached_entry is not None:
                 logger.debug("请求去重命中: %s %s", method, dedup_key_url)
+                self._chain_step(request, "去重:命中")
+                # 去重命中返回的缓存体也是真实传输字节，纳入盗链监控统计
+                request["_bytes_transferred"] = len(cached_entry.body or b"")
                 await self._record_route_log(
                     request,
                     route_decision=route_decision,
@@ -850,7 +898,9 @@ class ProxyServer:
                 target_url, "streaming" if use_streaming_mode else "standard",
                 range_header or "-",
             )
-            
+            self._chain_step(request, "去重:未命中")
+            self._chain_step(request, f"模式:{('streaming' if use_streaming_mode else 'standard')}")
+
             # 直接转发请求到上游服务器
             if use_streaming_mode:
                 streaming_response = await self.request_handler.handle_request_streaming(
@@ -865,6 +915,20 @@ class ProxyServer:
                 )
                 actual_cache_status = streaming_response.cache_status or "BYPASS"
                 logger.debug("流式响应: 状态=%s 缓存=%s", streaming_response.status, actual_cache_status)
+                # 上游首包耗时（含重定向各跳），慢起播排查的关键指标
+                redirect_info = streaming_response.redirect_info
+                if redirect_info is not None and redirect_info.elapsed_ms > 0:
+                    elapsed_s = redirect_info.elapsed_ms / 1000
+                    self._chain_step(request, f"上游耗时:{elapsed_s:.1f}s")
+                    if elapsed_s >= 3.0:
+                        hop_detail = " -> ".join(
+                            f"[{hop.get('status')}] {hop.get('ms', 0)}ms" for hop in redirect_info.redirect_chain
+                        ) or "无重定向"
+                        logger.info(
+                            "上游首包较慢: %.1fs 目标=%s 重定向=%d跳 详情=%s",
+                            elapsed_s, redirect_info.original_url[:120],
+                            redirect_info.redirect_count, hop_detail,
+                        )
                 return await self._send_streaming_response(request, streaming_response, cache_status=actual_cache_status)
             else:
                 result = await self.request_handler.handle_request(
@@ -888,6 +952,10 @@ class ProxyServer:
                 status, response_headers, response_body, redirect_info, route_decision = result
                 redirect_count = redirect_info.redirect_count if redirect_info else 0
                 cache_status = self.request_handler.get_last_cache_status()
+                if redirect_count > 0:
+                    self._chain_step(request, f"重定向:{redirect_count}")
+                self._chain_step(request, f"缓存:{cache_status}")
+                self._chain_step(request, f"上游:{status}")
                 logger.debug(
                     "标准响应: 状态=%d 缓存=%s 重定向=%d",
                     status, cache_status, redirect_count,
@@ -898,6 +966,10 @@ class ProxyServer:
                     redirect_count=redirect_info.redirect_count if redirect_info else 0,
                     failed=status >= 400
                 )
+                # 非流式标准路径补记传输字节数（HOTLINK_PROTECTION.md 1.4 低优先项），
+                # 使非流式下载也进入「单 IP 流量 TOP10」统计
+                request["_bytes_transferred"] = len(response_body) if response_body else 0
+                self._chain_step(request, f"字节:{format_bytes(request['_bytes_transferred'])}")
                 await self._record_route_log(
                     request,
                     route_decision=route_decision,
@@ -929,6 +1001,7 @@ class ProxyServer:
         
         except Exception as e:
             logger.exception(f"处理请求时发生错误: {e}")
+            self._chain_step(request, f"异常:{self._classify_proxy_error(e)}")
             await self.stats.record_request(failed=True)
             await self._record_route_log(
                 request,
@@ -942,6 +1015,56 @@ class ProxyServer:
             return await self._render_500_page(self._classify_proxy_error(e))
     
     async def _send_streaming_response(self, request: web.Request, streaming_response: StreamingResponse, cache_status: str = "BYPASS") -> web.StreamResponse:
+        """流式响应入口：先做单 IP 并发限制（阶段 3.2），再进入实际传输。
+
+        超限直接 429 并按拦截落路由日志；未启用（max_concurrent_per_ip=0）
+        或拿不到客户端 IP 时不引入任何额外开销。
+        """
+        limit = int(getattr(self.config.streaming, "max_concurrent_per_ip", 0) or 0)
+        client_ip = streaming_response.route_decision.client_ip if streaming_response.route_decision else ""
+        if limit > 0 and client_ip:
+            acquired = await self._acquire_stream_slot(client_ip, limit)
+            if not acquired:
+                self._chain_step(request, f"并发槽:拒绝(>{limit})")
+                logger.warning("单IP并发超限拒绝: IP=%s 上限=%d 路径=%s", client_ip, limit, request.path)
+                await self.stats.record_request(failed=True, streaming=True)
+                await self._record_route_log(
+                    request,
+                    route_decision=streaming_response.route_decision,
+                    upstream_status=429,
+                    cache_status=cache_status,
+                    transport_mode="streaming",
+                    error_message=f"单IP并发连接数超限(>{limit})",
+                )
+                return web.Response(
+                    status=429,
+                    headers={"Content-Type": "text/plain; charset=utf-8", "Retry-After": "5"},
+                    text="Too Many Requests: 单 IP 并发连接数超限",
+                )
+            try:
+                self._chain_step(request, f"并发槽:获取[{client_ip}]")
+                return await self._do_send_streaming_response(request, streaming_response, cache_status=cache_status)
+            finally:
+                await self._release_stream_slot(client_ip)
+        return await self._do_send_streaming_response(request, streaming_response, cache_status=cache_status)
+
+    async def _acquire_stream_slot(self, ip: str, limit: int) -> bool:
+        async with self._stream_slots_lock:
+            current = self._stream_slots.get(ip, 0)
+            if current >= limit:
+                return False
+            self._stream_slots[ip] = current + 1
+            return True
+
+    async def _release_stream_slot(self, ip: str) -> None:
+        async with self._stream_slots_lock:
+            current = self._stream_slots.get(ip, 0)
+            if current <= 1:
+                self._stream_slots.pop(ip, None)
+            else:
+                self._stream_slots[ip] = current - 1
+
+    async def _do_send_streaming_response(self, request: web.Request, streaming_response: StreamingResponse, cache_status: str = "BYPASS") -> web.StreamResponse:
         redirect_info = streaming_response.redirect_info
         response_headers = streaming_response.headers
         
@@ -1007,6 +1130,19 @@ class ProxyServer:
                 raise
         finally:
             await self.stats.record_bytes(bytes_transferred)
+            self._chain_step(request, f"字节:{format_bytes(bytes_transferred)}")
+            # 流量封禁（HOTLINK_PROTECTION.md 3.3）：把本次传输字节计入自动封禁窗口，
+            # 窗口内累计超过 auto_ban.max_bytes 自动封禁该 IP
+            if bytes_transferred and streaming_response.route_decision:
+                try:
+                    await self.auto_ban_monitor.record_bytes(
+                        streaming_response.route_decision.client_ip, bytes_transferred
+                    )
+                except Exception as exc:
+                    logger.warning("流量封禁统计失败: %s", exc)
+            # 把本次流式传输的真实字节数挂到 request 上下文，供 _record_route_log
+            # 经 _build_route_log_payload 写入 route_logs.bytes_transferred（盗链监控用）。
+            request["_bytes_transferred"] = bytes_transferred
             await self._record_route_log(
                 request,
                 route_decision=streaming_response.route_decision,
@@ -1617,6 +1753,8 @@ def main():
     bootstrap_config = load_config(args.config)
     config_store = ConfigStore(bootstrap_config.database_path, bootstrap_config=bootstrap_config)
     config = config_store.load_runtime_config()
+    # 启动信息以配置文件为最高优先级：yaml 显式配置的 server/ssl/logging 覆盖数据库值并回写
+    file_overrides = config_store.apply_file_startup_overrides(bootstrap_config, config)
     
     from pathlib import Path
     if config.logging.file_path:
@@ -1636,6 +1774,9 @@ def main():
         config.streaming.enabled = False
     
     logger = setup_logging(config.logging)
+
+    for note in file_overrides:
+        logger.info("启动配置以 config.yaml 为准覆盖数据库: %s", note)
     
     if config.logging.file_path:
         prune_app_log_files(config.logging.file_path, config.logging.retention_days)

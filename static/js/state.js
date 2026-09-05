@@ -19,7 +19,7 @@ export const state = {
   activeModule: "overview",
   logCurrentPage: 1,
   logTotalPages: 1,
-  logPageSize: 50,
+  logPageSize: 10,
   banCurrentPage: 1,
   banTotalPages: 1,
   banPageSize: 20,

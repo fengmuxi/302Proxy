@@ -68,7 +68,10 @@ export function activatePage(page) {
       loadBannedIpList();
       loadAutoBanSettings();
       loadAutoBanStats();
+      loadStreamGuardSettings();
+      loadSignedUrlSettings();
       if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
+      startTrackedAutoRefresh();
       break;
     case "geo":
       refreshGeo();
@@ -698,6 +701,13 @@ const RULE_SCHEMA = [
   { key: "ip_blacklist", label: "访问控制 IP 黑", type: "text" },
   { key: "region_whitelist", label: "地区白名单", type: "text" },
   { key: "region_blacklist", label: "地区黑名单", type: "text" },
+  { key: "referer_whitelist", label: "Referer 白名单", type: "text", placeholder: "*.dwzynj.top, example.com（留空不校验）" },
+  { key: "referer_policy", label: "空 Referer 策略", type: "select", options: [
+    { value: "allow", label: "允许（本地播放器/直链）" },
+    { value: "deny", label: "拒绝（仅白名单网页引用）" },
+  ] },
+  { key: "ua_blacklist", label: "UA 黑名单", type: "text", placeholder: "curl, python-requests（子串匹配，留空不校验）" },
+  { key: "ua_whitelist", label: "UA 白名单", type: "text", placeholder: "NASKTV, ExoPlayer（子串匹配；启用后无 UA 也拦截；留空不校验）" },
   { key: "notes", label: "备注", type: "text" },
   { key: "enabled", label: "启用", type: "switch" },
   { key: "is_default", label: "默认规则", type: "switch" },
@@ -748,12 +758,16 @@ export function openRuleModal(rule, presetGroup = null) {
     ip_whitelist: rule.ip_whitelist || "", region_filters: rule.region_filters || "",
     access_ip_whitelist: rule.access_ip_whitelist || "", ip_blacklist: rule.ip_blacklist || "",
     region_whitelist: rule.region_whitelist || "", region_blacklist: rule.region_blacklist || "",
+    referer_whitelist: rule.referer_whitelist || "", referer_policy: rule.referer_policy || "allow",
+    ua_blacklist: rule.ua_blacklist || "",
+    ua_whitelist: rule.ua_whitelist || "",
     notes: rule.notes || "", enabled: Boolean(rule.enabled), is_default: Boolean(rule.is_default),
     strip_prefix: Boolean(rule.strip_prefix), follow_redirects: rule.follow_redirects !== false,
     enable_streaming: Boolean(rule.enable_streaming),
   } : {
     route_group: String(selectedIndex),
     priority: 0, timeout: 30, max_redirects: 10, retry_times: 3,
+    referer_whitelist: "", referer_policy: "allow", ua_blacklist: "", ua_whitelist: "",
     enabled: true, is_default: false, strip_prefix: false, follow_redirects: true, enable_streaming: true,
   };
 
@@ -775,6 +789,9 @@ export function openRuleModal(rule, presetGroup = null) {
         target_url: out.target_url, ip_whitelist: out.ip_whitelist || "", region_filters: out.region_filters || "",
         access_ip_whitelist: out.access_ip_whitelist || "", ip_blacklist: out.ip_blacklist || "",
         region_whitelist: out.region_whitelist || "", region_blacklist: out.region_blacklist || "",
+        referer_whitelist: out.referer_whitelist || "", referer_policy: out.referer_policy || "allow",
+        ua_blacklist: out.ua_blacklist || "",
+        ua_whitelist: out.ua_whitelist || "",
         priority: Number(out.priority ?? 0), timeout: Number(out.timeout ?? 30),
         max_redirects: Number(out.max_redirects ?? 10), retry_times: Number(out.retry_times ?? 3),
         notes: out.notes || "", path_rewrite_pattern: out.path_rewrite_pattern || "",
@@ -859,6 +876,10 @@ export function openRuleDrawer(ruleId) {
       ${kv("访问控制 IP 黑", cell(rule.ip_blacklist))}
       ${kv("地区白名单", cell(rule.region_whitelist))}
       ${kv("地区黑名单", cell(rule.region_blacklist))}
+      ${kv("Referer 白名单", rule.referer_whitelist ? `<code class="mono">${esc(rule.referer_whitelist)}</code>` : '<span class="text-muted">未启用校验</span>')}
+      ${kv("空 Referer 策略", esc((rule.referer_policy || "allow") === "deny" ? "拒绝（仅白名单网页引用）" : "允许（本地播放器/直链）"))}
+      ${kv("UA 黑名单", rule.ua_blacklist ? `<code class="mono">${esc(rule.ua_blacklist)}</code>` : '<span class="text-muted">未启用</span>')}
+      ${kv("UA 白名单", rule.ua_whitelist ? `<code class="mono">${esc(rule.ua_whitelist)}</code>` : '<span class="text-muted">未启用（放行全部 UA）</span>')}
     `;
   }
   openDrawer();
@@ -1216,6 +1237,21 @@ export function renderRouteLogSettings(settings) {
   }
 }
 
+function renderRefererField(log) {
+  const ref = log.referer || "";
+  if (!ref) return '<span>-</span>';
+  let host = ref;
+  try {
+    const u = new URL(ref);
+    if (u.hostname) host = u.hostname;
+  } catch (_) { /* 非标准 URL，直接展示原始值 */ }
+  const reqHost = (log.request_host || "").toLowerCase();
+  const isExternal = !!host && host.toLowerCase() !== reqHost;
+  // 外部引用 = Referer 域名既非空也非本次请求命中的代理域名，提示可能存在盗链
+  const warn = isExternal ? ' <span class="pill pill-warn">外部引用</span>' : '';
+  return `<span title="${esc(ref)}">${esc(host)}</span>${warn}`;
+}
+
 export function renderRouteLogs(payload) {
   state.routeLogs = Array.isArray(payload.items) ? payload.items : [];
   const total = payload.total ?? state.routeLogs.length;
@@ -1274,6 +1310,8 @@ export function renderRouteLogs(payload) {
             <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.redirect_location || "")}">${esc(log.redirect_location || "-")}</strong></div></div>
             <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${resultKindBadge}<strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">Referer</span><div class="route-log-field-value">${renderRefererField(log)}</div></div>
+            <div class="route-log-field"><span class="route-log-field-label">UA</span><div class="route-log-field-value"><span title="${esc(log.user_agent || "")}">${esc((log.user_agent || "-").slice(0, 60))}</span><span class="hint">${log.bytes_transferred ? esc(formatBytes(Number(log.bytes_transferred) || 0)) : ""}</span></div></div>
           </div>
         </div>
       </div>`;
@@ -1289,6 +1327,7 @@ export function collectRouteLogFilters() {
     rule_request_host: normalizeRequestHost(getValue("log_rule_request_host").trim()),
     match_strategy: getValue("log_match_strategy"),
     result_status: getValue("log_result_status"),
+    referer: getValue("log_referer").trim(),
     date_from: toIsoDateTime(getValue("log_date_from")),
     date_to: toIsoDateTime(getValue("log_date_to")),
     limit: state.logPageSize,
@@ -1321,7 +1360,51 @@ export async function loadRouteLogs() {
 }
 
 export async function refreshRouteLogModule() {
+  // 盗链监控已迁入「设置与监控」弹窗，改为打开弹窗时按需加载，不再随日志页刷新
   await Promise.all([loadRouteLogSettings(), loadRouteLogs()]);
+}
+
+// ---- 盗链监控看板（HOTLINK_PROTECTION.md 阶段 1） ----
+
+function renderHotlinkStats(data) {
+  const refsEl = document.getElementById("hotlink-top-referrers");
+  const ipsEl = document.getElementById("hotlink-top-ips");
+  const totalEl = document.getElementById("hotlink-external-total");
+  if (!refsEl && !ipsEl) return;
+  const extTotal = Number(data.external_referer_total || 0);
+  if (totalEl) totalEl.textContent = extTotal > 0 ? `（共 ${extTotal} 次外部引用）` : "";
+
+  if (refsEl) {
+    const refs = Array.isArray(data.top_referrers) ? data.top_referrers : [];
+    refsEl.innerHTML = refs.length
+      ? refs.map((r, i) => `
+          <div class="hotlink-row">
+            <div class="hotlink-row-main"><span class="hint">${i + 1}.</span> <strong title="${esc(r.host)}">${esc(r.host)}</strong></div>
+            <div class="hotlink-row-side">
+              <span class="hint">${r.count} 次</span>
+              ${r.last_client_ip ? `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(r.last_client_ip)}">封禁IP</button>` : ""}
+            </div>
+          </div>`).join("")
+      : '<div class="hint">近 24h 无外部 Referer 记录。</div>';
+  }
+
+  if (ipsEl) {
+    const ips = Array.isArray(data.top_ips_by_bytes) ? data.top_ips_by_bytes : [];
+    ipsEl.innerHTML = ips.length
+      ? ips.map((item, i) => `
+          <div class="hotlink-row">
+            <div class="hotlink-row-main"><span class="hint">${i + 1}.</span> <strong>${esc(item.client_ip)}</strong> <span class="hint">${item.request_count} 次</span></div>
+            <div class="hotlink-row-side">${esc(formatBytes(Number(item.bytes_transferred) || 0))}</div>
+          </div>`).join("")
+      : '<div class="hint">近 24h 无流量统计（流式传输后显示）。</div>';
+  }
+}
+
+export async function loadHotlinkStats() {
+  const card = document.getElementById("hotlink-monitor-card");
+  if (!card || card.hidden) return;
+  const data = await apiFetch("/_admin/api/hotlink/stats?hours=24");
+  renderHotlinkStats(data || {});
 }
 
 export async function goToPage(page, totalPages) {
@@ -1408,7 +1491,7 @@ export async function loadAppLogFiles() {
   state.appLogFile = prev;
   if (nameEl) nameEl.textContent = prev;
   container.innerHTML = files.map((f) => `
-    <div class="file-item ${f.name === prev ? "current" : ""}" data-action="select-log-file" data-file="${esc(f.name)}">
+    <div class="file-item ${f.name === prev ? "current" : ""}" data-action="select-log-file" data-file="${esc(f.name)}" title="${esc(f.name)}">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
       <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</span>
       <span class="fsize">${esc(formatBytes(f.size))}</span>
@@ -1709,6 +1792,7 @@ export async function loadAutoBanSettings() {
       setValue("auto_ban_auto_ban_on_404", data.auto_ban_on_404 ? "1" : "0");
       setValue("auto_ban_whitelist", data.whitelist || "");
       setValue("auto_ban_email_on_ban", data.email_on_ban ? "1" : "0");
+      setValue("auto_ban_max_mb", String(Math.round((data.max_bytes || 0) / 1048576)));
       const pill = document.getElementById("autoBanStatusPill");
       if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "已启用" : "已停用"; }
     }
@@ -1717,15 +1801,43 @@ export async function loadAutoBanSettings() {
 
 export async function loadAutoBanStats() {
   try {
-    const stats = await apiFetch("/_admin/api/auto-ban/stats");
+    const [stats, trackedResp] = await Promise.all([
+      apiFetch("/_admin/api/auto-ban/stats"),
+      apiFetch("/_admin/api/auto-ban/tracked").catch(() => null),
+    ]);
     const body = document.getElementById("autoBanStatsBody");
     if (!body || !stats) return;
+    const items = (trackedResp && trackedResp.items) || [];
+    // 只展示前 20 个（按窗口内请求数降序，服务端已排序），完整异常趋势看日志页
+    const rows = items.slice(0, 20).map((t) => `
+      <div class="tracked-row">
+        <span class="tracked-ip" title="${esc(t.ip)}">${esc(t.ip)}</span>
+        <span class="hint tracked-meta">请求 ${t.request_count ?? 0} 次 · 404 ×${t.error_404_count ?? 0} · ${esc(formatBytes(Number(t.bytes_total) || 0))}</span>
+        <button class="btn btn-sm btn-danger" data-action="ban-tracked-ip" data-ip="${esc(t.ip)}">封禁</button>
+      </div>`).join("");
     body.innerHTML = `
       <div class="kv"><div class="k">跟踪 IP 数</div><div class="val">${esc(String(stats.tracked_ips ?? 0))}</div></div>
       <div class="kv"><div class="k">白名单 IP 数</div><div class="val">${esc(String(stats.whitelisted_ips ?? 0))}</div></div>
       <div class="kv"><div class="k">总请求数</div><div class="val">${esc(String(stats.total_requests ?? 0))}</div></div>
-      <div class="kv"><div class="k">累计封禁</div><div class="val">${esc(String(stats.total_bans ?? 0))}</div></div>`;
+      <div class="kv"><div class="k">累计封禁</div><div class="val">${esc(String(stats.total_bans ?? 0))}</div></div>
+      <div class="tracked-box">
+        <div class="tracked-title">正在追踪的可疑 IP <span class="hint">统计窗口内异常请求 · 共 ${items.length} 个</span></div>
+        ${rows || `<div class="hint" style="padding:6px 0">${stats.enabled ? "暂无可疑 IP，统计窗口内无异常请求" : "自动封禁已停用，仍在记录请求统计"}</div>`}
+      </div>`;
   } catch (_) {}
+}
+
+// 可疑 IP 列表随安全页定时刷新（5s），切走页面后由 tick 自检停止（同网络吞吐卡模式）
+let _trackedAutoRefreshTimer = null;
+export function stopTrackedAutoRefresh() {
+  if (_trackedAutoRefreshTimer) { clearInterval(_trackedAutoRefreshTimer); _trackedAutoRefreshTimer = null; }
+}
+export function startTrackedAutoRefresh() {
+  stopTrackedAutoRefresh();
+  _trackedAutoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "security") { stopTrackedAutoRefresh(); return; }
+    loadAutoBanStats().catch(() => {});
+  }, 5000);
 }
 
 export function openAutoBanSettings() {
@@ -1741,6 +1853,7 @@ export function openAutoBanSettings() {
       { key: "auto_ban_on_404", label: "对 404 自动封禁", type: "switch" },
       { key: "whitelist", label: "白名单（逗号分隔）", type: "text", placeholder: "1.2.3.4, 5.6.7.8" },
       { key: "email_on_ban", label: "封禁时发送邮件提醒", type: "switch" },
+      { key: "max_mb", label: "窗口内单 IP 流量上限（MB，0 不启用）", type: "number", default: 0, hint: "按流式传输字节数累计，超过即自动封禁" },
     ],
     values: {
       enabled: getValue("auto_ban_enabled") === "1",
@@ -1751,6 +1864,7 @@ export function openAutoBanSettings() {
       auto_ban_on_404: getValue("auto_ban_auto_ban_on_404") === "1",
       whitelist: getValue("auto_ban_whitelist") || "",
       email_on_ban: getValue("auto_ban_email_on_ban") === "1",
+      max_mb: Number(getValue("auto_ban_max_mb") || 0),
     },
     onSave: async (out) => {
       await apiFetch("/_admin/api/auto-ban", {
@@ -1764,12 +1878,176 @@ export function openAutoBanSettings() {
           auto_ban_on_404: Boolean(out.auto_ban_on_404),
           whitelist: out.whitelist || "",
           email_on_ban: Boolean(out.email_on_ban),
+          max_bytes: Math.max(0, Number(out.max_mb ?? 0)) * 1048576,
         }),
       });
       await Promise.all([loadAutoBanSettings(), loadAutoBanStats()]);
       showToast("自动封禁配置已保存。");
     },
   });
+}
+
+// ============ 单 IP 并发限制（HOTLINK_PROTECTION.md 阶段 3.2） ============
+
+export async function loadStreamGuardSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/stream-guard");
+    const body = document.getElementById("streamGuardBody");
+    const pill = document.getElementById("streamGuardPill");
+    const limit = Number(data.max_concurrent_per_ip || 0);
+    setValue("stream_guard_max", String(limit));
+    if (pill) {
+      pill.className = "pill " + (limit > 0 ? "pill-ok" : "pill-neutral");
+      pill.textContent = limit > 0 ? `上限 ${limit}` : "未启用";
+    }
+    if (body) {
+      body.innerHTML = `<div class="kv"><div class="k">单 IP 并发上限</div><div class="val">${limit > 0 ? esc(String(limit)) + " 路流式连接" : "不限制"}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：仅对流式通道（视频 / 大文件）计数，0 = 不限制；同一 IP 在途连接达到上限时新请求返回 429，播完自动释放名额。公司 / 校园等共享出口环境建议调高或关闭。点「编辑配置」查看完整说明。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openStreamGuardSettings() {
+  openFormModal({
+    title: "单 IP 并发限制",
+    size: 560,
+    sub: "限制同一 IP 同时进行的流式传输数量，压制单点滥用与脚本并发拉流。",
+    schema: [
+      { type: "note", text: "【生效范围】只对流式通道（视频 / 大文件）计数，标准转发与后台请求不受影响。\n【生效行为】同一 IP 在途流式连接达到上限时，新请求立即返回 429（带 Retry-After: 5），已在播放的连接不受影响；传输结束自动释放名额。\n【误伤提示】公司 / 校园 / 部分宽带是多人共享同一出口 IP，此类用户多时可调高上限或设为 0 关闭。\n【日志排查】被 429 拒绝的请求可在「日志与审计」按结果状态筛选查看。" },
+      { key: "max_concurrent_per_ip", label: "单 IP 流式并发上限", type: "number", default: 0, hint: "0 = 不限制；家庭 / 个人站点建议 2~3，共享出口环境建议 4~6" },
+    ],
+    values: {
+      max_concurrent_per_ip: Number(getValue("stream_guard_max") || 0),
+    },
+    validate: (out) => {
+      if (Number(out.max_concurrent_per_ip ?? 0) < 0) return "并发上限不能为负数";
+      return null;
+    },
+    onSave: async (out) => {
+      const data = await apiFetch("/_admin/api/stream-guard", {
+        method: "PUT",
+        body: JSON.stringify({ max_concurrent_per_ip: Math.max(0, Number(out.max_concurrent_per_ip ?? 0)) }),
+      });
+      setValue("stream_guard_max", String(data.max_concurrent_per_ip || 0));
+      await loadStreamGuardSettings();
+      showToast("单 IP 并发限制已保存。");
+    },
+  });
+}
+
+// ============ 签名 URL（HOTLINK_PROTECTION.md 阶段 4） ============
+
+export async function loadSignedUrlSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/signed-url");
+    const body = document.getElementById("signedUrlBody");
+    const pill = document.getElementById("signedUrlPill");
+    setValue("signed_url_enabled", data.enabled ? "1" : "0");
+    setValue("signed_url_ttl_seconds", String(data.ttl_seconds || 3600));
+    if (pill) {
+      pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral");
+      pill.textContent = data.enabled ? "已启用" : "未启用";
+    }
+    if (body) {
+      body.innerHTML = `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "启用（未签名请求将被拒绝）" : "停用（不校验签名）"}</div></div>` +
+        `<div class="kv"><div class="k">链接有效期</div><div class="val">${esc(String(data.ttl_seconds || 3600))} 秒</div></div>` +
+        `<div class="kv"><div class="k">签名密钥</div><div class="val">${data.has_secret ? "已生成" : '<span class="text-warn">未生成</span>'}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：启用后所有代理请求必须携带有效签名（_st/_sig）否则 403。适用前提是播放链路能拿到带签名的链接（302 签发层）；固定 URL 直连的播放器开启后会被误拦，点「编辑配置」查看完整说明与使用流程。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openSignedUrlSettings() {
+  openFormModal({
+    title: "签名 URL 配置",
+    size: 580,
+    sub: "启用后，所有代理请求必须携带有效签名（?_st=...&_sig=...），否则返回 403。",
+    schema: [
+      { type: "note", text: "【开启前必读】\n1. 签名只对「能拿到带签名链接」的播放链路有效。若你的播放器 / Emby 使用固定 URL 直连代理，开启后正常用户也会被 403 —— 此功能需配合 302 签发层使用（固定 URL → 鉴权 → 302 跳转到带签名链接），单独开启会拦截固定 URL 的正常用户。\n2. 使用流程：开启开关 → 点「生成签名链接」输入代理路径 → 得到相对链接 → 拼上访问域名后下发给播放器。\n3. 链接过期即 403，需重新签发；TTL 建议 ≥ 预计播放时长 + 30 分钟。\n4. 密钥仅存服务端数据库，签发结果不含密钥；签名采用 HMAC-SHA256，无法伪造。" },
+      { key: "enabled", label: "启用签名校验", type: "switch", hint: "全局开关；关闭后所有请求不校验签名（行为与旧版完全一致）" },
+      { key: "ttl_seconds", label: "链接有效期（秒）", type: "number", default: 3600, hint: "签发链接的有效秒数，最小 60；例：2 小时影片建议 9000（2.5 小时）" },
+      { key: "regenerate_secret", label: "保存时重新生成密钥", type: "switch", hint: "立即作废所有已签发链接；正在播放的连接不受影响，新请求需重新签发，请谨慎勾选" },
+    ],
+    values: {
+      enabled: getValue("signed_url_enabled") === "1",
+      ttl_seconds: Number(getValue("signed_url_ttl_seconds") || 3600),
+      regenerate_secret: false,
+    },
+    validate: (out) => {
+      if (Number(out.ttl_seconds ?? 0) < 60) return "有效期不能小于 60 秒";
+      return null;
+    },
+    onSave: async (out) => {
+      const data = await apiFetch("/_admin/api/signed-url", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          ttl_seconds: Math.max(60, Number(out.ttl_seconds ?? 3600)),
+          regenerate_secret: Boolean(out.regenerate_secret),
+        }),
+      });
+      if (data && data.has_secret !== undefined) setValue("signed_url_enabled", data.enabled ? "1" : "0");
+      await loadSignedUrlSettings();
+      showToast(out.regenerate_secret ? "签名 URL 配置已保存，密钥已轮换。" : "签名 URL 配置已保存。");
+    },
+  });
+}
+
+export function openSignedUrlTool() {
+  const modalEl = document.getElementById("modal");
+  const mask = document.getElementById("modalMask");
+  if (!modalEl || !mask) return;
+  modalEl.style.width = "min(560px,100%)";
+  modalEl.innerHTML = `
+    <div class="modal-head"><div><div class="modal-title">生成签名链接</div><div class="modal-sub">输入代理路径，服务端签发带时效的签名 URL（密钥不出浏览器）</div></div><button class="icon-btn" id="modalClose">✕</button></div>
+    <div class="modal-body">
+      <div class="form-note">1. 输入以 / 开头的代理路径（如 /d/xxx.m3u8），服务端用密钥签发，密钥不出浏览器；\n2. 生成的是相对链接，需拼上访问域名后下发给播放器；\n3. 链接在「链接有效期」（TTL）内有效，过期自动 403，需重新签发；\n4. 签名开关未启用时链接同样可以签发（只是不强制校验），适合先生成测试、再正式启用。</div>
+      <div class="kv"><div class="k">代理路径</div><div class="val"><input class="input" id="signedUrlPath" placeholder="/d/xxx.m3u8" style="width:100%;box-sizing:border-box"></div></div>
+      <div id="signedUrlResult" style="display:none;margin-top:12px">
+        <div class="kv"><div class="k">签名链接</div><div class="val"><textarea class="input" id="signedUrlOutput" readonly rows="3" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px"></textarea></div></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="modalCancel">关闭</button><button class="btn btn-primary" id="signedUrlGenerate">生成</button><button class="btn" id="signedUrlCopy" style="display:none">复制链接</button></div>`;
+  document.getElementById("modalClose").onclick = closeModal;
+  document.getElementById("modalCancel").onclick = closeModal;
+
+  const input = document.getElementById("signedUrlPath");
+  const resultWrap = document.getElementById("signedUrlResult");
+  const output = document.getElementById("signedUrlOutput");
+  const copyBtn = document.getElementById("signedUrlCopy");
+  const genBtn = document.getElementById("signedUrlGenerate");
+
+  genBtn.onclick = async () => {
+    const path = (input.value || "").trim();
+    if (!path.startsWith("/")) { showToast("路径必须以 / 开头", true); return; }
+    genBtn.disabled = true;
+    try {
+      const data = await apiFetch("/_admin/api/signed-url/generate", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+      if (data && data.url) {
+        output.value = data.url;
+        resultWrap.style.display = "";
+        copyBtn.style.display = "";
+      } else {
+        showToast(data && data.error ? data.error : "生成失败", true);
+      }
+    } catch (e) {
+      showToast(e && e.message ? e.message : "生成失败", true);
+    } finally {
+      genBtn.disabled = false;
+    }
+  };
+  copyBtn.onclick = () => {
+    if (!output.value) return;
+    navigator.clipboard?.writeText(output.value).then(
+      () => showToast("已复制到剪贴板。"),
+      () => showToast("复制失败，请手动复制。", true),
+    );
+  };
+  mask.classList.add("open");
+  window.setTimeout(() => input.focus(), 50);
 }
 
 // ============ 邮件提醒 ============

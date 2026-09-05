@@ -192,12 +192,16 @@
             <input class="input" id="log_rule_request_host" placeholder="example.com">
           </div>
           <div class="filter-item">
+            <span class="fi-label">Referer 包含</span>
+            <input class="input" id="log_referer" placeholder="外部站点域名…">
+          </div>
+          <div class="filter-item">
             <span class="fi-label">匹配策略</span>
             <select id="log_match_strategy"><option value="">全部</option><option value="ip_whitelist_match">IP 白名单命中</option><option value="region_match">地区命中</option><option value="default_route">默认路由</option><option value="priority_fallback">优先级回退</option><option value="no_route">未匹配路由</option></select>
           </div>
           <div class="filter-item">
             <span class="fi-label">结果状态</span>
-            <select id="log_result_status"><option value="">全部</option><option value="forwarded">转发成功</option><option value="cache_hit">缓存命中</option><option value="forwarded_client_error">上游 4xx</option><option value="upstream_error">上游异常</option><option value="proxy_error">代理异常</option><option value="no_route">未匹配路由</option></select>
+            <select id="log_result_status"><option value="">全部</option><option value="forwarded">转发成功</option><option value="cache_hit">缓存命中</option><option value="forwarded_client_error">上游 4xx</option><option value="upstream_error">上游异常</option><option value="proxy_error">代理异常</option><option value="no_route">未匹配路由</option><option value="hotlink_blocked">盗链拦截</option><option value="ua_blocked">UA 拦截</option><option value="signature_invalid">签名校验失败</option></select>
           </div>
           <div class="filter-item">
             <span class="fi-label">开始日期</span>
@@ -209,7 +213,7 @@
           </div>
           <div class="filter-item">
             <span class="fi-label">每页</span>
-            <select id="log_page_size"><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>
+            <select id="log_page_size"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>
           </div>
           <button class="btn btn-primary btn-sm" type="submit">查询</button>
           <button class="btn btn-sm" type="button" id="route-log-reset-btn">重置</button>
@@ -222,6 +226,7 @@
           <button class="btn btn-sm btn-danger" id="route-log-delete-selected-btn">删除选中</button>
           <button class="btn btn-sm" id="route-log-delete-all-btn">清空全部</button>
           <span style="flex:1"></span>
+          <button class="btn btn-sm" id="route-log-tools-btn" title="日志保留策略与盗链监控">设置与监控</button>
           <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="log_auto_refresh_enabled"> 自动刷新</label>
           <input class="input inline" id="log_auto_refresh_interval" type="number" min="1" value="5" style="width:70px;padding:5px 8px"> <span class="hint">秒</span>
           <span class="auto-refresh-status" id="log_auto_refresh_status"></span>
@@ -229,15 +234,6 @@
 
         <div id="route-logs-list-body"></div>
         <div class="pagination" id="log-pagination"></div>
-
-        <div class="card" style="margin-top:16px">
-          <div class="panel-head"><div class="panel-title">路由日志保留策略</div><div class="panel-head-actions"><button class="btn btn-sm btn-danger" id="logClearAllBtn">清空全部</button><button class="btn btn-sm" id="cleanupLogs">清理历史日志</button></div></div>
-          <div class="panel-body">
-            <div class="kv"><div class="k">保留天数</div><div class="val"><input class="input inline" type="number" id="log_retention_days" value="30" style="max-width:120px"> 天</div></div>
-            <div id="route-log-settings-status"></div>
-            <button class="btn btn-primary btn-sm" style="margin-top:8px" id="saveRetention">保存策略</button>
-          </div>
-        </div>
       </div>
 
       <div data-panel="app" hidden>
@@ -310,6 +306,51 @@
           <div class="panel-head"><div class="panel-title">请求去重 (request_dedup)</div><span class="pill pill-ok" id="dedupPill">启用</span></div>
           <div class="panel-body" id="dedupBody"></div>
           <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="saveDedup">保存去重配置</button><button class="btn btn-sm" id="clearDedup">清空去重缓存</button></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">单 IP 并发限制 (stream_guard)</div><span class="pill pill-neutral" id="streamGuardPill">未启用</span></div>
+          <div class="panel-body" id="streamGuardBody"><input type="hidden" id="stream_guard_max" value="0"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">签名 URL (signed_url)</div><span class="pill pill-neutral" id="signedUrlPill">未启用</span></div>
+          <div class="panel-body" id="signedUrlBody"><input type="hidden" id="signed_url_enabled" value="0"><input type="hidden" id="signed_url_ttl_seconds" value="3600"></div>
+          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="editSignedUrlBtn">编辑配置</button><button class="btn btn-sm" id="openSignedUrlToolBtn">生成签名链接</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 路由日志：设置与盗链监控弹窗（自日志页内嵌卡片迁移） -->
+<div class="modal-mask" id="logToolsMask">
+  <div class="modal" style="width:min(860px,100%)">
+    <div class="modal-head"><div><div class="modal-title">日志设置与盗链监控</div><div class="modal-sub">路由日志保留策略 · 外部 Referer 监控（近 24h）</div></div><button class="icon-btn" id="logToolsClose">✕</button></div>
+    <div class="modal-body">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">路由日志保留策略</div><div class="panel-head-actions"><button class="btn btn-sm btn-danger" id="logClearAllBtn">清空全部</button><button class="btn btn-sm" id="cleanupLogs">清理历史日志</button></div></div>
+        <div class="panel-body">
+          <div class="kv"><div class="k">保留天数</div><div class="val"><input class="input inline" type="number" id="log_retention_days" value="30" style="max-width:120px"> 天</div></div>
+          <div id="route-log-settings-status"></div>
+          <button class="btn btn-primary btn-sm" style="margin-top:8px" id="saveRetention">保存策略</button>
+        </div>
+      </div>
+      <div class="card" id="hotlink-monitor-card">
+        <div class="panel-head">
+          <div class="panel-title">盗链监控（近 24h）</div>
+          <div class="panel-head-actions"><button class="btn btn-sm" id="hotlink-stats-refresh-btn">刷新</button></div>
+        </div>
+        <div class="panel-body">
+          <div class="grid cols-2">
+            <div>
+              <div class="hotlink-subtitle">外部 Referer 域名 TOP10 <span class="hint" id="hotlink-external-total"></span></div>
+              <div id="hotlink-top-referrers"></div>
+            </div>
+            <div>
+              <div class="hotlink-subtitle">单 IP 流量 TOP10</div>
+              <div id="hotlink-top-ips"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

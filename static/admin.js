@@ -25,13 +25,15 @@ import {
   renderGeoSources, openGeoSourceModal, persistGeoSettings,
   openGeoOnlineSettings, openGeoOfflineSettings, openGeoSourceTest, openOfflineTest,
   syncOffline, rollbackOffline, clearGeoCache,
-  loadRouteLogs, refreshRouteLogModule, saveLogRetention, cleanupLogs,
+  loadRouteLogs, refreshRouteLogModule, loadHotlinkStats, saveLogRetention, cleanupLogs,
   getAutoRefreshConfig, saveAutoRefreshConfig, startAutoRefresh, stopAutoRefresh,
   loadAppLogContent, startAppLogAutoRefresh, stopAppLogAutoRefresh,
   refreshAppLogModule, cleanupAppLogFiles, loadLoggingSettings, saveDiskLogRetention,
   loadIpCacheSettings, loadIpCacheStats, openIpCacheSettings, clearIpCache,
   loadDedupSettings, loadDedupStats, openDedupSettings, clearDedupCache,
   loadAutoBanSettings, loadAutoBanStats, openAutoBanSettings,
+  loadStreamGuardSettings, openStreamGuardSettings,
+  loadSignedUrlSettings, openSignedUrlSettings, openSignedUrlTool,
   loadEmailSettings, openEmailSettings, testEmail,
   loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
   banIpFromLog, unbanIp, clearBans,
@@ -199,8 +201,17 @@ function bindRouting() {
 
 function bindSecurity() {
   $("manualBanBtn")?.addEventListener("click", () => openBanModal({ mode: "add" }));
+  // 自动封禁策略卡：可疑 IP 行的快捷封禁（预填 IP）
+  $("autoBanStatsBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action='ban-tracked-ip']");
+    if (!btn) return;
+    openBanModal({ ip: btn.dataset.ip, reason: "从可疑 IP 列表封禁", mode: "from-log" });
+  });
   $("clearBans")?.addEventListener("click", () => clearBans());
   $("editAutoBanBtn")?.addEventListener("click", () => openAutoBanSettings());
+  $("editStreamGuardBtn")?.addEventListener("click", () => openStreamGuardSettings());
+  $("editSignedUrlBtn")?.addEventListener("click", () => openSignedUrlSettings());
+  $("openSignedUrlToolBtn")?.addEventListener("click", () => openSignedUrlTool());
 
   // 封禁表事件委托
   $("banBody")?.addEventListener("click", (e) => {
@@ -314,6 +325,7 @@ function bindLogs() {
     setValue("log_rule_request_host", "");
     setValue("log_match_strategy", "");
     setValue("log_result_status", "");
+    setValue("log_referer", "");
     setValue("log_date_from", "");
     setValue("log_date_to", "");
     state.logCurrentPage = 1;
@@ -384,6 +396,31 @@ function bindLogs() {
     }
   });
 
+  // 日志设置与盗链监控弹窗（原日志页内嵌卡片迁移至此，每次打开即刷新监控数据）
+  $("route-log-tools-btn")?.addEventListener("click", () => {
+    $("logToolsMask")?.classList.add("open");
+    loadHotlinkStats().catch((e) => showToast(e.message, true));
+  });
+  $("logToolsClose")?.addEventListener("click", () => $("logToolsMask")?.classList.remove("open"));
+  $("logToolsMask")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.classList.remove("open");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("logToolsMask")?.classList.contains("open")) $("logToolsMask").classList.remove("open");
+  });
+
+  // 盗链监控看板：刷新 + 外部 Referer 行的快捷封禁（复用日志页的封禁弹窗）
+  $("hotlink-stats-refresh-btn")?.addEventListener("click", () => {
+    loadHotlinkStats().catch((e) => showToast(e.message, true));
+  });
+  $("hotlink-monitor-card")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action='ban-ip-from-log']");
+    if (!btn) return;
+    const ip = btn.dataset.ip;
+    if (!ip || ip === "-") { showToast("该行没有可封禁的 IP 地址", true); return; }
+    banIpFromLog(ip, "");
+  });
+
   // 日志自动刷新
   $("log_auto_refresh_enabled")?.addEventListener("change", () => {
     if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
@@ -395,7 +432,7 @@ function bindLogs() {
     if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
   });
   $("log_page_size")?.addEventListener("change", () => {
-    const size = parseInt(getValue("log_page_size") || "50", 10) || 50;
+    const size = parseInt(getValue("log_page_size") || "10", 10) || 10;
     state.logPageSize = Math.max(1, size);
     state.logCurrentPage = 1;
     localStorage.setItem("log_page_size", String(state.logPageSize));
@@ -752,8 +789,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll("select").forEach((s) => upgradeSelect(s));
   renderAllChips();
 
-  // 恢复每页条数
-  const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "50", 10) || 50;
+  // 恢复每页条数（未保存过时默认 10）
+  const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "10", 10) || 10;
   state.logPageSize = savedLogPageSize;
   setValue("log_page_size", String(savedLogPageSize));
   const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "20", 10) || 20;

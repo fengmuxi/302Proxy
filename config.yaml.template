@@ -1,3 +1,6 @@
+# 启动信息以本配置文件为最高优先级：server/ssl/logging 段中**显式写出**的键
+# 会在每次启动时覆盖数据库 system_settings 并回写；未写出的键仍以数据库为准。
+# 优先级：CLI -p/--host > 本文件 > 后台/数据库。
 server:
   host: "0.0.0.0"
   port: 18686
@@ -85,6 +88,10 @@ trust_forward_headers: true
 verify_upstream_ssl: true
 # 是否信任 X-Real-IP / CF-Connecting-IP（默认关闭；仅当前置代理确会覆盖这些头时开启）
 trust_upstream_ip_headers: false
+# 上游连接强制 IPv4（默认开启）。上游域名带 AAAA 记录而本机 IPv6 出口不通时，
+# 每次新建连接都会先卡在 IPv6 尝试再回退（可达数秒），是缓存未命中时起播慢的
+# 常见原因；默认强制走 IPv4 规避。如需启用 IPv6（上游仅 IPv6 或本机 IPv6 更快），改为 false。
+upstream_ipv4_only: true
 # 可信代理网段：仅直连来源位于这些网段时才解析 X-Forwarded-For，防止伪造
 trusted_proxy_networks:
   - "127.0.0.1/32"

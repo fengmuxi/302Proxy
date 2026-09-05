@@ -20,6 +20,9 @@ class IpRequestStats:
     timestamps: List[float] = field(default_factory=list)
     error_404_count: int = 0
     last_404_time: float = 0.0
+    # 流量封禁（HOTLINK_PROTECTION.md 阶段 3.3）：窗口内累计传输字节
+    bytes_total: int = 0
+    bytes_updated_at: float = 0.0
 
 
 class AutoBanMonitor:
@@ -85,6 +88,30 @@ class AutoBanMonitor:
 
         # 判定与告警放到锁外执行，避免持锁期间 await 邮件发送把所有请求串行化
         await self._check_and_ban(ip, stats, now)
+
+    async def record_bytes(self, ip: str, byte_count: int) -> None:
+        """窗口内累计单 IP 传输字节，超过 max_bytes 自动封禁（阶段 3.3）。
+
+        与 record_request 共享窗口/白名单/封禁回调；未启用、未设阈值、
+        白名单命中或 byte_count=0 时直接短路，几乎零开销。
+        """
+        if not byte_count or not self.config.enabled or self.config.max_bytes <= 0 or self.is_whitelisted(ip):
+            return
+        async with self._lock:
+            now = time.time()
+            stats = self._stats[ip]
+            # 窗口滑动：距上次字节累计已超过统计窗口则重新计数
+            if now - stats.bytes_updated_at > self.config.window_seconds:
+                stats.bytes_total = 0
+            stats.bytes_total += byte_count
+            stats.bytes_updated_at = now
+            exceeded = stats.bytes_total >= self.config.max_bytes
+        if exceeded:
+            total_mb = stats.bytes_total / 1048576
+            await self._ban_ip(
+                ip,
+                f"流量超限: {total_mb:.1f}MB/{self.config.window_seconds}秒（阈值 {self.config.max_bytes / 1048576:.0f}MB）",
+            )
 
     async def _check_and_ban(self, ip: str, stats: IpRequestStats, now: float) -> None:
         window_start = now - self.config.window_seconds
@@ -210,6 +237,7 @@ class AutoBanMonitor:
                 "ban_duration_seconds": self.config.ban_duration_seconds,
                 "max_404": self.config.max_404,
                 "auto_ban_on_404": self.config.auto_ban_on_404,
+                "max_bytes": self.config.max_bytes,
             },
         }
 
@@ -223,6 +251,7 @@ class AutoBanMonitor:
                 "ip": ip,
                 "request_count": len(recent),
                 "error_404_count": stats.error_404_count,
+                "bytes_total": stats.bytes_total,
             })
         result.sort(key=lambda x: x["request_count"], reverse=True)
         return result

@@ -188,6 +188,9 @@ export const RESULT_STATUS_LABELS = {
   upstream_error: "上游异常",
   proxy_error: "代理异常",
   no_route: "未匹配路由",
+  hotlink_blocked: "盗链拦截",
+  ua_blocked: "UA 拦截",
+  signature_invalid: "签名校验失败",
 };
 
 export const CACHE_STATUS_LABELS = {

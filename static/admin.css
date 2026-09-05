@@ -195,6 +195,19 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text-2);font-size:13px}
 .kv .val{word-break:break-all}
+/* 自动封禁策略卡：正在追踪的可疑 IP 列表 */
+.tracked-box{margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
+.tracked-title{font-weight:600;font-size:13px;margin-bottom:4px}
+.tracked-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px dashed var(--border)}
+.tracked-row:last-child{border-bottom:none}
+.tracked-ip{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tracked-meta{flex:1;white-space:nowrap}
+/* 盗链监控看板（HOTLINK_PROTECTION.md 阶段 1） */
+.hotlink-subtitle{font-weight:600;font-size:13px;margin-bottom:8px}
+.hotlink-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed var(--border)}
+.hotlink-row:last-child{border-bottom:none}
+.hotlink-row-main{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hotlink-row-side{display:flex;align-items:center;gap:8px;flex-shrink:0;word-break:keep-all}
 .log-retention-box{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
 .log-retention-box .retention-title{display:block;font-size:13px;color:var(--text-2);margin-bottom:8px}
 .log-retention-box .retention-row{display:flex;align-items:center;gap:8px}
@@ -256,6 +269,7 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .form-field label{display:block;font-size:12px;color:var(--text-2);margin-bottom:5px}
 .form-field label .req{color:var(--danger);margin-left:2px}
 .form-field .hint{font-size:11px;color:var(--text-3);margin-top:4px;line-height:1.5}
+.form-note{background:rgba(127,127,127,.08);border-left:3px solid var(--accent,#5b8dd6);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text-2);line-height:1.8;white-space:pre-line}
 .form-field .err{color:var(--danger-text);font-size:11px;margin-top:4px}
 .form-field textarea.input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
 .modal .switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 0}
