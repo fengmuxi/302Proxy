@@ -554,7 +554,10 @@ const PAGE_INDEX = [
   { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 security ban" },
   { page: "geo", title: "IP 定位", kw: "定位 地理 离线库 mmdb 在线源 geo" },
   { page: "logs", title: "日志与审计", kw: "日志 审计 请求日志 应用日志 logs log" },
-  { page: "system", title: "系统设置", kw: "系统 设置 备份 邮件 缓存 去重 恢复 system" },
+  { page: "system", title: "系统设置", kw: "系统 设置 缓存 去重 并发 system" },
+  { page: "signing", title: "加签防护", kw: "签名 加签 防盗链 签名链接 signed url redirect" },
+  { page: "backup", title: "备份与恢复", kw: "备份 恢复 快照 回滚 下载 backup restore" },
+  { page: "email", title: "邮件提醒", kw: "邮件 提醒 通知 smtp 告警 发件 email mail" },
 ];
 
 const COMMAND_INDEX = [
@@ -565,11 +568,11 @@ const COMMAND_INDEX = [
   { title: "在线定位源配置", sub: "编辑在线定位源", page: "geo", action: "geo-online-settings" },
   { title: "离线库配置", sub: "编辑离线 MMDB 配置", page: "geo", action: "geo-offline-settings" },
   { title: "清空定位缓存", sub: "清除在线定位结果缓存", page: "geo", action: "clear-geo-cache" },
-  { title: "编辑邮件配置", sub: "配置 SMTP 邮件提醒", page: "system", action: "email-settings" },
-  { title: "发送测试邮件", sub: "验证邮件提醒配置", page: "system", action: "test-email" },
+  { title: "编辑邮件配置", sub: "配置 SMTP 邮件提醒", page: "email", action: "email-settings" },
+  { title: "发送测试邮件", sub: "验证邮件提醒配置", page: "email", action: "test-email" },
   { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "system", action: "ip-cache-settings" },
   { title: "请求去重配置", sub: "编辑请求去重参数", page: "system", action: "dedup-settings" },
-  { title: "创建备份", sub: "生成一份数据快照", page: "system", action: "create-backup" },
+  { title: "创建备份", sub: "生成一份数据快照", page: "backup", action: "create-backup" },
 ];
 
 function searchIndex(q) {
@@ -623,7 +626,7 @@ function searchIndex(q) {
   // 备份文件
   (state.backups || []).forEach((b) => {
     const name = b.filename || b.name || "";
-    if (name.toLowerCase().includes(q)) results.push({ type: "备份", title: name, sub: "数据备份", page: "system", action: "goto" });
+    if (name.toLowerCase().includes(q)) results.push({ type: "备份", title: name, sub: "数据备份", page: "backup", action: "goto" });
   });
 
   // 应用日志文件
@@ -670,11 +673,11 @@ function applySearchResult(r) {
       activatePage("geo");
       confirmAsync("清空定位缓存", "确认清空所有在线定位结果缓存吗？", () => clearGeoCache());
       break;
-    case "email-settings": activatePage("system"); openEmailSettings(); break;
-    case "test-email": activatePage("system"); testEmail(); break;
+    case "email-settings": activatePage("email"); openEmailSettings(); break;
+    case "test-email": activatePage("email"); testEmail(); break;
     case "ip-cache-settings": activatePage("system"); openIpCacheSettings(); break;
     case "dedup-settings": activatePage("system"); openDedupSettings(); break;
-    case "create-backup": activatePage("system"); createBackup(); break;
+    case "create-backup": activatePage("backup"); createBackup(); break;
   }
 }
 

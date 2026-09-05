@@ -22,6 +22,10 @@
       <div class="nav-item" data-page="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>安全与封禁</span><span class="nav-count" id="navCountSecurity">0</span></div>
       <div class="nav-item" data-page="geo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>IP 定位</span></div>
       <div class="nav-item" data-page="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>日志与审计</span></div>
+      <div class="nav-group-label">系统运维</div>
+      <div class="nav-item" data-page="backup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg><span>备份与恢复</span><span class="nav-count" id="navCountBackup">0</span></div>
+      <div class="nav-item" data-page="email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>邮件提醒</span></div>
+      <div class="nav-item" data-page="signing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg><span>加签防护</span></div>
       <div class="nav-item" data-page="system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>系统设置</span></div>
     </nav>
     <div class="side-foot"><div class="avatar" id="sideAvatar">A</div><div style="font-size:12px"><div style="font-weight:500" id="sideUsername">admin</div><div style="color:var(--text-3)"><span class="side-status"></span>系统运行中</div></div><button class="side-logout" id="auth-logout-btn" hidden>退出</button></div>
@@ -277,23 +281,8 @@
 
     <!-- ===== System ===== -->
     <div class="page" id="page-system" hidden>
-      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">数据备份与恢复、邮件提醒、请求结果缓存、请求去重与账户。</p></div></div>
+      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">请求结果缓存、请求去重、单 IP 并发限制等运行时配置。备份恢复、邮件提醒与加签防护已独立为单独菜单。</p></div></div>
       <div class="grid cols-2">
-        <div class="card">
-          <div class="panel-head"><div class="panel-title">备份与恢复</div><div class="panel-head-actions"><label class="btn btn-sm" style="cursor:pointer">上传并恢复<input type="file" id="backupFile" accept=".db" hidden></label><button class="btn btn-sm" id="backup-refresh-btn">刷新</button><button class="btn btn-sm btn-primary" id="createBackupBtn">创建备份</button></div></div>
-          <div class="panel-body">
-            <div class="table-wrap no-border">
-              <table style="min-width:0"><thead><tr><th>文件</th><th>大小</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
-                <tbody id="backupBody"></tbody></table>
-            </div>
-            <div class="hint" id="restore-mode-hint" style="margin-top:10px"></div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="panel-head"><div class="panel-title">邮件提醒</div><span class="pill pill-neutral" id="emailStatusPill">未配置</span></div>
-          <div class="panel-body" id="emailSummaryBody"></div>
-          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-sm" id="editEmailBtn">编辑配置</button><button class="btn btn-primary btn-sm" id="testEmailBtn">发送测试邮件</button></div>
-        </div>
         <div class="card">
           <div class="panel-head"><div class="panel-title">请求结果缓存 (ip_result_cache)</div><div class="panel-head-actions"><span class="pill pill-ok" id="ipCachePill">启用</span><button class="btn btn-sm" id="editIpCacheBtn">编辑</button></div></div>
           <div class="panel-body" id="ipCacheBody">
@@ -314,12 +303,24 @@
           <div class="panel-body" id="streamGuardBody"></div>
           <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
         </div>
+      </div>
+    </div>
+
+    <!-- ===== Signing ===== -->
+    <div class="page" id="page-signing" hidden>
+      <div class="page-head">
+        <div><h1 class="page-title">加签防护</h1><p class="page-desc">签名 URL（入口校验）与 302 加签改写（出口改写）：签发、验证与防盗链闭环的统一维护入口。</p></div>
+        <div class="page-actions">
+          <button class="btn btn-sm btn-primary" id="openSignedUrlToolBtn">生成签名链接</button>
+        </div>
+      </div>
+      <div class="grid cols-2">
         <div class="card">
           <input type="hidden" id="signed_url_enabled" value="0">
           <input type="hidden" id="signed_url_ttl_seconds" value="3600">
           <div class="panel-head"><div class="panel-title">签名 URL (signed_url)</div><span class="pill pill-neutral" id="signedUrlPill">未启用</span></div>
           <div class="panel-body" id="signedUrlBody"></div>
-          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="editSignedUrlBtn">编辑配置</button><button class="btn btn-sm" id="openSignedUrlToolBtn">生成签名链接</button></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editSignedUrlBtn">编辑配置</button></div>
         </div>
         <div class="card">
           <input type="hidden" id="redirect_signing_enabled" value="0">
@@ -331,7 +332,95 @@
           <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editRedirectSigningBtn">编辑配置</button></div>
         </div>
       </div>
+      <div class="grid" style="margin-top:16px">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">两者如何配合</div></div>
+          <div class="panel-body">
+            <div class="feature-applies"><b>出口改写（signed_redirect）负责「签发」：</b>上游 302 的裸 CDN 地址被改写为本系统签名链接，客户端只能拿到 <code>{base_url}/_signed/{资源id}?_st&amp;_sig</code>。</div>
+            <div class="feature-applies"><b>入口校验（signed_url）负责「验证」：</b>请求回到本系统时校验 _st/_sig 与时效，签名无效或过期直接 403。</div>
+            <div class="feature-applies"><b>推荐组合：</b>两者同时启用构成完整闭环 —— 客户端全程只见系统签名链接，无法直接访问上游；仅开启校验而链路拿不到签名链接会误拦正常用户。</div>
+            <div class="feature-applies warn"><b>注意：</b>两者相互独立，任一关闭不影响另一个；密钥共用 signed_url.secret，轮换密钥会同时作废两者的存量链接。</div>
+          </div>
+        </div>
+      </div>
     </div>
+
+    <!-- ===== Backup ===== -->
+    <div class="page" id="page-backup" hidden>
+    <div class="page-head">
+      <div><h1 class="page-title">备份与恢复</h1><p class="page-desc">管理系统配置数据快照：创建、下载、恢复与删除备份文件。</p></div>
+      <div class="page-actions">
+        <label class="btn btn-sm" style="cursor:pointer;margin:0">上传并恢复<input type="file" id="backupFile" accept=".db" hidden></label>
+        <button class="btn btn-sm" id="backup-refresh-btn">刷新</button>
+        <button class="btn btn-sm btn-primary" id="createBackupBtn">创建备份</button>
+      </div>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--brand)"></span>备份数量</div><div class="kpi-value" id="backupCountKpi">—</div><div class="kpi-delta">服务端快照总数</div></div>
+      <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--info)"></span>占用空间</div><div class="kpi-value" id="backupSizeKpi">—</div><div class="kpi-delta">全部备份文件合计</div></div>
+      <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--ok)"></span>最近备份</div><div class="kpi-value" id="backupLatestKpi" style="font-size:15px;font-weight:500">—</div><div class="kpi-delta">最新快照创建时间</div></div>
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">备份文件</div><div class="panel-head-actions"><span class="pill pill-neutral" id="backupCountPill">0 个</span></div></div>
+        <div class="panel-body">
+          <div class="table-wrap no-border">
+            <table style="min-width:0"><thead><tr><th>文件</th><th>大小</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody id="backupBody"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">恢复模式说明</div></div>
+        <div class="panel-body">
+          <div class="feature-applies"><b>覆盖模式：</b>用备份文件整体替换当前数据库，恢复后当前所有配置回到备份时点，<b>期间的新增改动会丢失</b>。</div>
+          <div class="feature-applies"><b>合并模式：</b>保留当前数据库，仅把备份中的记录按主键合并进来，冲突时以备份为准，适合只想找回部分配置。</div>
+          <div class="feature-applies warn"><b>注意：</b>恢复操作会触发服务重载，进行中的请求可能中断，请在低峰期执行。</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">使用建议</div></div>
+        <div class="panel-body">
+          <div class="feature-applies"><b>定期快照：</b>修改路由规则、地区策略、签名配置前先点「创建备份」，出问题可一键回滚。</div>
+          <div class="feature-applies"><b>异地留存：</b>重要备份点「下载」保存到本地，服务端磁盘故障时不至于全部丢失。</div>
+          <div class="feature-applies"><b>上传恢复：</b>支持上传本地 <code>.db</code> 文件直接恢复，用于迁移服务器或回滚到历史版本。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Email ===== -->
+  <div class="page" id="page-email" hidden>
+    <div class="page-head">
+      <div><h1 class="page-title">邮件提醒</h1><p class="page-desc">配置 SMTP 邮件通道与告警阈值，异常流量、自动封禁等事件发生时通知管理员。</p></div>
+      <div class="page-actions">
+        <button class="btn btn-sm" id="editEmailBtn">编辑配置</button>
+        <button class="btn btn-sm btn-primary" id="testEmailBtn">发送测试邮件</button>
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">SMTP 通道</div><span class="pill pill-neutral" id="emailStatusPill">未配置</span></div>
+        <div class="panel-body" id="emailSummaryBody"></div>
+      </div>
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">告警阈值</div><span class="pill pill-neutral" id="emailAlertPill">—</span></div>
+        <div class="panel-body" id="emailAlertBody"></div>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">触发场景说明</div></div>
+        <div class="panel-body">
+          <div class="feature-applies"><b>异常流量：</b>单个 IP 在「告警窗口」内请求数超过阈值或 404 数超过阈值时触发，触发后进入冷却期不再重复发送。</div>
+          <div class="feature-applies"><b>自动封禁：</b>需在「安全与封禁 → 自动封禁策略」中勾选「封禁时发送邮件提醒」，封禁动作发生时通知。</div>
+          <div class="feature-applies warn"><b>注意：</b>测试邮件使用当前已保存的配置；若刚修改尚未保存，请先保存再测试。</div>
+        </div>
+      </div>
+    </div>
+  </div>
   </div>
 </div>
 

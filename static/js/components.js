@@ -377,12 +377,28 @@ export function upgradeSelect(sel) {
   const placePop = () => {
     const r = trig.getBoundingClientRect();
     pop.style.minWidth = r.width + "px";
-    const ph = pop.offsetHeight;
-    const below = r.bottom + 6 + ph <= window.innerHeight - 8;
-    let top = below ? r.bottom + 6 : Math.max(8, r.top - 6 - ph);
-    let left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8);
-    pop.style.top = top + "px";
-    pop.style.left = Math.max(8, left) + "px";
+    // 临时清掉 max-height 读 scrollHeight（offsetHeight 受 max-height 钳制）
+    const saved = pop.style.maxHeight;
+    pop.style.maxHeight = "none";
+    const natural = pop.scrollHeight;
+    pop.style.maxHeight = saved;
+    // 按视口可用空间动态设上限：能完整放下则撑开自然高度，否则滚动
+    // cap 放 480 留够 11~12 项 + padding，避免最后一行被行高舍入裁掉
+    const margin = 8;
+    const gap = 6;
+    const cap = 480;
+    const spaceBelow = Math.max(0, window.innerHeight - r.bottom - margin - gap);
+    const spaceAbove = Math.max(0, r.top - margin - gap);
+    const fitBelow = natural + gap <= spaceBelow;
+    const fitAbove = natural + gap <= spaceAbove;
+    if (fitBelow || (!fitAbove && spaceBelow >= spaceAbove)) {
+      pop.style.top = r.bottom + gap + "px";
+      pop.style.maxHeight = Math.min(cap, spaceBelow) + "px";
+    } else {
+      pop.style.top = Math.max(margin, r.top - gap - Math.min(cap, spaceAbove)) + "px";
+      pop.style.maxHeight = Math.min(cap, spaceAbove) + "px";
+    }
+    pop.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - pop.offsetWidth - margin)) + "px";
   };
   trig.addEventListener("click", (e) => {
     e.stopPropagation();

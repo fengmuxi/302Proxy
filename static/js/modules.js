@@ -23,9 +23,23 @@ import {
 
 const esc = (v) => escapeHtml(v == null ? "" : String(v));
 
+// 秒数 → 易读时长（小于 1 分钟走「秒」、小于 1 小时走「分秒」、更大走「小时分钟」）
+function formatTtl(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  if (sec < 60) return `${sec} 秒`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return s ? `${m} 分 ${s} 秒` : `${m} 分钟`;
+  }
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+}
+
 // ============ 页面激活 / 导航 ============
 
-const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system"];
+const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system", "backup", "email", "signing"];
 
 export function setActivePage(page) {
   state.activeModule = page;
@@ -39,6 +53,7 @@ export function setActivePage(page) {
   const labels = {
     overview: "系统概览", routing: "路由配置", security: "安全与封禁",
     geo: "IP 定位", logs: "日志与审计", system: "系统设置",
+    backup: "备份与恢复", email: "邮件提醒", signing: "加签防护",
   };
   if (crumb) crumb.innerHTML = `${esc(labels[page] || "")} / <b>${esc(labels[page] || "")}</b>`;
   try {
@@ -85,13 +100,19 @@ export function activatePage(page) {
       loadIpCacheStats();
       loadDedupSettings();
       loadDedupStats();
-      loadEmailSettings();
-      loadBackups();
-      // 系统页的三张功能卡（stream_guard / signed_url / signed_redirect），
-      // 此前误挂在 security 分支导致刷新后不加载、显示回默认「未启用」
       loadStreamGuardSettings();
+      break;
+    case "signing":
+      // 签名 URL / 302 加签改写两张功能卡已独立为「加签防护」页
+      // （此前误挂在 security 分支导致刷新后不加载的教训：页面激活分支必须与卡片所在页一致）
       loadSignedUrlSettings();
       loadRedirectSigningSettings();
+      break;
+    case "backup":
+      loadBackups();
+      break;
+    case "email":
+      loadEmailSettings();
       break;
   }
 }
@@ -128,6 +149,7 @@ export async function loadDashboard() {
   state.bannedIps = bansData.items || [];
   state.logFiles = logsData.items || [];
   state.backups = backupsData.items || [];
+  renderBackupStats(); // 启动时即更新「备份与恢复」侧边栏计数
   state.routeLogSettings = data.route_log_settings || null;
 
   const groups = data.route_groups || [];
@@ -1368,6 +1390,10 @@ export function renderRouteLogs(payload) {
       ? `<button class="btn btn-sm" data-action="unban-ip-from-log" data-ip="${esc(banIp)}">解禁IP</button>`
       : `<button class="btn btn-sm btn-danger" data-action="ban-ip-from-log" data-ip="${esc(banIp)}" data-path-prefix="${esc(log.path_prefix || "")}">封禁IP</button>`;
     const cacheStatusInfo = formatCacheStatus(log.cache_status);
+    // 请求链路（迁移 025）：链路节点随日志落库；含「签名重入」即为 /_signed 端点
+    // 处理的请求（A 换302直连 / B 内部代理穿流），与普通代理请求一眼区分。
+    const chainText = String(log.chain || "");
+    const isSignedReentry = chainText.includes("签名重入");
     // 结果类型徽章：3xx 或有 302地址 = 重定向结果（规则不跟随/缓存命中直接回 302）；
     // 有上游状态且非 3xx = 代理转发（跟随重定向后回传内容）
     const upstream = Number(log.upstream_status || 0);
@@ -1392,7 +1418,9 @@ export function renderRouteLogs(payload) {
             <div class="route-log-field"><span class="route-log-field-label">地区</span><div class="route-log-field-value"><strong>${esc(log.geo_summary || "-")}</strong><span class="hint">命中: ${esc(log.matched_region || "-")}</span><span class="hint">源: ${esc(log.geo_source || "-")}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">匹配</span><div class="route-log-field-value"><strong>${esc(formatMatchStrategy(log.match_strategy))}</strong><span class="hint">${esc(formatMatchDetail(log.match_detail))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.redirect_location || "")}">${esc(log.redirect_location || "-")}</strong></div></div>
-            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${resultKindBadge}<strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${isSignedReentry ? '<span class="pill pill-info">签名重入</span>' : ""}${resultKindBadge}<strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">链路</span><div class="route-log-field-value">${chainText ? `<span class="route-log-chain" title="${esc(chainText)}">${esc(chainText)}</span>` : "-"}</div></div>
+            ${log.error_message ? `<div class="route-log-field"><span class="route-log-field-label">错误</span><div class="route-log-field-value"><span class="route-log-error" title="${esc(log.error_message)}">${esc(log.error_message)}</span></div></div>` : ""}
             <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">Referer</span><div class="route-log-field-value">${renderRefererField(log)}</div></div>
             <div class="route-log-field"><span class="route-log-field-label">UA</span><div class="route-log-field-value"><span title="${esc(log.user_agent || "")}">${esc((log.user_agent || "-").slice(0, 60))}</span><span class="hint">${log.bytes_transferred ? esc(formatBytes(Number(log.bytes_transferred) || 0)) : ""}</span></div></div>
@@ -2033,10 +2061,22 @@ export async function loadSignedUrlSettings() {
       pill.textContent = data.enabled ? "已启用" : "未启用";
     }
     if (body) {
-      body.innerHTML = `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "启用（未签名请求将被拒绝）" : "停用（不校验签名）"}</div></div>` +
-        `<div class="kv"><div class="k">链接有效期</div><div class="val">${esc(String(data.ttl_seconds || 3600))} 秒</div></div>` +
-        `<div class="kv"><div class="k">签名密钥</div><div class="val">${data.has_secret ? "已生成" : '<span class="text-warn">未生成</span>'}</div></div>` +
-        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：启用后所有代理请求必须携带有效签名（_st/_sig）否则 403。适用前提是播放链路能拿到带签名的链接（302 签发层）；固定 URL 直连的播放器开启后会被误拦，点「编辑配置」查看完整说明与使用流程。</div>`;
+      const ttlSec = data.ttl_seconds || 3600;
+      const ttlHuman = formatTtl(ttlSec);
+      body.innerHTML =
+        // 顶部色带：明确这是「入口校验」—— 播放器→代理方向
+        `<div class="feature-banner in"><span class="dir">↓ 入口校验</span><span>对进入代理的请求做签名校验</span></div>` +
+        `<div class="feature-purpose"><b>做什么：</b>所有代理请求必须携带有效签名 <code>?_st=…&amp;_sig=…</code>，否则直接返回 403，不放行到上游。</div>` +
+        // 流向示意：把校验环节高亮出来
+        `<div class="feature-flow"><span>客户端</span><span class="arrow">→</span><span class="step in">验签</span><span class="arrow">→</span><span>代理转发</span><span class="arrow">→</span><span>上游</span></div>` +
+        // 适用与禁用提示
+        `<div class="feature-applies"><b>适用：</b>播放链路能拿到带签名的链接（需配合「302 加签改写」等签发层）。</div>` +
+        `<div class="feature-applies warn"><b>慎用：</b>固定 URL 直连代理的播放器开启后会被误拦 —— 此功能不签发链接，只校验。</div>` +
+        // 当前配置
+        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 未签名请求将被拒绝' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不校验签名（行为与旧版一致）'}</div></div>` +
+        `<div class="kv"><div class="k">链接有效期</div><div class="val">${esc(ttlHuman)}（${ttlSec} 秒）</div></div>` +
+        `<div class="kv"><div class="k">签名密钥</div><div class="val">${data.has_secret ? "已生成（HMAC-SHA256，存于数据库）" : '<span class="text-warn">未生成</span>'}</div></div>` +
+        `<div class="feature-desc">完整说明与使用流程见编辑弹窗「开启前必读」与「生成签名链接」弹窗。</div>`;
     }
   } catch (_) {}
 }
@@ -2150,12 +2190,26 @@ export async function loadRedirectSigningSettings() {
       pill.textContent = data.enabled ? "已启用" : "未启用";
     }
     if (body) {
+      const ttlSec = data.ttl_seconds || 21600;
+      const ttlHuman = formatTtl(ttlSec);
+      const baseUrl = data.base_url || "";
       body.innerHTML =
-        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "启用（对外 302 将改写为系统签名链接）" : "停用（原样透传上游 302）"}</div></div>` +
-        `<div class="kv"><div class="k">签名链接有效期</div><div class="val">${esc(String(data.ttl_seconds || 21600))} 秒（${Math.round((data.ttl_seconds || 21600) / 3600)} 小时）</div></div>` +
-        `<div class="kv"><div class="k">IP 绑定</div><div class="val">${data.bind_ip ? "开启（领取与使用必须同 IP）" : "关闭（不校验 IP）"}</div></div>` +
-        `<div class="kv"><div class="k">对外基础地址</div><div class="val">${data.base_url ? esc(data.base_url) : '<span class="text-warn">未配置（回退请求 Host）</span>'}</div></div>` +
-        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：把返回给客户端的 302 跳转地址改写为本系统固定签名链接（/{base_url}/_signed/{资源id}?_st&_sig），客户端永远拿不到裸的上游/CDN 地址，链接带时效且与领取 IP 绑定，转分享即失效。适用于「固定 URL 直连代理」的盗链场景。点「编辑配置」查看完整说明。</div>`;
+        // 顶部色带：明确这是「出口改写」—— 代理→客户端方向
+        `<div class="feature-banner out"><span class="dir">↑ 出口改写</span><span>把返回客户端的跳转改写为本系统签名链接（跟随型/本地代理规则同样生效）</span></div>` +
+        `<div class="feature-purpose"><b>做什么：</b>开启后播放器的<b>首次代理请求一律改写</b>为 <code>{base_url}/_signed/{资源id}?_st&amp;_sig</code>，客户端始终只见系统签名链接——无论规则是否「跟随上游」。</div>` +
+        // 流向示意：A / B 双模式分叉
+        `<div class="feature-flow"><span>客户端</span><span class="arrow">→</span><span>代理</span><span class="arrow">→</span><span>上游</span><span class="arrow">→</span><span class="step out">改写签名</span><span class="arrow">→</span><span>客户端领取</span></div>` +
+        `<div class="feature-applies"><b>A 不跟随型规则：</b>领取时换回签发时缓存的上游 302，客户端直连 CDN（媒体不过本机）。</div>` +
+        `<div class="feature-applies"><b>B 跟随型/本地代理：</b>领取后由本系统凭签发快照内部代理穿流（媒体过本机）。</div>` +
+        // 适用与禁用提示
+        `<div class="feature-applies"><b>适用：</b>隐藏上游/CDN 地址，阻断「固定 URL 直连代理」的盗链与抓包；播放器重放原始地址或命中结果缓存时同样重新签发，无法绕过签名。</div>` +
+        `<div class="feature-applies warn"><b>注意：</b>需正确填写「对外基础地址」，否则回退到请求 Host（经反代时可能是内网地址）。IP 绑定开启后手机切网会换 IP，续播需重新取地址；链接中 _ip 为盲化令牌（密钥哈希），不含明文客户端 IP。</div>` +
+        // 当前配置
+        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 首次请求一律改写为签名链接（A 领取换302直连 / B 领取后本机穿流）' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不改写（不跟随型原样透传上游 302，跟随型内部跟随直出，行为与旧版一致）'}</div></div>` +
+        `<div class="kv"><div class="k">签名链接有效期</div><div class="val">${esc(ttlHuman)}（${ttlSec} 秒）</div></div>` +
+        `<div class="kv"><div class="k">IP 绑定</div><div class="val">${data.bind_ip ? '<span class="pill pill-ok" style="font-size:11px">开启</span> 领取与使用必须同 IP，否则 403（_ip 为盲化令牌，不含明文 IP）' : '<span class="pill pill-neutral" style="font-size:11px">关闭</span> 不校验 IP'}</div></div>` +
+        `<div class="kv"><div class="k">对外基础地址</div><div class="val">${baseUrl ? esc(baseUrl) : '<span class="text-warn">未配置（回退请求 Host 头）</span>'}</div></div>` +
+        `<div class="feature-desc">完整工作原理与场景说明见「编辑配置」弹窗首屏。</div>`;
     }
   } catch (_) {}
 }
@@ -2164,13 +2218,13 @@ export function openRedirectSigningSettings() {
   openFormModal({
     title: "302 加签改写配置",
     size: 620,
-    sub: "把对外返回的 302 跳转改写为系统固定签名链接，收回最终跳转权，阻断固定 URL 盗链。",
+    sub: "把对外返回的跳转改写为系统固定签名链接（所有代理规则生效，含跟随上游的本地代理），收回最终跳转权，阻断固定 URL 盗链。",
     schema: [
-      { type: "note", text: "【工作原理】\n1. 播放器请求代理 → 上游返回 302 → 本系统不再把裸链回给客户端，而是改写为固定签名链接：{base_url}/_signed/{资源id}?_st=...&_sig=...\n2. 播放器跟随该链接回到本系统 → 验签（含 IP 一致性）→ 内部跟随上游 302 → 代理出媒体流。\n3. 客户端全程只见系统签名链接，裸的上游/CDN 地址不再外泄；链接有 TTL 且与领取 IP 绑定，抓包盗链过期即 403。\n【注意事项】\n4. 需正确填写「对外基础地址」（如 https://media.example.com），否则回退使用请求 Host（经反代时可能是内网地址导致播放器无法访问）。\n5. IP 绑定开启后，手机 Wi-Fi/流量切换会换 IP，续播需重新取地址（播放器会自动重走链路）。\n6. 该功能与签名 URL（入口强签）相互独立；关闭后行为与现状完全一致。" },
-      { key: "enabled", label: "启用 302 加签改写", type: "switch", hint: "全局开关；关闭后对外 302 原样透传（行为与旧版一致）" },
+      { type: "note", text: "【工作原理】\n1. 开启后，无论代理规则是否「跟随上游」，播放器的首次代理请求都会被改写为固定签名链接：{base_url}/_signed/{资源id}?_st=...&_ip=...&_sig=...（_ip 为盲化令牌，链接不含明文客户端 IP）。\n2. 播放器跟随链接回到 /_signed/{资源id} → 验签（时效 + IP 盲化令牌比对）→ 按签发时快照双模式出流：\n　· A 模式（规则不跟随上游）：换回签发时缓存的上游 302，客户端直连 CDN，媒体不过本机；\n　· B 模式（规则跟随上游/本地代理）：本系统凭快照内部代理穿流，媒体经本机回传。\n3. 防绕过：签发后播放器再请求原始地址（含命中请求结果缓存）一律重新签发签名链接，无法跳过签名拿到媒体；签发后删除/修改规则也不影响已签发链接领取（快照解耦）。\n4. 客户端全程只见系统签名链接，裸的上游/CDN 地址不再外泄；链接有 TTL 且与领取 IP 绑定，转分享/抓包过期即 403。\n【注意事项】\n5. 需正确填写「对外基础地址」（如 https://media.example.com），否则回退使用请求 Host（经反代时可能是内网地址导致播放器无法访问）。\n6. IP 绑定开启后，手机 Wi-Fi/流量切换会换 IP，续播需重新取地址（播放器会自动重走链路）。\n7. 该功能与签名 URL（入口强签）相互独立；关闭后行为与现状完全一致。" },
+      { key: "enabled", label: "启用 302 加签改写", type: "switch", hint: "全局开关；开启后所有代理规则（含跟随上游的本地代理）首次请求均改写为签名链接；关闭后行为与旧版一致" },
       { key: "base_url", label: "对外基础地址", type: "text", default: "", hint: "播放器能访问到的对外地址，如 https://media.example.com；留空则回退请求 Host 头" },
       { key: "ttl_seconds", label: "签名链接有效期（秒）", type: "number", default: 21600, hint: "须覆盖完整观看会话（播放器会用同一 URL 持续发 Range）；默认 6 小时 = 21600" },
-      { key: "bind_ip", label: "绑定客户端 IP", type: "switch", hint: "领取与使用签名链接的 IP 必须一致，否则 403；转分享即失效" },
+      { key: "bind_ip", label: "绑定客户端 IP", type: "switch", hint: "领取与使用签名链接的 IP 必须一致，否则 403；转分享即失效。链接中 _ip 为盲化令牌（密钥哈希），不含明文客户端 IP" },
     ],
     values: {
       enabled: getValue("redirect_signing_enabled") === "1",
@@ -2219,12 +2273,39 @@ export async function loadEmailSettings() {
       setValue("email_alert_cooldown_minutes", String(data.alert_cooldown_minutes || 30));
       const pill = document.getElementById("emailStatusPill");
       const body = document.getElementById("emailSummaryBody");
-      if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "已配置" : "未配置"; }
+      if (pill) { pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral"); pill.textContent = data.enabled ? "已启用" : "未配置"; }
       if (body) {
+        // 注意：esc() 会转义 &，所以 HTML 实体（&lt; &gt;）必须在 esc 之后拼接，否则按字面显示
+        const senderHtml = data.sender_name
+          ? `${esc(data.sender_name)} &lt;${esc(data.sender || "-")}&gt;`
+          : esc(data.sender || "-");
+        const masked = data.password ? "••••••••" : '<span class="text-warn">未设置</span>';
         body.innerHTML = `
           <div class="kv"><div class="k">SMTP 主机</div><div class="val">${esc(data.smtp_host || "-")}</div></div>
-          <div class="kv"><div class="k">发件人</div><div class="val">${esc(data.sender || "-")}</div></div>
-          <div class="kv"><div class="k">收件人</div><div class="val">${esc(data.recipients || "-")}</div></div>`;
+          <div class="kv"><div class="k">SMTP 端口</div><div class="val">${esc(String(data.smtp_port || 465))}${data.smtp_ssl ? ' <span class="pill pill-ok" style="font-size:11px">SSL</span>' : ""}</div></div>
+          <div class="kv"><div class="k">发件人</div><div class="val">${senderHtml}</div></div>
+          <div class="kv"><div class="k">收件人</div><div class="val">${esc(data.recipients || "-")}</div></div>
+          <div class="kv"><div class="k">授权码</div><div class="val">${masked}</div></div>
+          <div class="kv"><div class="k">确认页地址</div><div class="val">${esc(data.block_link_base_url || "未配置")}</div></div>`;
+      }
+      // 告警阈值卡：把窗口/上限/冷却单独列出，避免与 SMTP 通道混淆
+      const alertBody = document.getElementById("emailAlertBody");
+      const alertPill = document.getElementById("emailAlertPill");
+      if (alertPill) {
+        alertPill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral");
+        alertPill.textContent = data.enabled ? "生效中" : "未生效";
+      }
+      if (alertBody) {
+        const win = data.alert_window_seconds || 60;
+        const maxReq = data.alert_max_requests || 80;
+        const max404 = data.alert_max_404 || 15;
+        const cool = data.alert_cooldown_minutes || 30;
+        alertBody.innerHTML = `
+          <div class="kv"><div class="k">告警窗口</div><div class="val">${esc(formatTtl(win))}（${win} 秒）</div></div>
+          <div class="kv"><div class="k">窗口内最大请求</div><div class="val">${esc(String(maxReq))} 次</div></div>
+          <div class="kv"><div class="k">窗口内最大 404</div><div class="val">${esc(String(max404))} 次</div></div>
+          <div class="kv"><div class="k">告警冷却</div><div class="val">${esc(formatTtl(cool * 60))}（${cool} 分钟）</div></div>
+          <div class="feature-desc">同一 IP 在告警窗口内请求数或 404 数任一超阈值即发信，随后进入冷却期不再重复提醒。</div>`;
       }
     }
   } catch (_) {}
@@ -2583,6 +2664,27 @@ function formatBackupTime(isoStr) {
   try { return new Date(isoStr).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }); } catch { return isoStr; }
 }
 
+// 备份页顶部三张 KPI：数量 / 占用 / 最近备份，并同步侧边栏计数
+function renderBackupStats() {
+  const list = state.backups || [];
+  const totalBytes = list.reduce((sum, b) => sum + (Number(b.size) || 0), 0);
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText("backupCountKpi", String(list.length));
+  setText("backupSizeKpi", list.length ? formatBackupSize(totalBytes) : "0 B");
+  const times = list.map((b) => new Date(b.created_at).getTime()).filter((t) => !Number.isNaN(t));
+  setText("backupLatestKpi", times.length ? formatBackupTime(new Date(Math.max(...times)).toISOString()) : "—");
+  const pill = document.getElementById("backupCountPill");
+  if (pill) {
+    pill.className = "pill " + (list.length ? "pill-ok" : "pill-neutral");
+    pill.textContent = `${list.length} 个`;
+  }
+  const navCount = document.getElementById("navCountBackup");
+  if (navCount) {
+    navCount.textContent = String(list.length);
+    navCount.style.display = list.length ? "" : "none";
+  }
+}
+
 export async function loadBackups() {
   try {
     const data = await apiFetch("/_admin/api/backup/list");
@@ -2593,9 +2695,10 @@ export async function loadBackups() {
 
 function renderBackupList() {
   const tbody = document.getElementById("backupBody");
+  renderBackupStats();
   if (!tbody) return;
   if (!state.backups.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty" style="padding:26px 0">暂无备份</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="empty" style="padding:26px 0">暂无备份，点右上角「创建备份」生成第一份快照</td></tr>`;
     return;
   }
   tbody.innerHTML = state.backups.map((b) => `
