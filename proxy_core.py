@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import random
 import re
+import socket
 import ssl
 import time
 from aiohttp.http_exceptions import ContentLengthError, TransferEncodingError
@@ -225,6 +226,8 @@ class RedirectInfo:
     status_code: int
     redirect_count: int
     redirect_chain: list
+    # 跟随重定向到拿到最终响应头（上游首包）的总耗时（毫秒），用于慢起播诊断
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -330,9 +333,11 @@ class RedirectHandler:
         ssl_mode = self._ssl
 
         try:
+            follow_started = time.perf_counter()
             while redirect_count < self.max_redirects:
                 request_headers = headers.copy() if headers else {}
                 request_body = None if method.upper() in {"GET", "HEAD", "OPTIONS", "TRACE"} else body
+                hop_started = time.perf_counter()
                 response = await session.request(
                     method=method,
                     url=current_url,
@@ -342,6 +347,7 @@ class RedirectHandler:
                     timeout=request_timeout,
                     ssl=ssl_mode,
                 )
+                hop_ms = (time.perf_counter() - hop_started) * 1000
 
                 if response.status not in self.REDIRECT_STATUS_CODES or not self.follow_redirects_enabled:
                     location = response.headers.get("Location")
@@ -352,6 +358,7 @@ class RedirectHandler:
                         status_code=response.status,
                         redirect_count=redirect_count,
                         redirect_chain=redirect_chain,
+                        elapsed_ms=(time.perf_counter() - follow_started) * 1000,
                     )
 
                 location = response.headers.get("Location")
@@ -362,6 +369,7 @@ class RedirectHandler:
                         status_code=response.status,
                         redirect_count=redirect_count,
                         redirect_chain=redirect_chain,
+                        elapsed_ms=(time.perf_counter() - follow_started) * 1000,
                     )
 
                 redirect_url = urljoin(current_url, location)
@@ -370,6 +378,7 @@ class RedirectHandler:
                         "from": current_url,
                         "to": redirect_url,
                         "status": response.status,
+                        "ms": round(hop_ms),
                     }
                 )
                 redirect_count += 1
@@ -392,6 +401,7 @@ class RedirectHandler:
                 status_code=310,
                 redirect_count=redirect_count,
                 redirect_chain=redirect_chain,
+                elapsed_ms=(time.perf_counter() - follow_started) * 1000,
             )
         except asyncio.CancelledError:
             # 客户端断开导致的取消同样要归还连接
@@ -458,12 +468,15 @@ class ProxyRequestHandler:
 
     def _build_connector(self, limit: int, limit_per_host: int) -> aiohttp.TCPConnector:
         # enable_cleanup_closed 自 aiohttp 3.9 起已废弃且无效果，不再传入；
-        # ttl_dns_cache 避免每个新连接都重新解析上游域名
+        # ttl_dns_cache 避免每个新连接都重新解析上游域名；
+        # upstream_ipv4_only=True 时强制 IPv4：上游域名带 AAAA 而本机 IPv6 不通时，
+        # 系统会先尝试 IPv6 再回退，单次连接可能卡数秒（起播慢的常见元凶）。
         return aiohttp.TCPConnector(
             limit=limit,
             limit_per_host=limit_per_host,
             ttl_dns_cache=300,
             force_close=False,
+            family=socket.AF_INET if getattr(self.config, "upstream_ipv4_only", False) else 0,
         )
 
     def _split_connection_limits(self) -> Tuple[int, int]:
@@ -996,6 +1009,113 @@ class ProxyRequestHandler:
 
         return None
 
+    @staticmethod
+    def _check_referer(rule, request_headers: Dict[str, str]) -> Optional[Tuple[str, str, str]]:
+        """Referer 防盗链校验（HOTLINK_PROTECTION.md 阶段 2）。
+
+        纯逻辑、无 I/O，便于单测。规则：
+        1. rule.referer_whitelist 为空 → 未启用，直接放行（与旧版行为完全一致）；
+        2. 无 Referer（或无法解析出域名）：按 referer_policy 处理，
+           allow 放行（照顾本地播放器/直链下载）、deny 拦截；
+        3. 有 Referer：取 hostname 与白名单逐条匹配（精确相等或 *.suffix 前缀
+           通配，*.suffix 同时放行裸域自身），不命中 → 拦截。
+
+        Returns:
+            None 放行；(match_strategy, match_detail, block_reason) 拦截，
+            格式与 _evaluate_access_control 一致，复用 blocked → 403 管道。
+        """
+        whitelist = rule.normalized_referer_whitelist()
+        if not whitelist:
+            return None
+
+        policy = rule.normalized_referer_policy()
+        referer = str(request_headers.get("Referer", "") or "").strip()
+        referer_host = ""
+        if referer:
+            parsed = urlparse(referer)
+            referer_host = (parsed.hostname or "").strip().lower()
+
+        if not referer_host:
+            # 空 Referer / 非法 Referer（解析不出域名）统一按空 Referer 策略处理
+            if policy == "allow":
+                return None
+            detail = "empty_referer" if not referer else "unparsable_referer"
+            return (
+                "referer_block",
+                detail,
+                f"Referer 策略拒绝: {'空 Referer' if not referer else 'Referer 无法解析域名'}（referer_policy=deny）",
+            )
+
+        for entry in whitelist:
+            if entry.startswith("*."):
+                suffix = entry[2:]
+                # *.example.com 放行 a.example.com 及裸域 example.com 自身
+                if referer_host == suffix or referer_host.endswith("." + suffix):
+                    return None
+            elif referer_host == entry:
+                return None
+
+        return (
+            "referer_block",
+            "referer_not_in_whitelist",
+            f"外部 Referer 未在白名单: {referer_host}",
+        )
+
+    @staticmethod
+    def _check_ua_blacklist(rule, request_headers: Dict[str, str]) -> Optional[Tuple[str, str, str]]:
+        """UA 黑名单校验（HOTLINK_PROTECTION.md 阶段 3.1）。
+
+        纯逻辑、无 I/O。ua_blacklist 为逗号分隔的子串（大小写不敏感），
+        任一子串出现在 User-Agent 中即拦截；为空 = 未启用，行为与旧版一致。
+        典型用途：拦截 curl / python-requests / wget 等脚本工具批量拉流。
+        """
+        blacklist = rule.normalized_ua_blacklist()
+        if not blacklist:
+            return None
+        user_agent = str(request_headers.get("User-Agent", "") or "").strip()
+        if not user_agent:
+            return None  # 无 UA 的客户端（部分本地播放器）不误伤，交给 Referer/封禁策略
+        ua_lower = user_agent.lower()
+        for entry in blacklist:
+            if entry in ua_lower:
+                return (
+                    "ua_block",
+                    "ua_blacklist_hit",
+                    f"UA 命中黑名单: {entry}",
+                )
+        return None
+
+    @staticmethod
+    def _check_ua_whitelist(rule, request_headers: Dict[str, str]) -> Optional[Tuple[str, str, str]]:
+        """UA 白名单校验（迁移 022，黑名单的反向门）。
+
+        纯逻辑、无 I/O。ua_whitelist 为逗号分隔的子串（大小写不敏感）：
+        - 为空 = 未启用，行为与旧版一致；
+        - 启用后 User-Agent 必须命中任一条目，否则拦截；
+        - 启用后空 UA 一并拦截——否则客户端不发 UA 即可绕过白名单，
+          防盗链将失去意义（真实播放器 VLC/ExoPlayer 等均携带 UA）。
+        与黑名单的先后：黑名单先判（显式拒绝优先），白名单兜底。
+        """
+        whitelist = rule.normalized_ua_whitelist()
+        if not whitelist:
+            return None
+        user_agent = str(request_headers.get("User-Agent", "") or "").strip()
+        if not user_agent:
+            return (
+                "ua_block",
+                "ua_whitelist_empty_ua",
+                "UA 白名单已启用，请求无 User-Agent",
+            )
+        ua_lower = user_agent.lower()
+        for entry in whitelist:
+            if entry in ua_lower:
+                return None
+        return (
+            "ua_block",
+            "ua_whitelist_miss",
+            f"UA 未在白名单: {user_agent[:64]}",
+        )
+
     def _apply_route_headers(self, headers: Dict[str, str], route_decision: RouteDecision) -> None:
         headers["X-Proxy-Rule-Id"] = str(route_decision.rule.rule_id or "")
         headers["X-Proxy-Rule-Source"] = route_decision.rule.source
@@ -1196,6 +1316,57 @@ class ProxyRequestHandler:
                     blocked=True,
                     block_reason=reason,
                 )
+
+        # ===== Referer 防盗链校验（HOTLINK_PROTECTION.md 阶段 2）=====
+        # 挂在规则级访问控制之后；blocked=True 走与黑白名单相同的 403 管道，下游零改动
+        referer_block = self._check_referer(selected_rule, headers)
+        if referer_block is not None:
+            strategy, detail, reason = referer_block
+            logger.warning(
+                "Referer 防盗链拦截: IP=%s 路径=%s 规则ID=%s 原因=%s",
+                client_ip, path, selected_rule.rule_id, reason,
+            )
+            target_url = self.build_target_url(path, selected_rule, query_string)
+            return RouteDecision(
+                rule=selected_rule,
+                target_url=target_url,
+                client_ip=client_ip,
+                geo_location=geo_location,
+                match_strategy=strategy,
+                region_matching_enabled=region_matching_enabled,
+                request_host=request_host,
+                rule_request_host=normalize_request_host(selected_rule.request_host),
+                match_detail=detail,
+                blocked=True,
+                block_reason=reason,
+            )
+
+        # ===== UA 校验（黑名单 3.1 / 白名单 022）=====
+        # 与 Referer 同款挂点/管道；顺序在 Referer 之后（先按来源拦、再按客户端拦）。
+        # 黑名单先判：同入黑白名单时显式拒绝优先；白名单未启用时零开销。
+        ua_block = self._check_ua_blacklist(selected_rule, headers)
+        if ua_block is None:
+            ua_block = self._check_ua_whitelist(selected_rule, headers)
+        if ua_block is not None:
+            strategy, detail, reason = ua_block
+            logger.warning(
+                "UA 校验拦截: IP=%s 路径=%s 规则ID=%s 原因=%s",
+                client_ip, path, selected_rule.rule_id, reason,
+            )
+            target_url = self.build_target_url(path, selected_rule, query_string)
+            return RouteDecision(
+                rule=selected_rule,
+                target_url=target_url,
+                client_ip=client_ip,
+                geo_location=geo_location,
+                match_strategy=strategy,
+                region_matching_enabled=region_matching_enabled,
+                request_host=request_host,
+                rule_request_host=normalize_request_host(selected_rule.request_host),
+                match_detail=detail,
+                blocked=True,
+                block_reason=reason,
+            )
 
         target_url = self.build_target_url(path, selected_rule, query_string)
         geo_source_for_log = geo_location.source if geo_location else "-"
@@ -1815,7 +1986,15 @@ class ProxyRequestHandler:
                         client_ip, target_url,
                         response.status, final_url, filtered_headers,
                     )
-                elif self.ip_cache and redirect_info and redirect_info.redirect_url:
+                elif (
+                    self.ip_cache
+                    # redirect 缓存语义 =「已把重定向直接回给客户端」；上游非 200/206
+                    # 的普通失败状态（403/404 等可能带 Location 头）不得写入，
+                    # 否则污染缓存，命中守卫虽可挡住但属脏数据
+                    and redirect_info is not None
+                    and (redirect_info.status_code in RedirectHandler.REDIRECT_STATUS_CODES)
+                    and redirect_info.redirect_url
+                ):
                     await self.ip_cache.put_redirect(
                         client_ip, target_url,
                         redirect_info.status_code or 302,
@@ -2024,7 +2203,13 @@ class ProxyRequestHandler:
                         client_ip, target_url,
                         response.status, final_url, filtered_headers,
                     )
-                elif self.ip_cache and redirect_info and redirect_info.redirect_url:
+                elif (
+                    self.ip_cache
+                    # 同流式路径：仅真实重定向状态才写 redirect 缓存，避免 403/404 污染
+                    and redirect_info is not None
+                    and (redirect_info.status_code in RedirectHandler.REDIRECT_STATUS_CODES)
+                    and redirect_info.redirect_url
+                ):
                     await self.ip_cache.put_redirect(
                         client_ip, target_url,
                         redirect_info.status_code or 302,
