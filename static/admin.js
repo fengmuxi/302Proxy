@@ -34,6 +34,7 @@ import {
   loadAutoBanSettings, loadAutoBanStats, openAutoBanSettings,
   loadStreamGuardSettings, openStreamGuardSettings,
   loadSignedUrlSettings, openSignedUrlSettings, openSignedUrlTool,
+  loadRedirectSigningSettings, openRedirectSigningSettings,
   loadEmailSettings, openEmailSettings, testEmail,
   loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
   banIpFromLog, unbanIp, clearBans,
@@ -212,6 +213,7 @@ function bindSecurity() {
   $("editStreamGuardBtn")?.addEventListener("click", () => openStreamGuardSettings());
   $("editSignedUrlBtn")?.addEventListener("click", () => openSignedUrlSettings());
   $("openSignedUrlToolBtn")?.addEventListener("click", () => openSignedUrlTool());
+  $("editRedirectSigningBtn")?.addEventListener("click", () => openRedirectSigningSettings());
 
   // 封禁表事件委托
   $("banBody")?.addEventListener("click", (e) => {

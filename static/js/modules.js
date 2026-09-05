@@ -60,6 +60,7 @@ export function activatePage(page) {
     case "overview":
       renderOverview().catch(() => {});
       startNetAutoRefresh();
+      startOverviewAutoRefresh();
       break;
     case "routing":
       refreshRouting();
@@ -68,8 +69,6 @@ export function activatePage(page) {
       loadBannedIpList();
       loadAutoBanSettings();
       loadAutoBanStats();
-      loadStreamGuardSettings();
-      loadSignedUrlSettings();
       if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
       startTrackedAutoRefresh();
       break;
@@ -88,6 +87,11 @@ export function activatePage(page) {
       loadDedupStats();
       loadEmailSettings();
       loadBackups();
+      // 系统页的三张功能卡（stream_guard / signed_url / signed_redirect），
+      // 此前误挂在 security 分支导致刷新后不加载、显示回默认「未启用」
+      loadStreamGuardSettings();
+      loadSignedUrlSettings();
+      loadRedirectSigningSettings();
       break;
   }
 }
@@ -101,6 +105,7 @@ export function initHashRouting() {
     // 无 hash（或 hash 即 overview）的初始加载不经过 activatePage，概览页虽为默认
     // 显示但轮询不会启动，网络吞吐卡会永远停在「正在采样」——此处补启
     startNetAutoRefresh();
+    startOverviewAutoRefresh();
   }
   if (!_hashRoutingInitialized) {
     _hashRoutingInitialized = true;
@@ -185,6 +190,17 @@ function relativeTime(ts) {
   return `${Math.floor(diff / 86400)} 天前`;
 }
 
+function trendTimeLabel(h, i, n) {
+  const ts = h && h[i] && h[i].ts;
+  if (ts) {
+    // 桶内 ts 为 UTC 整点；按浏览器本地时区呈现为正常时钟时间（HH:00）
+    const d = new Date(ts * 1000);
+    return String(d.getHours()).padStart(2, "0") + ":00";
+  }
+  const hoursAgo = n - 1 - i;
+  return hoursAgo === 0 ? "现在" : "-" + hoursAgo + "h";
+}
+
 function renderTrendSvg(hours) {
   const container = document.getElementById("trendChart");
   if (!container) return;
@@ -193,7 +209,7 @@ function renderTrendSvg(hours) {
   const redirects = h.map((x) => x.redirects || 0);
   const failed = h.map((x) => x.failed || 0);
   const n = Math.max(counts.length, 1);
-  const W = 680, H = 210, padL = 6, padR = 6, padT = 14, padB = 22;
+  const W = 680, H = 210, padL = 40, padR = 10, padT = 14, padB = 22;
   if (n < 2) {
     container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px"><text x="${W / 2}" y="${H / 2 + 4}" fill="var(--text-3)" font-size="12" text-anchor="middle">暂无 24 小时趋势数据</text></svg>`;
     return;
@@ -201,8 +217,14 @@ function renderTrendSvg(hours) {
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
   const stepX = innerW / (n - 1);
-  const maxValue = Math.max(1, ...counts, ...redirects, ...failed);
-  const yOf = (v) => padT + innerH - (maxValue > 0 ? (v / maxValue) * innerH : 0);
+  const rawMax = Math.max(1, ...counts, ...redirects, ...failed);
+  // 向上取整到 1/2/5×10^k 的整刻度，Y 轴标签更易读
+  const pow = Math.pow(10, Math.floor(Math.log10(rawMax)));
+  const base = rawMax / pow;
+  const maxValue = (base <= 1 ? 1 : base <= 2 ? 2 : base <= 5 ? 5 : 10) * pow;
+  // 钳制到 [0, maxValue]：无论数据如何异常，绘制永不越出绘图区/越过零点基线
+  const yOf = (v) => padT + innerH - (Math.min(Math.max(v, 0), maxValue) / maxValue) * innerH;
+  const fmtY = (v) => (v >= 1000 ? (v % 1000 === 0 ? v / 1000 + "k" : (v / 1000).toFixed(1) + "k") : String(v));
   const pathOf = (arr, closeArea) => {
     if (!arr.length) return { line: "", area: "" };
     let line = "";
@@ -224,27 +246,22 @@ function renderTrendSvg(hours) {
     const y = padT + (innerH * g) / 4;
     grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 4"/>`;
   }
+  // Y 轴刻度（0 / 半程 / 最大）+ 零点实线基线：明确「水平线」就是 0，小数值不再像掉到线下
+  const yLabels = [0, maxValue / 2, maxValue].map((v) => {
+    const y = yOf(v);
+    return `<text x="${padL - 6}" y="${(y + 3).toFixed(1)}" fill="var(--text-3)" font-size="10" text-anchor="end">${fmtY(v)}</text>`;
+  }).join("");
   let labels = "";
   [0, 6, 12, 18, 23].forEach((i) => {
     if (i >= n) return;
     const x = padL + i * stepX;
     const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
-    const ts = h[i] && h[i].ts;
-    let label;
-    if (ts) {
-      // 桶内 ts 为 UTC 整点；按浏览器本地时区呈现为正常时钟时间（HH:00）
-      const d = new Date(ts * 1000);
-      label = String(d.getHours()).padStart(2, "0") + ":00";
-    } else {
-      const hoursAgo = n - 1 - i;
-      label = hoursAgo === 0 ? "现在" : "-" + hoursAgo + "h";
-    }
-    labels += `<text x="${x.toFixed(1)}" y="${H - 6}" fill="var(--text-3)" font-size="10" text-anchor="${anchor}">${label}</text>`;
+    labels += `<text x="${x.toFixed(1)}" y="${H - 6}" fill="var(--text-3)" font-size="10" text-anchor="${anchor}">${trendTimeLabel(h, i, n)}</text>`;
   });
   const lastX = padL + (n - 1) * stepX;
   const lastY = yOf(counts[n - 1] || 0);
   container.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block">
       <defs>
         <linearGradient id="ovTrendFill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.22"/>
@@ -252,13 +269,66 @@ function renderTrendSvg(hours) {
         </linearGradient>
       </defs>
       ${grid}
+      ${yLabels}
+      <line x1="${padL}" y1="${padT + innerH}" x2="${W - padR}" y2="${padT + innerH}" stroke="var(--border)" stroke-width="1"/>
       <path d="${area}" fill="url(#ovTrendFill)"/>
       <path d="${line}" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       <path d="${lineRedirect}" fill="none" stroke="var(--info)" stroke-width="1.5" stroke-dasharray="4 3" stroke-linejoin="round" stroke-linecap="round"/>
       <path d="${lineFailed}" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="2 3" stroke-linejoin="round" stroke-linecap="round"/>
       <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="var(--brand)" stroke="var(--surface)" stroke-width="1.5"/>
+      <g id="trendHover" style="display:none">
+        <line id="trendHoverLine" y1="${padT}" y2="${padT + innerH}" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="2 3"/>
+        <circle id="trendHoverCount" r="3.5" fill="var(--brand)" stroke="var(--surface)" stroke-width="1.5"/>
+        <circle id="trendHoverRedirect" r="3" fill="var(--info)" stroke="var(--surface)" stroke-width="1.5"/>
+        <circle id="trendHoverFailed" r="3" fill="var(--danger)" stroke="var(--surface)" stroke-width="1.5"/>
+      </g>
       ${labels}
-    </svg>`;
+    </svg>
+    <div class="trend-tip" style="display:none"></div>`;
+
+  // 悬停十字线 + 数值气泡：鼠标位置反推最近的小时桶（viewBox 拉伸后需按实际宽换算）
+  container.style.position = "relative";
+  container._trendData = { h, counts, redirects, failed, n, stepX, padL, padT, innerH, W, maxValue };
+  if (!container._trendBound) {
+    container._trendBound = true;
+    container.addEventListener("mousemove", (e) => {
+      const d = container._trendData;
+      if (!d || d.n < 2) return;
+      const rect = container.getBoundingClientRect();
+      const vx = (e.clientX - rect.left) * (d.W / rect.width);
+      const idx = Math.min(d.n - 1, Math.max(0, Math.round((vx - d.padL) / d.stepX)));
+      const x = d.padL + idx * d.stepX;
+      const g = container.querySelector("#trendHover");
+      if (g) {
+        g.style.display = "";
+        const set = (id, attr, val) => { const el = container.querySelector("#" + id); if (el) el.setAttribute(attr, val); };
+        set("trendHoverLine", "x1", x); set("trendHoverLine", "x2", x);
+        // 圆点 y 与主渲染同用 nice 化的 maxValue，保证落在曲线上
+        const yOfLocal = (v) => d.padT + d.innerH - (Math.min(Math.max(v, 0), d.maxValue) / d.maxValue) * d.innerH;
+        set("trendHoverCount", "cx", x); set("trendHoverCount", "cy", yOfLocal(d.counts[idx]));
+        set("trendHoverRedirect", "cx", x); set("trendHoverRedirect", "cy", yOfLocal(d.redirects[idx]));
+        set("trendHoverFailed", "cx", x); set("trendHoverFailed", "cy", yOfLocal(d.failed[idx]));
+      }
+      const tip = container.querySelector(".trend-tip");
+      if (tip) {
+        tip.innerHTML = `<strong>${trendTimeLabel(d.h, idx, d.n)}</strong>`
+          + `<span><i style="background:var(--brand)"></i>请求 ${d.counts[idx]}</span>`
+          + `<span><i style="background:var(--info)"></i>302 跟随 ${d.redirects[idx]}</span>`
+          + `<span><i style="background:var(--danger)"></i>失败拦截 ${d.failed[idx]}</span>`;
+        tip.style.display = "flex";
+        const tipW = tip.offsetWidth || 180;
+        const left = Math.min(Math.max(e.clientX - rect.left + 12, 4), rect.width - tipW - 4);
+        tip.style.left = left + "px";
+        tip.style.top = "6px";
+      }
+    });
+    container.addEventListener("mouseleave", () => {
+      const g = container.querySelector("#trendHover");
+      if (g) g.style.display = "none";
+      const tip = container.querySelector(".trend-tip");
+      if (tip) tip.style.display = "none";
+    });
+  }
 }
 
 // ============ 网络吞吐（概览 KPI，2s 轮询差分速率由服务端计算） ============
@@ -319,6 +389,20 @@ export function startNetAutoRefresh() {
     if (state.activeModule !== "overview") { stopNetAutoRefresh(); return; }
     loadNetThroughput().catch(() => {});
   }, 2000);
+}
+
+// 概览页其余数据（KPI/趋势/服务健康/拦截事件/待办风险）15s 定时刷新；
+// 网络吞吐单独走 2s 快轮询，此处慢轮询避免频繁 SQL 聚合
+let _ovAutoRefreshTimer = null;
+export function stopOverviewAutoRefresh() {
+  if (_ovAutoRefreshTimer) { clearInterval(_ovAutoRefreshTimer); _ovAutoRefreshTimer = null; }
+}
+export function startOverviewAutoRefresh() {
+  stopOverviewAutoRefresh();
+  _ovAutoRefreshTimer = setInterval(() => {
+    if (state.activeModule !== "overview") { stopOverviewAutoRefresh(); return; }
+    renderOverview().catch(() => {});
+  }, 15000);
 }
 
 export async function renderOverview() {
@@ -2048,6 +2132,70 @@ export function openSignedUrlTool() {
   };
   mask.classList.add("open");
   window.setTimeout(() => input.focus(), 50);
+}
+
+// ============ 302 加签改写 ============
+
+export async function loadRedirectSigningSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/redirect-signing");
+    const body = document.getElementById("redirectSigningBody");
+    const pill = document.getElementById("redirectSigningPill");
+    setValue("redirect_signing_enabled", data.enabled ? "1" : "0");
+    setValue("redirect_signing_ttl_seconds", String(data.ttl_seconds || 21600));
+    setValue("redirect_signing_bind_ip", data.bind_ip ? "1" : "0");
+    setValue("public_base_url", data.base_url || "");
+    if (pill) {
+      pill.className = "pill " + (data.enabled ? "pill-ok" : "pill-neutral");
+      pill.textContent = data.enabled ? "已启用" : "未启用";
+    }
+    if (body) {
+      body.innerHTML =
+        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? "启用（对外 302 将改写为系统签名链接）" : "停用（原样透传上游 302）"}</div></div>` +
+        `<div class="kv"><div class="k">签名链接有效期</div><div class="val">${esc(String(data.ttl_seconds || 21600))} 秒（${Math.round((data.ttl_seconds || 21600) / 3600)} 小时）</div></div>` +
+        `<div class="kv"><div class="k">IP 绑定</div><div class="val">${data.bind_ip ? "开启（领取与使用必须同 IP）" : "关闭（不校验 IP）"}</div></div>` +
+        `<div class="kv"><div class="k">对外基础地址</div><div class="val">${data.base_url ? esc(data.base_url) : '<span class="text-warn">未配置（回退请求 Host）</span>'}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：把返回给客户端的 302 跳转地址改写为本系统固定签名链接（/{base_url}/_signed/{资源id}?_st&_sig），客户端永远拿不到裸的上游/CDN 地址，链接带时效且与领取 IP 绑定，转分享即失效。适用于「固定 URL 直连代理」的盗链场景。点「编辑配置」查看完整说明。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openRedirectSigningSettings() {
+  openFormModal({
+    title: "302 加签改写配置",
+    size: 620,
+    sub: "把对外返回的 302 跳转改写为系统固定签名链接，收回最终跳转权，阻断固定 URL 盗链。",
+    schema: [
+      { type: "note", text: "【工作原理】\n1. 播放器请求代理 → 上游返回 302 → 本系统不再把裸链回给客户端，而是改写为固定签名链接：{base_url}/_signed/{资源id}?_st=...&_sig=...\n2. 播放器跟随该链接回到本系统 → 验签（含 IP 一致性）→ 内部跟随上游 302 → 代理出媒体流。\n3. 客户端全程只见系统签名链接，裸的上游/CDN 地址不再外泄；链接有 TTL 且与领取 IP 绑定，抓包盗链过期即 403。\n【注意事项】\n4. 需正确填写「对外基础地址」（如 https://media.example.com），否则回退使用请求 Host（经反代时可能是内网地址导致播放器无法访问）。\n5. IP 绑定开启后，手机 Wi-Fi/流量切换会换 IP，续播需重新取地址（播放器会自动重走链路）。\n6. 该功能与签名 URL（入口强签）相互独立；关闭后行为与现状完全一致。" },
+      { key: "enabled", label: "启用 302 加签改写", type: "switch", hint: "全局开关；关闭后对外 302 原样透传（行为与旧版一致）" },
+      { key: "base_url", label: "对外基础地址", type: "text", default: "", hint: "播放器能访问到的对外地址，如 https://media.example.com；留空则回退请求 Host 头" },
+      { key: "ttl_seconds", label: "签名链接有效期（秒）", type: "number", default: 21600, hint: "须覆盖完整观看会话（播放器会用同一 URL 持续发 Range）；默认 6 小时 = 21600" },
+      { key: "bind_ip", label: "绑定客户端 IP", type: "switch", hint: "领取与使用签名链接的 IP 必须一致，否则 403；转分享即失效" },
+    ],
+    values: {
+      enabled: getValue("redirect_signing_enabled") === "1",
+      base_url: getValue("public_base_url") || "",
+      ttl_seconds: Number(getValue("redirect_signing_ttl_seconds") || 21600),
+      bind_ip: getValue("redirect_signing_bind_ip") !== "0",
+    },
+    validate: (out) => {
+      if (Number(out.ttl_seconds ?? 0) < 60) return "有效期不能小于 60 秒";
+      return null;
+    },
+    onSave: async (out) => {
+      await apiFetch("/_admin/api/redirect-signing", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          base_url: (out.base_url || "").trim().replace(/\/+$/, ""),
+          ttl_seconds: Math.max(60, Number(out.ttl_seconds ?? 21600)),
+          bind_ip: Boolean(out.bind_ip),
+        }),
+      });
+      await loadRedirectSigningSettings();
+      showToast("302 加签改写配置已保存。");
+    },
+  });
 }
 
 // ============ 邮件提醒 ============

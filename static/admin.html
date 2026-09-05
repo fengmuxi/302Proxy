@@ -308,14 +308,27 @@
           <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="saveDedup">保存去重配置</button><button class="btn btn-sm" id="clearDedup">清空去重缓存</button></div>
         </div>
         <div class="card">
+          <!-- 状态隐藏域放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML，放里面会被清掉导致编辑弹窗取不到值 -->
+          <input type="hidden" id="stream_guard_max" value="0">
           <div class="panel-head"><div class="panel-title">单 IP 并发限制 (stream_guard)</div><span class="pill pill-neutral" id="streamGuardPill">未启用</span></div>
-          <div class="panel-body" id="streamGuardBody"><input type="hidden" id="stream_guard_max" value="0"></div>
+          <div class="panel-body" id="streamGuardBody"></div>
           <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
         </div>
         <div class="card">
+          <input type="hidden" id="signed_url_enabled" value="0">
+          <input type="hidden" id="signed_url_ttl_seconds" value="3600">
           <div class="panel-head"><div class="panel-title">签名 URL (signed_url)</div><span class="pill pill-neutral" id="signedUrlPill">未启用</span></div>
-          <div class="panel-body" id="signedUrlBody"><input type="hidden" id="signed_url_enabled" value="0"><input type="hidden" id="signed_url_ttl_seconds" value="3600"></div>
+          <div class="panel-body" id="signedUrlBody"></div>
           <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="editSignedUrlBtn">编辑配置</button><button class="btn btn-sm" id="openSignedUrlToolBtn">生成签名链接</button></div>
+        </div>
+        <div class="card">
+          <input type="hidden" id="redirect_signing_enabled" value="0">
+          <input type="hidden" id="redirect_signing_ttl_seconds" value="21600">
+          <input type="hidden" id="redirect_signing_bind_ip" value="1">
+          <input type="hidden" id="public_base_url" value="">
+          <div class="panel-head"><div class="panel-title">302 加签改写 (signed_redirect)</div><span class="pill pill-neutral" id="redirectSigningPill">未启用</span></div>
+          <div class="panel-body" id="redirectSigningBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editRedirectSigningBtn">编辑配置</button></div>
         </div>
       </div>
     </div>

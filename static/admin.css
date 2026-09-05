@@ -195,6 +195,12 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text-2);font-size:13px}
 .kv .val{word-break:break-all}
+/* 概览趋势图：悬停数值气泡 */
+#trendChart{position:relative}
+.trend-tip{position:absolute;top:6px;display:flex;align-items:center;gap:12px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-pop);font-size:12px;pointer-events:none;white-space:nowrap;z-index:5}
+.trend-tip strong{color:var(--text);font-weight:600}
+.trend-tip span{display:inline-flex;align-items:center;gap:5px;color:var(--text-2)}
+.trend-tip i{width:8px;height:8px;border-radius:50%;display:inline-block}
 /* 自动封禁策略卡：正在追踪的可疑 IP 列表 */
 .tracked-box{margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
 .tracked-title{font-weight:600;font-size:13px;margin-bottom:4px}
