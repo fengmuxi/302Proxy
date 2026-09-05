@@ -10,7 +10,7 @@ import socket
 import ssl
 import time
 from aiohttp.http_exceptions import ContentLengthError, TransferEncodingError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlparse
 
@@ -18,6 +18,7 @@ from config import Config, ProxyRule, normalize_request_host, split_request_host
 from geo_service import GeoLocation, GeoResolver
 from ip_result_cache import IpResultCache, IpCacheEntry
 from ip_ban_manager import IpBanManager
+from signed_url import build_signed_redirect
 
 
 logger = logging.getLogger("proxy")
@@ -426,6 +427,10 @@ class ProxyRequestHandler:
         self._rule_index: Optional[Dict[str, List[ProxyRule]]] = None
         self._rule_index_signature: Optional[Tuple[int, int]] = None
         self._last_cache_status = "BYPASS"
+        # 302 加签改写：resource_id -> 签发时的路由决策快照。重入 /_signed/{id} 时
+        # 直接用 id 换取该快照继续转发（免重新规则匹配），规则被删/改不影响已签发链接。
+        # 上限与 TTL 见 _signed_cache_prune；进程内缓存，单 worker 足够。
+        self._signed_cache: Dict[str, Dict[str, object]] = {}
         self._refresh_redirect_handler()
 
     def _refresh_redirect_handler(self) -> None:
@@ -453,6 +458,9 @@ class ProxyRequestHandler:
         previous_signature = self._connection_signature()
         self.config = config
         self._refresh_redirect_handler()
+        if not getattr(config.signed_redirect, "enabled", False):
+            # 加签改写关闭时历史 id 快照不再被 /_signed 消费，清空释放内存
+            self._signed_cache.clear()
         if self._connection_signature() != previous_signature:
             logger.info("上游连接池参数已变更，将在下次请求时重建会话")
             await self.close()
@@ -460,11 +468,152 @@ class ProxyRequestHandler:
     def set_ip_cache(self, ip_cache: Optional[IpResultCache]) -> None:
         self.ip_cache = ip_cache
 
+    # ===== 302 加签改写：resource_id -> 签发结果缓存 =====
+    # 重入 /_signed/{id} 时用 id 直接换取签发那一刻的路由决策快照（含规则、目标地址），
+    # 命中即按原决策继续转发，不再重新走规则匹配——规则后续被删除/改动不影响已签发链接。
+
+    def _signed_cache_prune(self) -> None:
+        """按签发 TTL 淘汰过期项 + 按插入序截断上限（O(过期数)）。"""
+        ttl = int(getattr(self.config.signed_redirect, "ttl_seconds", 21600) or 21600)
+        ttl = max(ttl, 60)  # 防配置为极小值导致链接刚签发即失效
+        cutoff = time.time() - ttl
+        while self._signed_cache:
+            _rid, entry = next(iter(self._signed_cache.items()))
+            if float(entry.get("created", 0)) >= cutoff:
+                break
+            self._signed_cache.pop(next(iter(self._signed_cache)), None)
+        while len(self._signed_cache) > 10000:
+            self._signed_cache.pop(next(iter(self._signed_cache)), None)
+
+    def _remember_signed_redirect(
+        self,
+        signed_url: Optional[str],
+        route_decision: Optional[RouteDecision],
+        original_location: Optional[str] = None,
+        original_status: int = 302,
+    ) -> None:
+        """签发 302 加签链接时登记 resource_id -> 双模式快照。
+
+        改写关闭/未产生 URL/无决策时不登记；任何异常只告警，绝不阻断主流程。
+
+        快照字段：
+        - decision: 路由决策快照（规则强制跟随上游，供 B 模式内部代理复用）；
+        - kind:     链路模式。规则 follow_redirects=False（上游 302 原样回客户端的
+                    裸链语义）→ ``redirect_return``；True → ``proxy_stream``。
+        - location: A 模式（redirect_return）下回给客户端的上游 302 Location
+                    （已解析为绝对地址，客户端据此直连 CDN，服务器零媒体带宽）；
+        - status:   上游 302 的原始状态码（回显时保持一致）。
+        """
+        try:
+            if not signed_url or route_decision is None or "/_signed/" not in signed_url:
+                return
+            resource_id = signed_url.split("/_signed/", 1)[1].split("?", 1)[0]
+            if not resource_id:
+                return
+            forced = replace(
+                route_decision,
+                rule=replace(route_decision.rule, follow_redirects=True),
+            )
+            kind = "redirect_return" if not route_decision.rule.follow_redirects else "proxy_stream"
+            self._signed_cache[resource_id] = {
+                "decision": forced,
+                "kind": kind,
+                "location": original_location or "",
+                "status": int(original_status or 302),
+                "created": time.time(),
+            }
+            self._signed_cache_prune()
+        except Exception:  # noqa: BLE001 - 登记失败不影响主流程
+            logger.warning("登记 302 加签结果缓存失败（忽略）", exc_info=True)
+
+    def get_signed_redirect_entry(self, resource_id: str) -> Optional[Dict[str, object]]:
+        """按 id 换取签发时的双模式快照条目；过期即删并返回 None。"""
+        entry = self._signed_cache.get(resource_id)
+        if entry is None:
+            return None
+        ttl = int(getattr(self.config.signed_redirect, "ttl_seconds", 21600) or 21600)
+        ttl = max(ttl, 60)
+        if time.time() - float(entry.get("created", 0)) > ttl:
+            self._signed_cache.pop(resource_id, None)
+            return None
+        return entry
+
+    def get_signed_decision(self, resource_id: str) -> Optional[RouteDecision]:
+        """按 id 换取签发时的路由决策快照（仅决策，供 B 模式内部代理复用）。"""
+        entry = self.get_signed_redirect_entry(resource_id)
+        if entry is None:
+            return None
+        return entry.get("decision")
+
+    def clear_signed_cache(self) -> None:
+        self._signed_cache.clear()
+
     def set_ip_ban_manager(self, ip_ban_manager) -> None:
         self.ip_ban_manager = ip_ban_manager
 
     def get_last_cache_status(self) -> str:
         return getattr(self, '_last_cache_status', 'BYPASS')
+
+    def _build_rewritten_redirect(
+        self,
+        path: str,
+        query_string: Optional[str],
+        client_ip: str,
+        scheme: str,
+        headers: Dict[str, str],
+        route_decision: Optional[RouteDecision] = None,
+        original_location: Optional[str] = None,
+        original_status: int = 302,
+    ) -> Optional[str]:
+        """302 加签改写：把即将回给客户端的 3xx Location 改写为系统固定签名链接。
+
+        开关关闭 / 密钥未初始化 / 路径过长（避免拼出超长 URL）时返回 None，
+        表示「不改写、原样透传」，绝不阻断主流程。
+
+        改写成功且传入 route_decision 时，把决策快照登记进 _signed_cache
+        （key=resource_id），供 /_signed/{id} 重入使用：
+        - A 模式（redirect_return）：直接回显 original_location（客户端直连 CDN）；
+        - B 模式（proxy_stream）：用决策快照内部代理穿流。
+        original_location 为相对地址时按「原公共请求 URL」解析为绝对地址，
+        保证回显后客户端跟随到的目标与加签前裸链语义完全一致。
+        """
+        cfg = self.config.signed_redirect
+        if not cfg.enabled:
+            return None
+        secret = self.config.signed_url.secret
+        if not secret or not path.startswith("/"):
+            return None
+        # 超长原始路径跳过改写（base64 后仍可能超限），直接放行裸链并记日志
+        if len(path) + len(query_string or "") > 2000:
+            logger.warning("原始路径过长(%d)，跳过 302 加签改写", len(path) + len(query_string or ""))
+            return None
+        host = headers.get("Host", "")
+        base_url = cfg.base_url or (f"{scheme}://{host}" if host else "")
+        try:
+            rewritten = build_signed_redirect(
+                path,
+                query_string or "",
+                client_ip,
+                secret,
+                cfg.ttl_seconds,
+                base_url,
+                cfg.bind_ip,
+            )
+        except (ValueError, Exception):  # noqa: BLE001 - 改写失败绝不阻断主流程
+            logger.warning("302 加签改写失败（原样透传）", exc_info=True)
+            return None
+        if route_decision is not None:
+            echo_location = ""
+            if original_location:
+                # 相对 Location 按原公共入口 URL 解析，使客户端跟随结果与裸链一致
+                echo_location = urljoin(f"{scheme}://{host}{path}", original_location) if host else original_location
+            self._remember_signed_redirect(
+                rewritten,
+                route_decision,
+                original_location=echo_location,
+                original_status=original_status,
+            )
+        return rewritten
 
     def _build_connector(self, limit: int, limit_per_host: int) -> aiohttp.TCPConnector:
         # enable_cleanup_closed 自 aiohttp 3.9 起已废弃且无效果，不再传入；
@@ -1708,6 +1857,7 @@ class ProxyRequestHandler:
         scheme: str = "http",
         query_string: str = None,
         route_decision: Optional[RouteDecision] = None,
+        force_external_redirect: bool = False,
     ) -> StreamingResponse:
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
         if not route_decision:
@@ -1733,7 +1883,7 @@ class ProxyRequestHandler:
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
             stream_timeout=self.config.streaming.stream_timeout,
-            follow_redirects=rule.follow_redirects,
+            follow_redirects=(False if force_external_redirect else rule.follow_redirects),
             ssl=self._ssl_mode(),
             session_provider=self.get_stream_session,
         )
@@ -1745,7 +1895,7 @@ class ProxyRequestHandler:
                 # 语义相反：redirect 表示「已把 302 直接回给客户端」，只在 follow_redirects=False
                 # 时成立；streaming 表示「已跟随重定向拿到 final_url」，只在 True 时成立。
                 # 规则切换后若复用反语义的旧缓存，会绕过 follow_redirects 配置，这里按当前值收口。
-                if cached.result_type == "redirect" and not rule.follow_redirects:
+                if cached.result_type == "redirect" and force_external_redirect:
                     logger.info(
                             "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                             client_ip, target_url, cached.redirect_url,
@@ -1758,9 +1908,18 @@ class ProxyRequestHandler:
                         redirect_count=1,
                         redirect_chain=[],
                     )
+                    # 改写成功时同步 redirect_url 为实际返回的签名链接，
+                    # 供路由日志 redirect_location 反映真实转发结果（缓存命中路径，无 ip_cache 落库顾虑）
+                    _rewritten_loc = self._build_rewritten_redirect(
+                        path, query_string, client_ip, scheme, headers,
+                        route_decision=route_decision,
+                        original_location=cached.redirect_url,
+                        original_status=cached.status_code,
+                    ) or cached.redirect_url
+                    cached_redirect_info = replace(cached_redirect_info, redirect_url=_rewritten_loc)
                     return StreamingResponse(
                         status=cached.status_code,
-                        headers={"Location": cached.redirect_url},
+                        headers={"Location": _rewritten_loc},
                         body_stream=self._empty_stream(),
                         redirect_info=cached_redirect_info,
                         route_decision=route_decision,
@@ -1973,6 +2132,24 @@ class ProxyRequestHandler:
                 self._apply_route_headers(filtered_headers, route_decision)
                 self._apply_range_headers(filtered_headers, response_headers, response.status)
 
+                # 302 加签改写：follow_redirects=False 时上游 302 会原样回给客户端，
+                # 这里把 Location 改写为系统签名链接（改写失败/未开启则原样透传）。
+                # log_redirect_info 默认沿用原始 redirect_info；改写成功时同步 redirect_url
+                # 为实际返回的签名链接，供路由日志 redirect_location 反映真实转发结果。
+                # 注意：不可原地改 redirect_info，否则上方 ip_cache.put_redirect(L2167)
+                # 会误存签名链接、破坏后续重入重签。
+                log_redirect_info = redirect_info
+                if response.status in RedirectHandler.REDIRECT_STATUS_CODES and "Location" in filtered_headers:
+                    rewritten = self._build_rewritten_redirect(
+                        path, query_string, client_ip, scheme, headers,
+                        route_decision=route_decision,
+                        original_location=filtered_headers.get("Location", ""),
+                        original_status=response.status,
+                    )
+                    if rewritten:
+                        filtered_headers["Location"] = rewritten
+                        log_redirect_info = replace(redirect_info, redirect_url=rewritten)
+
                 content_length = None
                 if "Content-Length" in response_headers:
                     try:
@@ -2034,7 +2211,7 @@ class ProxyRequestHandler:
                     status=response.status,
                     headers=filtered_headers,
                     body_stream=body_stream,
-                    redirect_info=redirect_info,
+                    redirect_info=log_redirect_info,
                     content_length=content_length,
                     route_decision=route_decision,
                     cache_status="BYPASS",
@@ -2093,6 +2270,7 @@ class ProxyRequestHandler:
         scheme: str = "http",
         query_string: str = None,
         route_decision: Optional[RouteDecision] = None,
+        force_external_redirect: bool = False,
     ) -> Tuple[int, Dict[str, str], bytes, Optional[RedirectInfo], Optional[RouteDecision]]:
         self._last_cache_status = "BYPASS"
         route_decision = route_decision or await self.select_route(path, headers, client_host, query_string)
@@ -2114,7 +2292,7 @@ class ProxyRequestHandler:
             cached = await self.ip_cache.get(client_ip, target_url)
             # redirect 缓存语义是「已把 302 直接回给客户端」，仅在 follow_redirects=False
             # 时成立；True 时复用会绕过跟随重定向，必须按当前值收口。
-            if cached is not None and cached.result_type == "redirect" and cached.redirect_url and not rule.follow_redirects:
+            if cached is not None and cached.result_type == "redirect" and cached.redirect_url and force_external_redirect:
                 logger.info(
                         "请求结果缓存命中(重定向): IP=%s 目标=%s -> %s",
                         client_ip, target_url, cached.redirect_url,
@@ -2127,10 +2305,19 @@ class ProxyRequestHandler:
                     redirect_count=1,
                     redirect_chain=[],
                 )
+                # 改写成功时同步 redirect_url 为实际返回的签名链接，
+                # 供路由日志 redirect_location 反映真实转发结果（缓存命中路径，无 ip_cache 落库顾虑）
+                _rewritten_loc = self._build_rewritten_redirect(
+                    path, query_string, client_ip, scheme, headers,
+                    route_decision=route_decision,
+                    original_location=cached.redirect_url,
+                    original_status=cached.status_code,
+                ) or cached.redirect_url
+                cached_redirect_info = replace(cached_redirect_info, redirect_url=_rewritten_loc)
                 self._last_cache_status = "HIT_REDIRECT"
                 return (
                     cached.status_code,
-                    {"Location": cached.redirect_url},
+                    {"Location": _rewritten_loc},
                     b"",
                     cached_redirect_info,
                     route_decision,
@@ -2141,7 +2328,7 @@ class ProxyRequestHandler:
         redirect_handler = RedirectHandler(
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
-            follow_redirects=rule.follow_redirects,
+            follow_redirects=(False if force_external_redirect else rule.follow_redirects),
             ssl=self._ssl_mode(),
             session_provider=self.get_session,
         )
@@ -2216,7 +2403,24 @@ class ProxyRequestHandler:
                         redirect_info.redirect_url,
                     )
 
-                return response.status, filtered_headers, response_body, redirect_info, route_decision
+                # 302 加签改写：标准路径 follow_redirects=False 时上游 302 原样回客户端，
+                # 这里把 Location 改写为系统签名链接。return_redirect_info 默认沿用原始
+                # redirect_info；改写成功时同步 redirect_url 为实际返回的签名链接，供路由
+                # 日志 redirect_location 反映真实转发结果（上方 ip_cache.put_redirect(L2390)
+                # 已用原始 redirect_info，不受影响）。
+                return_redirect_info = redirect_info
+                if response.status in RedirectHandler.REDIRECT_STATUS_CODES and "Location" in filtered_headers:
+                    rewritten = self._build_rewritten_redirect(
+                        path, query_string, client_ip, scheme, headers,
+                        route_decision=route_decision,
+                        original_location=filtered_headers.get("Location", ""),
+                        original_status=response.status,
+                    )
+                    if rewritten:
+                        filtered_headers["Location"] = rewritten
+                        return_redirect_info = replace(redirect_info, redirect_url=rewritten)
+
+                return response.status, filtered_headers, response_body, return_redirect_info, route_decision
             except asyncio.TimeoutError as exc:
                 last_error = str(exc)
                 last_error_type = "TimeoutError"

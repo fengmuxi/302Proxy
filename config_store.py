@@ -26,6 +26,7 @@ from config import (
     RequestDedupConfig,
     RouteGroupConfig,
     RemoteConfigSettings,
+    SignedRedirectConfig,
     SignedUrlConfig,
     SSLConfig,
     ServerConfig,
@@ -108,6 +109,10 @@ class ConfigStore:
         ("signed_url_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ("signed_url_secret", "TEXT NOT NULL DEFAULT ''"),
         ("signed_url_ttl_seconds", "INTEGER NOT NULL DEFAULT 3600"),
+        ("redirect_signing_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("redirect_signing_ttl_seconds", "INTEGER NOT NULL DEFAULT 21600"),
+        ("redirect_signing_bind_ip", "INTEGER NOT NULL DEFAULT 1"),
+        ("public_base_url", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # route_logs 的演进列（017 引入）：旧库 base schema（CREATE TABLE IF NOT EXISTS）
@@ -1156,6 +1161,12 @@ class ConfigStore:
                 secret=system_row["signed_url_secret"] if "signed_url_secret" in system_row.keys() else "",
                 ttl_seconds=int(system_row["signed_url_ttl_seconds"]) if "signed_url_ttl_seconds" in system_row.keys() else 3600,
             )
+            config.signed_redirect = SignedRedirectConfig(
+                enabled=bool(system_row["redirect_signing_enabled"]) if "redirect_signing_enabled" in system_row.keys() else False,
+                ttl_seconds=int(system_row["redirect_signing_ttl_seconds"]) if "redirect_signing_ttl_seconds" in system_row.keys() else 21600,
+                bind_ip=bool(system_row["redirect_signing_bind_ip"]) if "redirect_signing_bind_ip" in system_row.keys() else True,
+                base_url=system_row["public_base_url"] if "public_base_url" in system_row.keys() else "",
+            )
 
         if feature_row:
             config.region_matching_enabled = bool(feature_row["region_matching_enabled"])
@@ -2124,6 +2135,34 @@ class ConfigStore:
         if not config.signed_url.secret:
             raise ValueError("签名密钥未初始化")
         return sign_url(path, config.signed_url.secret, config.signed_url.ttl_seconds)
+
+    def get_redirect_signing_config(self) -> Dict[str, Any]:
+        """302 加签改写配置（SIGNED_REDIRECT_PLAN.md）。"""
+        config = self.load_runtime_config().signed_redirect
+        return {
+            "enabled": config.enabled,
+            "ttl_seconds": config.ttl_seconds,
+            "bind_ip": config.bind_ip,
+            "base_url": config.base_url,
+        }
+
+    def update_redirect_signing_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # 部分更新语义：未提供的字段保留现值
+        current = self.load_runtime_config().signed_redirect
+        enabled = coerce_bool(payload.get("enabled", current.enabled))
+        ttl_seconds = max(60, int(payload.get("ttl_seconds", current.ttl_seconds) or current.ttl_seconds))
+        bind_ip = coerce_bool(payload.get("bind_ip", current.bind_ip))
+        base_url = str(payload.get("base_url", current.base_url) or "").strip().rstrip("/")
+        now = utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET redirect_signing_enabled = ?, "
+                "redirect_signing_ttl_seconds = ?, redirect_signing_bind_ip = ?, "
+                "public_base_url = ?, updated_at = ? WHERE id = 1",
+                (int(enabled), ttl_seconds, int(bind_ip), base_url, now),
+            )
+        return self.get_redirect_signing_config()
 
     def get_email_config(self) -> Dict[str, Any]:
         config = self.load_runtime_config()

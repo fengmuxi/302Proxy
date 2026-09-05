@@ -30,6 +30,7 @@ from aiohttp import web
 from typing import Dict, Any, Optional, Tuple
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from config import Config, load_config, setup_logging, normalize_request_host, prune_app_log_files, set_request_id, get_request_id, generate_request_id
@@ -42,7 +43,7 @@ from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
 from ip_result_cache import IpResultCache
 from ip_ban_manager import IpBanManager
 from request_dedup import RequestDedup, DedupConfig
-from signed_url import verify_signed_url, strip_signature_params
+from signed_url import verify_signed_url, strip_signature_params, verify_signed_resource, decode_resource_id
 
 logger = logging.getLogger('proxy')
 
@@ -214,6 +215,8 @@ class ProxyServer:
         self.app.router.add_get('/_block/{token}/info', self.block_token_info)
         self.app.router.add_post('/_block/{token}/confirm', self.block_token_confirm)
         self.admin_console.register(self.app)
+        # 302 加签改写（SIGNED_REDIRECT_PLAN.md v2）：固定签名端点，验签后内部跟随代理
+        self.app.router.add_route('*', '/_signed/{resource_id}', self.handle_signed_resource)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
     async def check_admin_auth(self, request: web.Request) -> bool:
@@ -688,8 +691,12 @@ class ProxyServer:
             "match_detail": route_decision.match_detail if route_decision else "no_matching_rule_found",
             "upstream_status": upstream_status,
             "cache_status": cache_status,
-            "redirect_count": redirect_info.redirect_count if redirect_info else 0,
-            "redirect_location": self._extract_redirect_location(redirect_info),
+            # 302 加签重入（B 模式内部跟随）：客户端实际拿到的是 200 媒体流（代理穿流），
+            # 没有任何外部 3xx。redirect_info 里的 redirect_count/location 是服务器内部跟随
+            # 上游跳转的记录（仅供"上游首包较慢"等诊断用），不应暴露在路由日志误导运维。
+            # 因此对 /_signed 重入请求强制归零，让路由日志如实反映"客户端实际经历"。
+            "redirect_count": 0 if request.get("_signed_reentry") else (redirect_info.redirect_count if redirect_info else 0),
+            "redirect_location": "" if request.get("_signed_reentry") else self._extract_redirect_location(redirect_info),
             "transport_mode": transport_mode,
             "operation_duration_ms": self._request_duration_ms(request),
             "result_status": self._infer_route_log_result_status(
@@ -743,14 +750,116 @@ class ProxyServer:
         except Exception:
             pass
 
+    async def handle_signed_resource(self, request: web.Request) -> web.StreamResponse:
+        """302 加签改写（SIGNED_REDIRECT_PLAN.md v2）固定端点。
+
+        校验签名（含客户端 IP 一致性）→ 解码 resource_id 还原原始资源路径 →
+        以内部强制跟随模式重跑完整代理管道。本处理器永不外发 3xx（防循环）。
+        """
+        cfg = self.config.signed_redirect
+        if not cfg.enabled:
+            return await self._render_404_page("未找到匹配的代理规则")
+
+        resource_id = request.match_info.get("resource_id", "")
+        client_ip = self.request_handler.extract_client_ip(dict(request.headers), request.remote or "")
+        secret = self.config.signed_url.secret
+
+        ok, reason = verify_signed_resource(
+            resource_id,
+            request.query.get("_st", ""),
+            request.query.get("_sig", ""),
+            request.query.get("_ip", ""),
+            client_ip,
+            secret,
+            cfg.bind_ip,
+        )
+        if not ok:
+            self._chain_step(request, f"签名重入:失败({reason})")
+            block_reason = f"签名校验失败: {reason}"
+            logger.warning(
+                "签名重入校验失败: IP=%s resource_id=%s 原因=%s",
+                client_ip, resource_id[:48], reason,
+            )
+            await self._record_route_log(
+                request,
+                route_decision=None,
+                upstream_status=403,
+                cache_status="BLOCKED",
+                transport_mode="none",
+                error_message=block_reason,
+            )
+            return await self._render_403_page(block_reason)
+
+        try:
+            decoded = decode_resource_id(resource_id)
+        except ValueError:
+            self._chain_step(request, "签名重入:失败(资源非法)")
+            await self._record_route_log(
+                request,
+                route_decision=None,
+                upstream_status=403,
+                cache_status="BLOCKED",
+                transport_mode="none",
+                error_message="签名校验失败: 资源标识非法",
+            )
+            return await self._render_403_page("签名校验失败: 资源标识非法")
+
+        if "?" in decoded:
+            path, query = decoded.split("?", 1)
+        else:
+            path, query = decoded, ""
+
+        self._chain_step(request, "签名重入:通过")
+        # 把真实资源路径/query 覆盖到本请求，交由 handle_proxy 重跑完整管道
+        request["_signed_path"] = path
+        request["_signed_raw_path"] = decoded
+        request["_signed_query"] = query
+        request["_signed_reentry"] = True
+
+        # 双模式领取（SIGNED_REDIRECT_PLAN.md v3）：
+        # A(redirect_return)=领取时回显签发时缓存的上游 302，客户端自行跟随直连 CDN，
+        #   媒体流量不经过本服务器；回显内容与加签前裸链完全一致，无服务器侧重入循环。
+        # B(proxy_stream)=用签发时决策快照内部代理穿流（媒体流量经过本服务器）。
+        entry = self.request_handler.get_signed_redirect_entry(resource_id)
+        if entry is not None and entry.get("kind") == "redirect_return":
+            location = entry.get("location")
+            if location:
+                status = int(entry.get("status") or 302)
+                self._chain_step(request, f"签名重入:换取302({status})->CDN直连")
+                logger.info(
+                    "签名领取A模式: 换取上游302 status=%d IP=%s rid=%s -> %s",
+                    status, request.remote or "", resource_id[:32], str(location)[:160],
+                )
+                decision_for_log = entry.get("decision")
+                await self._record_route_log(
+                    request,
+                    route_decision=decision_for_log,
+                    upstream_status=status,
+                    cache_status="SIGNED_ECHO",
+                    transport_mode="redirect",
+                )
+                return web.Response(status=status, headers={"Location": str(location)})
+
+        # B 模式 / 降级 / 快照缺失：命中快照则免规则匹配，否则走常规重入（规则匹配）
+        decision = entry.get("decision") if entry else None
+        if decision is not None:
+            request["_signed_route_decision"] = decision
+            self._chain_step(request, "签名重入:缓存命中(内部代理)")
+        return await self.handle_proxy(request)
+
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse:
         route_decision = None
         try:
             request["_route_log_started_at"] = time.perf_counter()
             method = request.method
-            raw_path = request.raw_path
-            query_string = request.query_string
-            path_decoded = request.path
+            # 302 加签重入：/_signed 端点解码出的真实资源路径/query 覆盖到本请求，
+            # 使后续 select_route / 上游转发都针对真实资源而非 /_signed 端点本身
+            raw_path = request.get("_signed_raw_path") or request.raw_path
+            if "_signed_query" in request:
+                query_string = request["_signed_query"]
+            else:
+                query_string = request.query_string
+            path_decoded = request.get("_signed_path") or request.path
             headers = dict(request.headers)
             body = None
             if method not in ("GET", "HEAD", "OPTIONS", "DELETE", "TRACE"):
@@ -762,8 +871,9 @@ class ProxyServer:
             # 全局开关启用时，代理路径必须在 query 中携带有效 _st/_sig，否则 403。
             # 校验在 select_route 之前：快速拒绝、不泄露规则存在性；通过后剥离
             # _st/_sig，避免签名参数经 build_target_url 原样透传给上游。
+            # 加签重入（_signed_reentry）已由 /_signed 端点验签，此处跳过。
             signed_cfg = self.config.signed_url
-            if signed_cfg.enabled:
+            if signed_cfg.enabled and not request.get("_signed_reentry"):
                 ok, reason = verify_signed_url(
                     path_decoded,
                     request.query.get("_st", ""),
@@ -788,14 +898,29 @@ class ProxyServer:
 
             logger.debug("路由匹配开始: %s %s", method, raw_path)
 
-            route_decision = await self.request_handler.select_route(
-                path_decoded,
-                headers,
-                client_host,
-                query_string if query_string else None,
-            )
+            # 302 加签重入命中签发时登记的决策快照：跳过规则匹配（规则被删/改也不
+            # 影响已签发链接）；快照缺失才走常规 select_route。
+            saved_decision = request.get("_signed_route_decision")
+            if saved_decision is not None:
+                route_decision = saved_decision
+                self._chain_step(request, "路由:签名快照")
+            else:
+                route_decision = await self.request_handler.select_route(
+                    path_decoded,
+                    headers,
+                    client_host,
+                    query_string if query_string else None,
+                )
 
             if route_decision:
+                # 302 加签重入：强制内部跟随上游 302（否则按规则 follow_redirects=False
+                # 会再次外发 302 造成循环/裸链泄漏）
+                if request.get("_signed_reentry") and not route_decision.rule.follow_redirects:
+                    route_decision = replace(
+                        route_decision,
+                        rule=replace(route_decision.rule, follow_redirects=True),
+                    )
+                    self._chain_step(request, "签名重入:强制跟随上游")
                 logger.debug(
                     "路由匹配完成: 规则=%s 目标=%s 匹配=%s",
                     route_decision.rule.path_prefix, route_decision.target_url,
@@ -901,6 +1026,11 @@ class ProxyServer:
             self._chain_step(request, "去重:未命中")
             self._chain_step(request, f"模式:{('streaming' if use_streaming_mode else 'standard')}")
 
+            # 首次代理请求：强制不下发内部跟随，把上游 3xx 改签为 302 返回客户端
+            # （无论规则 follow_redirects 取值，都走「生成签名链接」流程）；
+            # 仅 /_signed 重入（B 模式内部代理穿流）才允许内部跟随。
+            force_external_redirect = not (request.get("_signed_reentry") or saved_decision is not None)
+
             # 直接转发请求到上游服务器
             if use_streaming_mode:
                 streaming_response = await self.request_handler.handle_request_streaming(
@@ -912,6 +1042,7 @@ class ProxyServer:
                     scheme=scheme,
                     query_string=query_string if query_string else None,
                     route_decision=route_decision,
+                    force_external_redirect=force_external_redirect,
                 )
                 actual_cache_status = streaming_response.cache_status or "BYPASS"
                 logger.debug("流式响应: 状态=%s 缓存=%s", streaming_response.status, actual_cache_status)
@@ -940,6 +1071,7 @@ class ProxyServer:
                     scheme=scheme,
                     query_string=query_string if query_string else None,
                     route_decision=route_decision,
+                    force_external_redirect=force_external_redirect,
                 )
 
                 # 上游返回大文件/媒体内容时，handle_request 会自动升级为流式
@@ -952,10 +1084,17 @@ class ProxyServer:
                 status, response_headers, response_body, redirect_info, route_decision = result
                 redirect_count = redirect_info.redirect_count if redirect_info else 0
                 cache_status = self.request_handler.get_last_cache_status()
-                if redirect_count > 0:
+                # 仅在客户端实际经历跳转时记录"重定向:N"（即非 /_signed 重入）。
+                # 重入走的是服务器内部代理穿流（B 模式 200），redirect_count>0 是上游内部
+                # 跳转、客户端看不到，不应在链路日志里标记为"重定向"，否则会与紧随的
+                # "代理:200"自相矛盾、误导运维。
+                if redirect_count > 0 and not request.get("_signed_reentry"):
                     self._chain_step(request, f"重定向:{redirect_count}")
                 self._chain_step(request, f"缓存:{cache_status}")
-                self._chain_step(request, f"上游:{status}")
+                if status in self.REDIRECT_STATUS_CODES:
+                    self._chain_step(request, f"重定向:返回{status}(加签)")
+                else:
+                    self._chain_step(request, f"代理:{status}")
                 logger.debug(
                     "标准响应: 状态=%d 缓存=%s 重定向=%d",
                     status, cache_status, redirect_count,
@@ -1074,6 +1213,10 @@ class ProxyServer:
             failed=streaming_response.status >= 400,
             streaming=True
         )
+        if streaming_response.status in self.REDIRECT_STATUS_CODES:
+            self._chain_step(request, f"重定向:返回{streaming_response.status}(加签)")
+        else:
+            self._chain_step(request, f"代理:{streaming_response.status}")
         
         if redirect_info and redirect_info.redirect_count > 0:
             response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)

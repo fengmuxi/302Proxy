@@ -307,6 +307,23 @@ class SignedUrlConfig:
 
 
 @dataclass
+class SignedRedirectConfig:
+    """302 加签改写（SIGNED_REDIRECT_PLAN.md）：把返回客户端的 3xx Location
+    改写为系统固定签名链接 `{base_url}/_signed/{resource_id}?_st&_sig`。
+
+    - enabled：总开关，关闭时行为与现状完全一致；
+    - ttl_seconds：签名链接有效期（须覆盖完整观看会话，播放器 Range 复用同一 URL）；
+    - bind_ip：领取与使用链接的客户端 IP 必须一致，否则 403（默认开启）；
+    - base_url：对外可达基础地址，空则回退请求 Host 头。
+    密钥复用 signed_url.secret。
+    """
+    enabled: bool = False
+    ttl_seconds: int = 21600
+    bind_ip: bool = True
+    base_url: str = ""
+
+
+@dataclass
 class RemoteConfigSettings:
     enabled: bool = False
     url: str = ""
@@ -474,6 +491,7 @@ class Config:
     auto_ban: AutoBanConfig = field(default_factory=AutoBanConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     signed_url: SignedUrlConfig = field(default_factory=SignedUrlConfig)
+    signed_redirect: SignedRedirectConfig = field(default_factory=SignedRedirectConfig)
     # 记录配置文件中**显式出现**的顶层段键（仅 from_yaml 解析真实文件时填充；
     # admin_console 远程导入走 _parse_config 不受影响）。
     # 用于启动时判断哪些键应以配置文件为准覆盖数据库运行时配置，

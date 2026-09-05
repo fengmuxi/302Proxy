@@ -108,6 +108,8 @@ class AdminConsole:
         app.router.add_get("/_admin/api/signed-url", self.get_signed_url_settings)
         app.router.add_put("/_admin/api/signed-url", self.update_signed_url_settings)
         app.router.add_post("/_admin/api/signed-url/generate", self.generate_signed_url)
+        app.router.add_get("/_admin/api/redirect-signing", self.get_redirect_signing_settings)
+        app.router.add_put("/_admin/api/redirect-signing", self.update_redirect_signing_settings)
         app.router.add_get("/_admin/api/email", self.get_email_settings)
         app.router.add_put("/_admin/api/email", self.update_email_settings)
         app.router.add_post("/_admin/api/email/test", self.test_email)
@@ -671,6 +673,24 @@ class AdminConsole:
             return {"url": url}
 
         return await self._run_protected(request, _generate)
+
+    async def get_redirect_signing_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_redirect_signing_config())
+
+    async def update_redirect_signing_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_redirect_signing_settings(payload))
+
+    def _update_redirect_signing_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_redirect_signing_config(payload)
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "302 加签改写配置已更新", **result}
 
     async def get_email_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self._get_email_settings())
