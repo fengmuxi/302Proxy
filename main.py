@@ -641,7 +641,7 @@ class ProxyServer:
             return redirect_info.redirect_url
         return ""
 
-    def _build_route_log_payload(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> Dict[str, Any]:
+    def _build_route_log_payload(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "") -> Dict[str, Any]:
         """构建路由日志载荷（纯 CPU，不含 I/O）。"""
         geo_location = route_decision.geo_location if route_decision else None
         geo_source = geo_location.source if geo_location else ""
@@ -668,6 +668,20 @@ class ProxyServer:
             if upstream_status >= 400 and upstream_error_snippet
             else ""
         )
+        # 「302地址/重定向次数」落库规则：
+        #   1) 调用方显式给定 redirect_location（A 模式领取回显的 Location）→ 原样记录；
+        #   2) 签名重入且客户端未收到 3xx（B 模式代理穿流回 200）→ 归零；
+        #   3) 其余（含重入但客户端真实收到 3xx 的透传/回显）→ 从 redirect_info 提取。
+        is_client_facing_3xx = upstream_status in (301, 302, 303, 307, 308)
+        if redirect_location:
+            logged_redirect_count = 1 if is_client_facing_3xx else 0
+            logged_redirect_location = redirect_location
+        elif request.get("_signed_reentry") and not is_client_facing_3xx:
+            logged_redirect_count = 0
+            logged_redirect_location = ""
+        else:
+            logged_redirect_count = redirect_info.redirect_count if redirect_info else 0
+            logged_redirect_location = self._extract_redirect_location(redirect_info)
         payload = {
             "request_id": request.get("_request_id", ""),
             "request_method": request.method,
@@ -700,12 +714,14 @@ class ProxyServer:
             "match_detail": route_decision.match_detail if route_decision else "no_matching_rule_found",
             "upstream_status": upstream_status,
             "cache_status": cache_status,
-            # 302 加签重入（B 模式内部跟随）：客户端实际拿到的是 200 媒体流（代理穿流），
-            # 没有任何外部 3xx。redirect_info 里的 redirect_count/location 是服务器内部跟随
-            # 上游跳转的记录（仅供"上游首包较慢"等诊断用），不应暴露在路由日志误导运维。
-            # 因此对 /_signed 重入请求强制归零，让路由日志如实反映"客户端实际经历"。
-            "redirect_count": 0 if request.get("_signed_reentry") else (redirect_info.redirect_count if redirect_info else 0),
-            "redirect_location": "" if request.get("_signed_reentry") else self._extract_redirect_location(redirect_info),
+            # 302 加签重入（B 模式内部跟随）：客户端拿到 200 媒体流（代理穿流）时，
+            # redirect_info 里的 redirect_count/location 是服务器内部跟随上游跳转的记录
+            # （仅供"上游首包较慢"等诊断用），不应暴露在路由日志误导运维——归零处理。
+            # 但归零只适用于「重入且客户端未收到 3xx」：A 模式领取回显、规则不跟随的
+            # 3xx 透传等场景下客户端真实经历了 302，必须如实记录跳转地址，否则
+            # 日志页「302地址」为空、无法排查领取链路。
+            "redirect_count": logged_redirect_count,
+            "redirect_location": logged_redirect_location,
             "transport_mode": transport_mode,
             "operation_duration_ms": self._request_duration_ms(request),
             "result_status": self._infer_route_log_result_status(
@@ -728,7 +744,7 @@ class ProxyServer:
         }
         return payload
 
-    async def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "") -> None:
+    async def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "") -> None:
         """记录路由日志。
 
         insert_route_log 内部是同步 sqlite3 写盘，此前直接在事件循环里执行，
@@ -743,6 +759,7 @@ class ProxyServer:
                 redirect_info=redirect_info,
                 transport_mode=transport_mode,
                 error_message=error_message,
+                redirect_location=redirect_location,
             )
         except Exception as exc:
             logger.warning("构建路由日志失败: %s", exc)
@@ -850,6 +867,9 @@ class ProxyServer:
                     upstream_status=status,
                     cache_status="SIGNED_ECHO",
                     transport_mode="redirect",
+                    # 客户端真实收到的 302 跳转地址：不落库的话日志页「302地址」为空，
+                    # 无法排查「领取到的地址不对/失效」类问题
+                    redirect_location=str(location),
                 )
                 return web.Response(status=status, headers={"Location": str(location)})
 
