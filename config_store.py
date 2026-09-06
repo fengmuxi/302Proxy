@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import secrets
 import sqlite3
 import threading
 import time
@@ -364,6 +366,19 @@ class ConfigStore:
                     permanent INTEGER NOT NULL DEFAULT 1,
                     path_prefix TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT '',
+                    key_prefix TEXT NOT NULL DEFAULT '',
+                    key_hash TEXT NOT NULL UNIQUE,
+                    readonly INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL DEFAULT '',
+                    expires_at INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS forward_rules (
@@ -1951,6 +1966,103 @@ class ConfigStore:
                 (now_ts,),
             )
         return cursor.rowcount
+
+    # ===== API 密钥（后台接口程序化调用）=====
+
+    @staticmethod
+    def _hash_api_key(raw_key: str) -> str:
+        return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _serialize_api_key(row: sqlite3.Row) -> Dict[str, Any]:
+        expires_at = row["expires_at"]
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "key_prefix": row["key_prefix"],
+            "readonly": bool(row["readonly"]),
+            "enabled": bool(row["enabled"]),
+            "use_count": int(row["use_count"] or 0),
+            "created_at": row["created_at"],
+            "last_used_at": row["last_used_at"],
+            "expires_at": expires_at,
+            "expired": bool(expires_at) and int(expires_at) <= int(time.time()),
+        }
+
+    def create_api_key(self, name: str, readonly: bool = False, expires_days: int = 0) -> Dict[str, Any]:
+        """签发 API 密钥；完整明文只在本返回值中出现一次，库中仅存 SHA256。"""
+        name = str(name or "").strip() or "未命名密钥"
+        raw_key = f"n302_{secrets.token_hex(16)}"
+        days = int(expires_days or 0)
+        expires_at = int(time.time()) + days * 86400 if days > 0 else None
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO api_keys (name, key_prefix, key_hash, readonly, enabled, use_count, created_at, last_used_at, expires_at)
+                VALUES (?, ?, ?, ?, 1, 0, ?, '', ?)
+                """,
+                (name, raw_key[:13], self._hash_api_key(raw_key), int(bool(readonly)), now, expires_at),
+            )
+            key_id = int(cursor.lastrowid)
+        return {
+            "id": key_id,
+            "name": name,
+            "key": raw_key,
+            "key_prefix": raw_key[:13],
+            "readonly": bool(readonly),
+            "expires_at": expires_at,
+        }
+
+    def list_api_keys(self) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM api_keys ORDER BY id DESC").fetchall()
+        return [self._serialize_api_key(row) for row in rows]
+
+    def get_api_key(self, key_id: int) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM api_keys WHERE id = ?", (int(key_id),)).fetchone()
+        if not row:
+            raise KeyError(f"API 密钥 {key_id} 不存在")
+        return self._serialize_api_key(row)
+
+    def find_api_key(self, raw_key: str) -> Optional[Dict[str, Any]]:
+        """按明文 Key 查找有效密钥（SHA256 精确命中；停用/过期一律视为无效）。"""
+        raw_key = str(raw_key or "").strip()
+        if not raw_key.startswith("n302_"):
+            return None
+        key_hash = self._hash_api_key(raw_key)
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)).fetchone()
+        if not row:
+            return None
+        item = self._serialize_api_key(row)
+        if not item["enabled"] or item["expired"]:
+            return None
+        return item
+
+    def touch_api_key(self, key_id: int) -> None:
+        """更新最近使用时间与累计次数（鉴权热路径，单条 UPDATE；调用方负责节流）。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE api_keys SET use_count = use_count + 1, last_used_at = ? WHERE id = ?",
+                (utc_now(), int(key_id)),
+            )
+
+    def set_api_key_enabled(self, key_id: int, enabled: bool) -> Dict[str, Any]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE api_keys SET enabled = ? WHERE id = ?",
+                (int(bool(enabled)), int(key_id)),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"API 密钥 {key_id} 不存在")
+        return self.get_api_key(key_id)
+
+    def delete_api_key(self, key_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM api_keys WHERE id = ?", (int(key_id),))
+        return cursor.rowcount > 0
 
     def import_banned_ips(self, bans: List[Dict[str, Any]]) -> int:
         count = 0
