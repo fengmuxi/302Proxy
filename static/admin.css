@@ -425,3 +425,19 @@ a.drawer-link:hover{text-decoration:underline}
 .search-results-footer{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 12px;font-size:11px;color:var(--text-3);border-top:1px solid var(--border);background:var(--surface-2);border-radius:0 0 10px 10px;position:sticky;bottom:0}
 .sr-type.t-danger{color:var(--danger-text);background:var(--danger-soft)}
 .sr-type.t-ok{color:var(--ok-text,var(--brand-text));background:var(--ok-soft,var(--brand-soft))}
+
+/* ==========================================================================
+   API 文档（自动维护）
+   ========================================================================== */
+.api-doc-row{border-bottom:1px solid var(--border);padding:12px 14px}
+.api-doc-row:last-child{border-bottom:none}
+.api-doc-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.api-doc-path{font-size:13px;background:var(--surface-2);padding:2px 8px;border-radius:6px;color:var(--text)}
+.api-doc-summary{color:var(--text-2);font-size:13px;margin-left:2px}
+.api-doc-try{margin-left:auto}
+.api-param-table{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:12px}
+.api-param-table th{text-align:left;color:var(--text-3);font-weight:500;padding:5px 8px;border-bottom:1px solid var(--border)}
+.api-param-table td{padding:5px 8px;border-bottom:1px solid var(--border);color:var(--text-2);vertical-align:top}
+.api-param-table code{font-size:11px}
+.api-sample{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--text);white-space:pre-wrap;word-break:break-all;margin:6px 0 2px}
+.api-usage{margin:6px 0 2px;padding:8px 10px;border-left:3px solid var(--info);background:var(--info-soft);border-radius:0 6px 6px 0;line-height:1.7}

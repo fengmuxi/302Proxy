@@ -35,9 +35,11 @@ import {
   loadStreamGuardSettings, openStreamGuardSettings,
   loadSignedUrlSettings, openSignedUrlSettings, openSignedUrlTool,
   loadRedirectSigningSettings, openRedirectSigningSettings,
+  loadApiDoc, openApiDocTry, filterApiDoc,
   loadEmailSettings, openEmailSettings, testEmail,
   loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
   banIpFromLog, unbanIp, clearBans,
+  loadApiKeys, openApiKeyCreateModal, toggleApiKey, deleteApiKey,
   getBanAutoRefreshConfig, saveBanAutoRefreshConfig, startBanAutoRefresh, stopBanAutoRefresh,
   loadBackups, createBackup, downloadBackup, openRestoreModal, openUploadRestoreModal, deleteBackup,
   initFilterSelects,
@@ -224,6 +226,22 @@ function bindSecurity() {
     if (action === "unban-ip") unbanIp(ip);
     else if (action === "extend-ban-ip") openBanExtendModal(ip, parseFloat(btn.dataset.expire || "0") || 0);
   });
+
+  // API 密钥表事件委托（启停 / 删除）
+  $("apiKeysBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const keyId = Number(btn.dataset.id);
+    const action = btn.dataset.action;
+    if (action === "toggle-api-key") toggleApiKey(keyId, btn.dataset.enabled !== "1");
+    else if (action === "delete-api-key") deleteApiKey(keyId, btn.dataset.name || "");
+  });
+}
+
+// ============ API 密钥（独立菜单） ============
+
+function bindApiKeys() {
+  $("createApiKeyBtn")?.addEventListener("click", () => openApiKeyCreateModal());
 
   // 封禁自动刷新
   $("ban_auto_refresh_enabled")?.addEventListener("change", () => {
@@ -494,6 +512,55 @@ function bindSystem() {
   });
 }
 
+// ============ API 文档（自动维护） ============
+
+function bindApiDoc() {
+  $("apiDocRefresh")?.addEventListener("click", () => loadApiDoc().catch((e) => showToast(e.message, true)));
+
+  // 记住密钥（仅本地，方便反复试调用）
+  const keyInput = $("apiDocKey");
+  keyInput?.addEventListener("input", () => {
+    try { localStorage.setItem("api_doc_key", keyInput.value.trim()); } catch (_) {}
+  });
+
+  // 连通性自测：用密钥打一个只读接口
+  $("apiDocSendTest")?.addEventListener("click", async () => {
+    const k = (keyInput && keyInput.value || "").trim();
+    const status = $("apiDocStatus");
+    if (!k) { if (status) { status.textContent = "请先填写密钥"; status.className = "pill pill-warn"; } return; }
+    if (status) { status.textContent = "检测中…"; status.className = "pill pill-neutral"; }
+    try {
+      const resp = await fetch("/_admin/api/auth/status", { headers: { "Authorization": `Bearer ${k}` } });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        if (status) { status.textContent = "密钥有效"; status.className = "pill pill-ok"; }
+        showToast("API 密钥连通正常。");
+      } else {
+        if (status) { status.textContent = `失败(${resp.status})`; status.className = "pill pill-danger"; }
+        showToast(data.error || `HTTP ${resp.status}`, true);
+      }
+    } catch (e) {
+      if (status) { status.textContent = "请求失败"; status.className = "pill pill-danger"; }
+      showToast(e.message, true);
+    }
+  });
+
+  // 列表事件委托（试一试）
+  $("apiDocBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-method]");
+    if (!btn) return;
+    openApiDocTry(btn.dataset.method, btn.dataset.path, btn.dataset.sample || "");
+  });
+
+  // 接口搜索（实时过滤）
+  $("apiDocSearch")?.addEventListener("input", () => filterApiDoc());
+  $("apiDocSearchClear")?.addEventListener("click", () => {
+    const input = $("apiDocSearch");
+    if (input) input.value = "";
+    filterApiDoc();
+  });
+}
+
 // ============ 鉴权 ============
 
 function bindAuth() {
@@ -551,11 +618,12 @@ function bindGlobalShortcuts() {
 const PAGE_INDEX = [
   { page: "overview", title: "系统概览", kw: "概览 首页 总览 仪表盘 dashboard overview" },
   { page: "routing", title: "路由配置", kw: "路由 规则 转发 前缀 重定向 routing rule" },
-  { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 security ban" },
+  { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 api 密钥 key token security ban" },
   { page: "geo", title: "IP 定位", kw: "定位 地理 离线库 mmdb 在线源 geo" },
   { page: "logs", title: "日志与审计", kw: "日志 审计 请求日志 应用日志 logs log" },
   { page: "system", title: "系统设置", kw: "系统 设置 缓存 去重 并发 system" },
   { page: "signing", title: "加签防护", kw: "签名 加签 防盗链 签名链接 signed url redirect" },
+  { page: "apidoc", title: "API 文档", kw: "api 文档 接口 文档 文档页 endpoint 开发者 doc" },
   { page: "backup", title: "备份与恢复", kw: "备份 恢复 快照 回滚 下载 backup restore" },
   { page: "email", title: "邮件提醒", kw: "邮件 提醒 通知 smtp 告警 发件 email mail" },
 ];
@@ -573,6 +641,8 @@ const COMMAND_INDEX = [
   { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "system", action: "ip-cache-settings" },
   { title: "请求去重配置", sub: "编辑请求去重参数", page: "system", action: "dedup-settings" },
   { title: "创建备份", sub: "生成一份数据快照", page: "backup", action: "create-backup" },
+  { title: "API 文档", sub: "查看/试调用后台接口", page: "apidoc", action: "goto" },
+  { title: "签发 API 密钥", sub: "创建调用后台接口的密钥", page: "apikeys", action: "new-apikey" },
 ];
 
 function searchIndex(q) {
@@ -678,6 +748,7 @@ function applySearchResult(r) {
     case "ip-cache-settings": activatePage("system"); openIpCacheSettings(); break;
     case "dedup-settings": activatePage("system"); openDedupSettings(); break;
     case "create-backup": activatePage("backup"); createBackup(); break;
+    case "new-apikey": activatePage("apikeys"); openApiKeyCreateModal(); break;
   }
 }
 
@@ -818,6 +889,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   bindGeo();
   bindLogs();
   bindSystem();
+  bindApiKeys();
+  bindApiDoc();
   bindAuth();
   bindOverlayClosers();
   bindGlobalShortcuts();

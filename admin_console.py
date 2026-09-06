@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -37,6 +38,184 @@ async def static_no_cache_middleware(request: web.Request, handler):
     return response
 
 
+# ============ API 文档自动维护：接口说明登记表 ============
+#
+# 设计目标：让「API 文档」页具备自我维护能力——
+#   1) 文档页直接读取 aiohttp 路由表，任何新增的 /_admin/api/* 接口都会自动出现；
+#   2) 此处登记富文本（分组 / 摘要 / 参数 / 请求体示例 / 备注），让文档更易用；
+#   3) 未登记的接口也会列出（仅路径 + 方法 + 提示「待补充说明」），绝不遗漏。
+#
+# 约定：新增后台 API 时，在此用「handler 方法名」登记一条即可自动并入文档；
+#       不登记也不会从文档消失（路由表兜底）。param.in ∈ {query, path, body}。
+_API_DOC_SPECS: Dict[str, Dict[str, Any]] = {
+    # —— API 密钥 ——
+    "list_api_keys": {"tag": "API 密钥", "summary": "列出全部 API 密钥", "params": [],
+                      "note": "响应仅含前缀/状态等元数据，不含明文与哈希"},
+    "create_api_key": {"tag": "API 密钥", "summary": "签发新密钥",
+                       "params": [{"name": "name", "in": "body", "type": "string", "required": True, "desc": "名称（≤64）"},
+                                  {"name": "readonly", "in": "body", "type": "bool", "required": False, "desc": "是否只读（仅 GET）"},
+                                  {"name": "expires_days", "in": "body", "type": "int", "required": False, "desc": "有效期天数，0=永久，≤3650"}],
+                       "body_sample": '{\n  "name": "自动化脚本",\n  "readonly": false,\n  "expires_days": 30\n}',
+                       "note": "明文密钥仅在响应中出现一次，请立即保存"},
+    "toggle_api_key": {"tag": "API 密钥", "summary": "启用/停用密钥",
+                       "params": [{"name": "key_id", "in": "path", "type": "int", "required": True, "desc": "密钥 ID"},
+                                  {"name": "enabled", "in": "body", "type": "bool", "required": True, "desc": "目标状态"}],
+                       "body_sample": '{"enabled": false}'},
+    "delete_api_key": {"tag": "API 密钥", "summary": "删除（吊销）密钥",
+                       "params": [{"name": "key_id", "in": "path", "type": "int", "required": True, "desc": "密钥 ID"}],
+                       "note": "删除后该密钥调用立即 401，不可恢复"},
+    # —— 路由组 ——
+    "list_route_groups": {"tag": "路由配置", "summary": "列出路由组（按路径前缀 + 请求域名分组）"},
+    "create_route_group": {"tag": "路由配置", "summary": "新建路由组", "params": [{"name": "path_prefix", "in": "body", "type": "string", "required": True, "desc": "路径前缀"}, {"name": "request_host", "in": "body", "type": "string", "required": True, "desc": "请求域名（空=全局）"}]},
+    "update_route_group": {"tag": "路由配置", "summary": "更新路由组"},
+    "delete_route_group": {"tag": "路由配置", "summary": "删除路由组"},
+    # —— 封禁 ——
+    "list_banned_ips": {"tag": "安全与封禁", "summary": "列出封禁名单", "params": [{"name": "limit", "in": "query", "type": "int", "required": False, "desc": "每页条数"}]},
+    "add_banned_ip": {"tag": "安全与封禁", "summary": "手动封禁 IP / 网段",
+                      "params": [{"name": "ip", "in": "body", "type": "string", "required": True, "desc": "IP 或 CIDR"},
+                                 {"name": "path_prefix", "in": "body", "type": "string", "required": False, "desc": "留空=全局封禁"},
+                                 {"name": "reason", "in": "body", "type": "string", "required": False, "desc": "封禁原因"},
+                                 {"name": "permanent", "in": "body", "type": "bool", "required": True, "desc": "是否永久"},
+                                 {"name": "duration_seconds", "in": "body", "type": "int", "required": False, "desc": "临时封禁时长（秒）"}],
+                      "body_sample": '{\n  "ip": "1.2.3.4",\n  "reason": "滥用",\n  "permanent": true\n}'},
+    "remove_banned_ip": {"tag": "安全与封禁", "summary": "解封 IP",
+                         "params": [{"name": "ip", "in": "path", "type": "string", "required": True, "desc": "IP 地址"}]},
+    "extend_banned_ip": {"tag": "安全与封禁", "summary": "延长封禁", "params": [{"name": "ip", "in": "path", "type": "string", "required": True, "desc": "IP"}, {"name": "duration_hours", "in": "body", "type": "number", "required": True, "desc": "延长小时数"}]},
+    "clear_banned_ips": {"tag": "安全与封禁", "summary": "清空全部封禁记录"},
+    # —— 日志与审计 ——
+    "list_route_logs": {"tag": "日志与审计", "summary": "查询请求转发日志（分页 + 筛选）",
+                        "params": [{"name": "page", "in": "query", "type": "int", "required": False, "desc": "页码"},
+                                   {"name": "limit", "in": "query", "type": "int", "required": False, "desc": "每页条数"},
+                                   {"name": "keyword", "in": "query", "type": "string", "required": False, "desc": "关键词"},
+                                   {"name": "path_prefix", "in": "query", "type": "string", "required": False, "desc": "路径前缀"},
+                                   {"name": "result_status", "in": "query", "type": "string", "required": False, "desc": "结果状态"}]},
+    "delete_route_logs": {"tag": "日志与审计", "summary": "删除日志",
+                          "params": [{"name": "ids", "in": "body", "type": "array", "required": False, "desc": "指定 ID 列表"}, {"name": "delete_all", "in": "body", "type": "bool", "required": False, "desc": "清空全部"}]},
+    "get_hotlink_stats": {"tag": "日志与审计", "summary": "盗链监控统计", "params": [{"name": "hours", "in": "query", "type": "int", "required": False, "desc": "统计窗口（小时）"}]},
+    "get_route_log_settings": {"tag": "日志与审计", "summary": "日志保留策略"},
+    "update_route_log_settings": {"tag": "日志与审计", "summary": "更新日志保留策略"},
+    "get_logging_settings": {"tag": "日志与审计", "summary": "磁盘日志设置"},
+    "update_logging_settings": {"tag": "日志与审计", "summary": "更新磁盘日志设置"},
+    "list_app_log_files": {"tag": "日志与审计", "summary": "应用日志文件列表"},
+    "get_app_log_content": {"tag": "日志与审计", "summary": "读取应用日志内容", "params": [{"name": "file", "in": "query", "type": "string", "required": True, "desc": "文件名"}, {"name": "tail_lines", "in": "query", "type": "int", "required": False, "desc": "末行数"}]},
+    # —— 系统设置 ——
+    "get_ip_cache_settings": {"tag": "系统设置", "summary": "请求结果缓存设置"},
+    "update_ip_cache_settings": {"tag": "系统设置", "summary": "更新结果缓存设置"},
+    "get_dedup_settings": {"tag": "系统设置", "summary": "请求去重设置"},
+    "update_dedup_settings": {"tag": "系统设置", "summary": "更新去重设置"},
+    "get_auto_ban_settings": {"tag": "系统设置", "summary": "自动封禁策略"},
+    "update_auto_ban_settings": {"tag": "系统设置", "summary": "更新自动封禁策略"},
+    "get_stream_guard_settings": {"tag": "系统设置", "summary": "流式守卫设置"},
+    "update_stream_guard_settings": {"tag": "系统设置", "summary": "更新流式守卫设置"},
+    # —— 加签防护 ——
+    "get_signed_url_settings": {"tag": "加签防护", "summary": "签名 URL 设置"},
+    "update_signed_url_settings": {"tag": "加签防护", "summary": "更新签名 URL 设置"},
+    "generate_signed_url": {"tag": "加签防护", "summary": "生成签名链接", "params": [{"name": "target_url", "in": "body", "type": "string", "required": True, "desc": "目标地址"}]},
+    "get_redirect_signing_settings": {"tag": "加签防护", "summary": "302 加签改写设置"},
+    "update_redirect_signing_settings": {"tag": "加签防护", "summary": "更新 302 加签改写设置"},
+    # —— IP 定位 ——
+    "get_geoip": {"tag": "IP 定位", "summary": "离线/在线定位源配置"},
+    "update_geoip": {"tag": "IP 定位", "summary": "更新定位源配置"},
+    "test_geoip": {"tag": "IP 定位", "summary": "测试在线源"},
+    "clear_geoip_online_cache": {"tag": "IP 定位", "summary": "清空在线定位缓存"},
+    "test_offline_geoip": {"tag": "IP 定位", "summary": "测试离线库"},
+    "sync_offline_geoip": {"tag": "IP 定位", "summary": "同步离线库"},
+    "rollback_offline_geoip": {"tag": "IP 定位", "summary": "回滚离线库"},
+    # —— 邮件提醒 ——
+    "get_email_settings": {"tag": "邮件提醒", "summary": "SMTP 邮件配置"},
+    "update_email_settings": {"tag": "邮件提醒", "summary": "更新 SMTP 配置"},
+    "test_email": {"tag": "邮件提醒", "summary": "发送测试邮件"},
+    # —— 备份与恢复 ——
+    "list_backups": {"tag": "备份与恢复", "summary": "备份列表"},
+    "create_backup": {"tag": "备份与恢复", "summary": "创建备份快照"},
+    "download_backup": {"tag": "备份与恢复", "summary": "下载备份文件", "params": [{"name": "filename", "in": "path", "type": "string", "required": True, "desc": "文件名"}]},
+    "restore_backup": {"tag": "备份与恢复", "summary": "恢复备份（multipart）"},
+    "delete_backup": {"tag": "备份与恢复", "summary": "删除备份", "params": [{"name": "filename", "in": "path", "type": "string", "required": True, "desc": "文件名"}]},
+    # —— 仪表盘 ——
+    "bootstrap": {"tag": "概览", "summary": "聚合数据（路由组/规则/统计），供首页仪表盘使用"},
+    # —— 规则 ——
+    "list_rules": {"tag": "路由配置", "summary": "列出转发规则", "params": [{"name": "group_path_prefix", "in": "query", "type": "string", "required": False, "desc": "按路由组过滤"}]},
+    "create_rule": {"tag": "路由配置", "summary": "新建转发规则",
+                    "params": [{"name": "path_prefix", "in": "body", "type": "string", "required": True, "desc": "路径前缀"},
+                               {"name": "target_url", "in": "body", "type": "string", "required": True, "desc": "目标地址"},
+                               {"name": "follow_redirects", "in": "body", "type": "bool", "required": False, "desc": "是否跟随上游重定向"}],
+                    "body_sample": '{\n  "path_prefix": "/play",\n  "target_url": "https://cdn.example.com/hop",\n  "follow_redirects": true\n}'},
+    "get_rule": {"tag": "路由配置", "summary": "查看单条规则", "params": [{"name": "rule_id", "in": "path", "type": "int", "required": True, "desc": "规则 ID"}]},
+    "update_rule": {"tag": "路由配置", "summary": "更新规则", "params": [{"name": "rule_id", "in": "path", "type": "int", "required": True, "desc": "规则 ID"}]},
+    "delete_rule": {"tag": "路由配置", "summary": "删除规则", "params": [{"name": "rule_id", "in": "path", "type": "int", "required": True, "desc": "规则 ID"}]},
+    # —— 鉴权状态 ——
+    "auth_status": {"tag": "概览", "summary": "查询后台鉴权开关与当前登录态"},
+    # —— 日志清理 ——
+    "cleanup_log_files": {"tag": "日志与审计", "summary": "按保留策略清理请求日志"},
+    "cleanup_log_files_on_disk": {"tag": "日志与审计", "summary": "清理磁盘应用日志文件"},
+}
+
+# 用法说明：与 _API_DOC_SPECS 同层，按 handler 方法名补充「怎么用」。
+# 文档页会把它渲染为「用法」区块，供开发者快速上手；未列出的接口不显示该区块。
+_API_DOC_USAGE: Dict[str, str] = {
+    "list_api_keys": "列出你签发的全部密钥（仅元数据，不含明文/哈希）。适合在吊销或审计前先查看密钥 ID 与状态。",
+    "create_api_key": "签发新密钥。name 仅作辨识；readonly=true 时该密钥只能调 GET 接口且不能管理密钥本身；expires_days=0 表示永久。请务必在弹窗里复制明文——系统只存哈希，关闭后无法找回。",
+    "toggle_api_key": "启用/停用指定密钥。停用后该密钥的所有调用立即返回 401，可用于紧急止血而不删除（保留审计记录）。",
+    "delete_api_key": "吊销（删除）密钥。删除后调用立即 401 且不可恢复；需要长期停用时优先用 toggle 而非删除。",
+    "list_route_groups": "返回所有路由组（按 路径前缀 + 请求域名 维度）。route_groups 是 rules 的容器，新增规则前先确认所属组。",
+    "create_route_group": "新建路由组。path_prefix 决定命中哪些请求，request_host 为空表示全局适用。",
+    "update_route_group": "更新路由组的地区匹配/备注等属性（按 path_prefix + request_host 定位）。改后建议回概览页确认分组状态。",
+    "delete_route_group": "删除整个路由组及其下规则（不可恢复），删除前请先确认无线上流量依赖该前缀。",
+    "list_banned_ips": "分页返回封禁名单。注意：封禁只拦截代理转发路径，不影响 /_admin 管理接口。",
+    "add_banned_ip": "手动封禁一个 IP 或 CIDR。path_prefix 留空=全局封禁；permanent=false 时需带 duration_seconds。reasons 建议填来源便于审计。",
+    "remove_banned_ip": "按 IP 解封。CIDR 网段需原样传回完整网段串。",
+    "extend_banned_ip": "延长临时封禁时长（小时），不影响到期后的永久/临时属性。",
+    "clear_banned_ips": "清空全部封禁记录（不可恢复），谨慎调用。",
+    "list_route_logs": "查询请求转发日志。支持 keyword/path_prefix/result_status 等筛选与 limit 分页；result_status=upstream_error 可快速定位上游异常。",
+    "delete_route_logs": "删除日志：传 ids 数组删指定条目，或 delete_all=true 清空（不可恢复）。",
+    "get_hotlink_stats": "盗链监控统计。hours 指定统计窗口，用于发现异常 Referer 来源 IP。",
+    "get_route_log_settings": "查看日志保留策略（按天数/条数）。",
+    "update_route_log_settings": "更新日志保留策略，避免日志无限增长。",
+    "get_logging_settings": "查看磁盘应用日志（文件）的滚动/保留配置。",
+    "update_logging_settings": "更新磁盘应用日志配置。",
+    "list_app_log_files": "列出服务端应用日志文件，配合 get_app_log_content 读取。",
+    "get_app_log_content": "读取指定日志文件内容；tail_lines 控制末行数，便于排查最近问题。",
+    "get_ip_cache_settings": "查看请求结果缓存（ip_result_cache）开关与 TTL。",
+    "update_ip_cache_settings": "调整结果缓存参数；调大 TTL 可降上游压力，但会延迟上游变更生效。",
+    "get_dedup_settings": "查看请求去重配置。",
+    "update_dedup_settings": "调整去重窗口/并发限制，防止同一请求被重复打向上游。",
+    "get_auto_ban_settings": "查看自动封禁策略（阈值/窗口）。",
+    "update_auto_ban_settings": "调整自动封禁参数；仅针对代理转发路径，不影响后台访问。",
+    "get_stream_guard_settings": "查看流式守卫配置（防滥用/限速）。",
+    "update_stream_guard_settings": "调整流式守卫参数。",
+    "get_signed_url_settings": "查看签名 URL（入口校验）配置：是否启用、TTL、是否绑定 IP。",
+    "update_signed_url_settings": "更新签名 URL 配置。轮换 secret 会作废所有存量签名链接。",
+    "generate_signed_url": "临时为一个目标地址生成签名链接，便于在不改规则的情况下快速验证签名链路。",
+    "get_redirect_signing_settings": "查看 302 加签改写（出口改写）配置。",
+    "update_redirect_signing_settings": "更新 302 加签改写配置；启用后上游 302 的裸地址会被改写为系统签名链接。",
+    "get_geoip": "查看在线定位源与离线 MMDB 配置。",
+    "update_geoip": "更新定位源配置；权重轮询 + 离线兜底。",
+    "test_geoip": "用 sample IP 测试在线源是否可用。",
+    "clear_geoip_online_cache": "清空在线定位结果缓存，使下一次定位重新查询源。",
+    "test_offline_geoip": "用 sample IP 测试离线 MMDB 是否可用。",
+    "sync_offline_geoip": "同步离线库（下载最新 MMDB），建议先 test 再 sync。",
+    "rollback_offline_geoip": "回滚到上一份离线库，sync 异常时兜底。",
+    "get_email_settings": "查看 SMTP 邮件提醒配置（地址脱敏）。",
+    "update_email_settings": "更新 SMTP 配置；改后点「发送测试邮件」验证。",
+    "test_email": "发送一封测试邮件到配置收件人，验证 SMTP 连通。",
+    "list_backups": "列出服务端备份快照（含文件名/大小/时间）。",
+    "create_backup": "生成一份当前配置数据快照，重大变更前建议先备份。",
+    "download_backup": "下载指定备份文件到本地。",
+    "restore_backup": "从备份恢复（multipart 上传或选服务端文件），支持覆盖/合并。",
+    "delete_backup": "删除指定备份文件。",
+    "bootstrap": "聚合仪表盘数据（路由组/规则/统计/各模块开关），前端首页与概览卡依赖此接口；开销略大，勿高频轮询。",
+    "list_rules": "列出某路由组下全部转发规则，含正则重写/地区过滤/流式等开关。",
+    "create_rule": "新建转发规则。target_url 为上游地址；follow_redirects 决定本地代理是否跟随上游重定向。",
+    "get_rule": "查看单条规则详情。",
+    "update_rule": "更新规则字段（优先级/流式/地区过滤等）。",
+    "delete_rule": "删除规则；删除后该前缀的匹配将回退到默认路由/其他规则。",
+    "auth_status": "只读查询鉴权开关与当前会话登录态，可用于健康检查或「API 文档」页的连通自测。",
+    "cleanup_log_files": "按保留策略批量清理请求日志库数据。",
+    "cleanup_log_files_on_disk": "清理磁盘上的历史应用日志文件（按保留天数）。",
+}
+
+
+
 class AdminConsole:
     def __init__(
         self,
@@ -60,8 +239,11 @@ class AdminConsole:
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.backup_dir = Path(__file__).resolve().parent / "data" / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+        # API 密钥 last_used 节流（内存态，避免每次调用都写库）
+        self._api_key_touch_at: Dict[int, float] = {}
 
     def register(self, app: web.Application) -> None:
+        self.app = app
         if static_no_cache_middleware not in app.middlewares:
             app.middlewares.append(static_no_cache_middleware)
         app.router.add_get("/_admin", self.index)
@@ -71,7 +253,14 @@ class AdminConsole:
         app.router.add_post("/_admin/api/auth/login", self.login)
         app.router.add_get("/_admin/api/auth/public-key", self.public_key)
         app.router.add_post("/_admin/api/auth/logout", self.logout)
+        # API 密钥管理（仅浏览器会话可操作，API 密钥自身不可管理密钥——防权限自增殖）
+        app.router.add_get("/_admin/api/keys", self.list_api_keys)
+        app.router.add_post("/_admin/api/keys", self.create_api_key)
+        app.router.add_post("/_admin/api/keys/{key_id:\d+}/toggle", self.toggle_api_key)
+        app.router.add_delete("/_admin/api/keys/{key_id:\d+}", self.delete_api_key)
         app.router.add_get("/_admin/api/bootstrap", self.bootstrap)
+        # API 文档自动维护：从路由表汇总全部接口（新增接口自动出现）
+        app.router.add_get("/_admin/api/doc", self.api_doc_catalog)
         app.router.add_get("/_admin/api/route-groups", self.list_route_groups)
         app.router.add_post("/_admin/api/route-groups", self.create_route_group)
         app.router.add_put("/_admin/api/route-groups", self.update_route_group)
@@ -236,8 +425,128 @@ class AdminConsole:
         response.del_cookie(config.cookie_name, path="/_admin")
         return response
 
+    # ===== API 密钥管理（仅浏览器会话；API 密钥访问这里会被 _run_protected 拦下）=====
+
+    async def list_api_keys(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: {"items": self.config_store.list_api_keys()})
+
+    async def create_api_key(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+
+        def operation():
+            name = str(payload.get("name", "") or "").strip()
+            if not name:
+                raise ValueError("密钥名称不能为空")
+            if len(name) > 64:
+                raise ValueError("密钥名称过长（≤64 字符）")
+            readonly = bool(payload.get("readonly", False))
+            try:
+                expires_days = int(payload.get("expires_days", 0) or 0)
+            except (TypeError, ValueError):
+                raise ValueError("有效期天数非法")
+            if expires_days < 0 or expires_days > 3650:
+                raise ValueError("有效期天数须在 0（永久）~ 3650 之间")
+            created = self.config_store.create_api_key(name, readonly=readonly, expires_days=expires_days)
+            logger.info("签发 API 密钥: name=%s readonly=%s expires_days=%s prefix=%s", name, readonly, expires_days, created["key_prefix"])
+            return created
+
+        return await self._run_protected(request, operation)
+
+    async def toggle_api_key(self, request: web.Request) -> web.Response:
+        key_id = int(request.match_info.get("key_id", "0") or 0)
+
+        async def operation():
+            payload = await self._read_json(request)
+            enabled = bool(payload.get("enabled", True))
+            result = self.config_store.set_api_key_enabled(key_id, enabled)
+            logger.info("API 密钥 %s 已%s", key_id, "启用" if enabled else "停用")
+            return result
+
+        return await self._run_protected(request, operation)
+
+    async def delete_api_key(self, request: web.Request) -> web.Response:
+        key_id = int(request.match_info.get("key_id", "0") or 0)
+
+        def operation():
+            if not self.config_store.delete_api_key(key_id):
+                raise KeyError(f"API 密钥 {key_id} 不存在")
+            self._api_key_touch_at.pop(key_id, None)
+            logger.info("API 密钥 %s 已删除（吊销）", key_id)
+            return {"deleted": True, "id": key_id}
+
+        return await self._run_protected(request, operation)
+
     async def bootstrap(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self.config_store.get_dashboard_data())
+
+    # ===== API 文档自动维护（从路由表汇总，新增接口自动出现）=====
+
+    async def api_doc_catalog(self, request: web.Request) -> web.Response:
+        """返回全部 /_admin/api/* 接口清单（路径/方法/分组/参数/示例）。
+
+        文档页只读此端点即可渲染；机制上不依赖手工登记——
+        未登记 handler 也会出现在清单里（仅标「待补充说明」）。
+        """
+        return await self._run_protected(request, lambda: self._build_api_catalog())
+
+    def _build_api_catalog(self) -> Dict[str, Any]:
+        specs = _API_DOC_SPECS
+        routes = [
+            r for r in self.app.router.routes()
+            if getattr(r, "method", "*") != "*"  # 跳过静态资源等通配路由
+        ]
+        # aiohttp 的 add_get 默认 allow_head=True，会为同一 handler 再注册一条 HEAD 路由
+        # （HEAD 与对应 GET 完全同义，仅不返回响应体）。文档里逐条列出属于重复噪音，
+        # 因此先收集「GET 路由的 (path, handler)」，再把同 handler 的 HEAD 去重掉。
+        # 注：用 handler.__func__ 而非绑定方法本身做键，避免每次访问生成的绑定方法对象不同。
+        get_routes: set = set()
+        for route in routes:
+            if route.method != "GET":
+                continue
+            handler = getattr(route, "handler", None)
+            if handler is None:
+                continue
+            path = getattr(getattr(route, "resource", None), "canonical", "") or ""
+            get_routes.add((path, getattr(handler, "__func__", handler)))
+
+        entries: list = []
+        seen: set = set()
+        for route in routes:
+            method = getattr(route, "method", "*")
+            resource = getattr(route, "resource", None)
+            path = getattr(resource, "canonical", "") or ""
+            if not path.startswith("/_admin/api/"):
+                continue
+            if path in ("/_admin/api/doc",):  # 不把文档自身列入
+                continue
+            # 登录/登出/公钥属于鉴权握手，不纳入 API 文档
+            if path in ("/_admin/api/auth/login", "/_admin/api/auth/logout", "/_admin/api/auth/public-key"):
+                continue
+            handler = getattr(route, "handler", None)
+            # 去掉 aiohttp 为 GET 自动注册的 HEAD 重复项（同 handler + 同路径）
+            if method == "HEAD" and handler is not None:
+                if (path, getattr(handler, "__func__", handler)) in get_routes:
+                    continue
+            name = getattr(handler, "__name__", "") if handler else ""
+            key = f"{method} {path}"
+            if key in seen:
+                continue
+            seen.add(key)
+            spec = specs.get(name, {})
+            doc = {
+                "method": method,
+                "path": path,
+                "tag": spec.get("tag", "其他"),
+                "summary": spec.get("summary", ""),
+                "params": spec.get("params", []),
+                "body_sample": spec.get("body_sample", ""),
+                "note": spec.get("note", ""),
+                "usage": _API_DOC_USAGE.get(name, ""),
+                "documented": bool(spec),
+            }
+            entries.append(doc)
+        entries.sort(key=lambda e: (e["tag"], e["method"], e["path"]))
+        return {"items": entries}
 
     async def list_route_groups(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: {"items": self.config_store.list_route_groups()})
@@ -1118,6 +1427,43 @@ class AdminConsole:
     def _get_auth_config(self):
         return self.config_store.bootstrap_config.admin_auth
 
+    # ===== API 密钥鉴权（仅 /_admin/api/* 接口；/_admin HTML 页面与登录态不接受）=====
+
+    _API_KEY_TOUCH_INTERVAL = 60.0
+
+    @staticmethod
+    def _extract_api_key(request: web.Request) -> str:
+        """从请求头提取 API 密钥明文：Authorization: Bearer n302_xxx 或 X-API-Key: n302_xxx。"""
+        auth_header = str(request.headers.get("Authorization", "") or "")
+        if auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip()
+        return str(request.headers.get("X-API-Key", "") or "").strip()
+
+    def _api_key_row(self, request: web.Request) -> Optional[Dict[str, Any]]:
+        """校验请求头中的 API 密钥；有效返回密钥行（sha256 精确命中唯一索引），无效返回 None。"""
+        raw_key = self._extract_api_key(request)
+        if not raw_key:
+            return None
+        try:
+            return self.config_store.find_api_key(raw_key)
+        except Exception:  # noqa: BLE001 - 鉴权失败一律拒绝，绝不因异常放行
+            return None
+
+    def _touch_api_key_throttled(self, key_id: int) -> None:
+        """更新密钥最近使用时间/次数；同一密钥 60 秒内至多落库一次（避免写放大）。"""
+        now = time.monotonic()
+        last = self._api_key_touch_at.get(key_id, 0.0)
+        if now - last < self._API_KEY_TOUCH_INTERVAL:
+            return
+        self._api_key_touch_at[key_id] = now
+        try:
+            asyncio.get_running_loop().run_in_executor(
+                None, self.config_store.touch_api_key, key_id,
+            )
+        except Exception:  # noqa: BLE001 - 统计失败不影响请求
+            pass
+
+
     def _is_auth_enabled(self) -> bool:
         config = self._get_auth_config()
         return bool(config.enabled and config.username and config.password)
@@ -1168,7 +1514,15 @@ class AdminConsole:
 
     async def _run_protected(self, request: web.Request, operation, status: int = 200) -> web.Response:
         if self._is_auth_enabled() and not self._is_authenticated(request):
-            return self._json({"error": "未登录或登录已失效。"}, status=401)
+            # Cookie 会话无效时回落校验 API 密钥（仅 /_admin/api/*；HTML 页面不走这里）
+            key_row = self._api_key_row(request)
+            if key_row is None:
+                return self._json({"error": "未登录、登录已失效或 API 密钥无效。"}, status=401)
+            if key_row["readonly"] and request.method not in ("GET", "HEAD", "OPTIONS"):
+                return self._json({"error": "只读 API 密钥不允许执行写操作。"}, status=403)
+            if request.path.startswith("/_admin/api/keys"):
+                return self._json({"error": "API 密钥不允许管理 API 密钥，请使用浏览器会话操作。"}, status=403)
+            self._touch_api_key_throttled(int(key_row["id"]))
         return await self._run(operation, status=status)
 
     async def _run(self, operation, status: int = 200) -> web.Response:

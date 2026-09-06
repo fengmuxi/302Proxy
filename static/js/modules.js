@@ -18,7 +18,7 @@ import {
 import { apiFetch } from './api.js';
 import {
   showToast, renderPagination, openFormModal, openConfirm, closeModal,
-  openDrawer, closeDrawer, syncSelect,
+  openDrawer, closeDrawer, syncSelect, copyToClipboard,
 } from './components.js';
 
 const esc = (v) => escapeHtml(v == null ? "" : String(v));
@@ -39,7 +39,7 @@ function formatTtl(sec) {
 
 // ============ 页面激活 / 导航 ============
 
-const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system", "backup", "email", "signing"];
+const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system", "backup", "email", "signing", "apidoc", "apikeys"];
 
 export function setActivePage(page) {
   state.activeModule = page;
@@ -53,7 +53,7 @@ export function setActivePage(page) {
   const labels = {
     overview: "系统概览", routing: "路由配置", security: "安全与封禁",
     geo: "IP 定位", logs: "日志与审计", system: "系统设置",
-    backup: "备份与恢复", email: "邮件提醒", signing: "加签防护",
+    backup: "备份与恢复", email: "邮件提醒", signing: "加签防护", apidoc: "API 文档", apikeys: "API 密钥",
   };
   if (crumb) crumb.innerHTML = `${esc(labels[page] || "")} / <b>${esc(labels[page] || "")}</b>`;
   try {
@@ -87,6 +87,9 @@ export function activatePage(page) {
       if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
       startTrackedAutoRefresh();
       break;
+    case "apikeys":
+      loadApiKeys();
+      break;
     case "geo":
       refreshGeo();
       break;
@@ -107,6 +110,9 @@ export function activatePage(page) {
       // （此前误挂在 security 分支导致刷新后不加载的教训：页面激活分支必须与卡片所在页一致）
       loadSignedUrlSettings();
       loadRedirectSigningSettings();
+      break;
+    case "apidoc":
+      loadApiDoc();
       break;
     case "backup":
       loadBackups();
@@ -2651,6 +2657,318 @@ export function startBanAutoRefresh() {
   }, interval * 1000);
   const el = document.getElementById("ban_auto_refresh_status");
   if (el) { el.textContent = "●"; el.className = "auto-refresh-status running"; }
+}
+
+// ============ API 密钥管理 ============
+
+// 列表只含前缀 / 哈希派生信息，明文只在签发响应中出现一次
+export async function loadApiKeys() {
+  try {
+    const data = await apiFetch("/_admin/api/keys");
+    state.apiKeys = data.items || [];
+    renderApiKeys();
+  } catch (_) {}
+}
+
+function formatApiKeyTime(sec) {
+  if (!sec || sec <= 0) return "—";
+  try {
+    return new Date(sec * 1000).toLocaleString("zh-CN", { hour12: false });
+  } catch (_) { return String(sec); }
+}
+
+function renderApiKeys() {
+  const tbody = document.getElementById("apiKeysBody");
+  const summary = document.getElementById("apiKeySummary");
+  const items = state.apiKeys || [];
+  if (summary) summary.textContent = `共 ${items.length} 个`;
+  if (!tbody) return;
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty" style="padding:26px 0">暂无 API 密钥，点右上角「签发密钥」创建第一个。</td></tr>`;
+    return;
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  tbody.innerHTML = items.map((k) => {
+    const expired = k.expired || (k.expires_at && k.expires_at > 0 && k.expires_at <= nowSec);
+    let statusBadge;
+    if (expired) statusBadge = '<span class="pill pill-warn">已过期</span>';
+    else if (!k.enabled) statusBadge = '<span class="pill pill-danger">已停用</span>';
+    else statusBadge = '<span class="pill pill-ok">启用中</span>';
+    const permBadge = k.readonly ? '<span class="pill pill-neutral">只读</span>' : '<span class="pill pill-ok">读写</span>';
+    const toggleLabel = k.enabled ? "停用" : "启用";
+    const expiresText = k.expires_at && k.expires_at > 0
+      ? `${formatApiKeyTime(k.expires_at)}${expired ? "（已过期）" : ""}`
+      : "永久";
+    return `
+    <tr>
+      <td><strong>${esc(k.name)}</strong></td>
+      <td><code class="mono">${esc(k.key_prefix)}…</code></td>
+      <td>${permBadge}</td>
+      <td>${statusBadge}</td>
+      <td>${k.use_count || 0}</td>
+      <td>${formatApiKeyTime(k.created_at)}</td>
+      <td>${k.last_used_at ? formatApiKeyTime(k.last_used_at) : "—"}</td>
+      <td>${expiresText}</td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn btn-sm" data-action="toggle-api-key" data-id="${k.id}" data-enabled="${k.enabled ? 1 : 0}" ${expired ? "disabled" : ""}>${toggleLabel}</button>
+        <button class="btn btn-sm btn-danger" data-action="delete-api-key" data-id="${k.id}" data-name="${esc(k.name)}">删除</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+}
+
+export function openApiKeyCreateModal() {
+  openFormModal({
+    title: "签发 API 密钥",
+    schema: [
+      { key: "name", label: "密钥名称", type: "text", required: true, placeholder: "如：自动化脚本 / 监控面板", hint: "仅用于辨识用途，≤64 字符" },
+      { key: "readonly", label: "只读模式", type: "switch", default: false, hint: "开启后该密钥仅能调用 GET 接口（查询类），且无法访问密钥管理本身" },
+      { key: "expires_days", label: "有效期（天）", type: "number", default: 0, hint: "0 表示永久有效，最大 3650 天" },
+    ],
+    values: { name: "", readonly: false, expires_days: 0 },
+    validate: (out) => {
+      if (!String(out.name || "").trim()) return "密钥名称不能为空";
+      if (String(out.name).trim().length > 64) return "密钥名称过长（≤64 字符）";
+      const days = Number(out.expires_days);
+      if (!Number.isFinite(days) || days < 0 || days > 3650) return "有效期须在 0（永久）~ 3650 之间";
+      return null;
+    },
+    onSave: async (out) => {
+      const created = await apiFetch("/_admin/api/keys", {
+        method: "POST",
+        body: JSON.stringify({
+          name: String(out.name).trim(),
+          readonly: Boolean(out.readonly),
+          expires_days: Math.round(Number(out.expires_days) || 0),
+        }),
+      });
+      showToast("API 密钥已签发，请立即保存明文");
+      await loadApiKeys();
+      showApiKeyOnceModal(created);
+    },
+  });
+}
+
+// 明文一次性展示弹窗（不走 openFormModal 的保存流程，仅展示 + 复制）
+function showApiKeyOnceModal(created) {
+  const modalEl = document.getElementById("modal");
+  const mask = document.getElementById("modalMask");
+  if (!modalEl || !mask) return;
+  const raw = created && created.key ? String(created.key) : "";
+  const expiredText = created && created.expires_at ? formatApiKeyTime(created.expires_at) : "永久";
+  modalEl.style.width = "";
+  modalEl.innerHTML = `
+    <div class="modal-head"><div class="modal-title">密钥已签发 · 仅此一次展示</div><button class="icon-btn" id="modalClose">✕</button></div>
+    <div class="modal-body">
+      <div class="form-note" style="border-left:3px solid var(--warn,#e6a23c);padding-left:10px;line-height:1.7">
+        系统只保存密钥哈希，<strong>关闭本弹窗后明文不可再查看</strong>。请立即复制并妥善保管。
+      </div>
+      <div class="form-field"><label>密钥明文</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="input mono" id="apiKeyPlaintext" readonly value="${esc(raw)}" style="flex:1;user-select:all">
+          <button class="btn btn-primary" id="apiKeyCopyBtn" type="button">复制</button>
+        </div>
+      </div>
+      <div class="form-field"><label>密钥信息</label>
+        <div class="hint">名称：${esc(created && created.name ? created.name : "")} · 前缀：<code class="mono">${esc(created && created.key_prefix ? created.key_prefix : "")}…</code> · 到期：${esc(expiredText)}</div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-primary" id="modalCancel">我已保存，关闭</button></div>`;
+  document.getElementById("modalClose").onclick = closeModal;
+  document.getElementById("modalCancel").onclick = closeModal;
+  document.getElementById("apiKeyCopyBtn").onclick = () => {
+    copyToClipboard(raw);
+  };
+  mask.classList.add("open");
+  window.setTimeout(() => {
+    const input = document.getElementById("apiKeyPlaintext");
+    if (input) { input.focus(); input.select(); }
+  }, 50);
+}
+
+export function toggleApiKey(keyId, enabled) {
+  const actionText = enabled ? "启用" : "停用";
+  openConfirm({
+    title: `${actionText} API 密钥`,
+    message: `确认${actionText}该 API 密钥吗？${enabled ? "" : "停用后使用此密钥的调用会立即收到 401。"}`,
+    danger: !enabled,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/keys/${keyId}/toggle`, { method: "POST", body: JSON.stringify({ enabled }) });
+        showToast(`API 密钥已${actionText}`);
+        loadApiKeys();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
+export function deleteApiKey(keyId, name) {
+  openConfirm({
+    title: "删除 API 密钥",
+    message: `确认删除密钥「${esc(name)}」吗？删除后使用此密钥的调用会立即收到 401，此操作不可恢复。`,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/keys/${keyId}`, { method: "DELETE" });
+        showToast("API 密钥已删除");
+        loadApiKeys();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
+// ============ API 文档（自动维护） ============
+
+const _API_DOC_METHOD_CLASS = {
+  GET: "pill-ok", POST: "pill-info", PUT: "pill-warn", DELETE: "pill-danger",
+};
+
+function _apiDocMethodBadge(method) {
+  const cls = _API_DOC_METHOD_CLASS[method] || "pill-neutral";
+  return `<span class="pill ${cls}">${esc(method)}</span>`;
+}
+
+export async function loadApiDoc() {
+  // 恢复上一次填写的密钥
+  const savedKey = localStorage.getItem("api_doc_key") || "";
+  const keyInput = document.getElementById("apiDocKey");
+  if (keyInput && !keyInput.value && savedKey) keyInput.value = savedKey;
+  try {
+    const data = await apiFetch("/_admin/api/doc");
+    state.apiDoc = data.items || [];
+    // 重新加载时沿用当前搜索词，避免「输入框有值但列表全显」的不一致
+    const searchInput = document.getElementById("apiDocSearch");
+    renderApiDoc(searchInput ? searchInput.value : "");
+  } catch (e) { showToast(e.message, true); }
+}
+
+function renderApiDoc(keyword = "") {
+  const body = document.getElementById("apiDocBody");
+  if (!body) return;
+  const all = state.apiDoc || [];
+  const kw = String(keyword || "").trim().toLowerCase();
+  // 关键词匹配：方法 / 路径 / 摘要 / 分组 / 用法 / 参数名与说明
+  const matched = kw
+    ? all.filter((it) => {
+        const hay = [
+          it.method, it.path, it.summary, it.tag, it.usage,
+          ...(it.params || []).flatMap((p) => [p.name, p.desc, p.in, p.type]),
+        ].join(" ").toLowerCase();
+        return hay.includes(kw);
+      })
+    : all;
+  // 搜索结果汇总（渲染在搜索栏旁），只在有数据时更新
+  const summary = document.getElementById("apiDocResultCount");
+  if (summary) {
+    summary.textContent = kw ? `${matched.length} / ${all.length}` : `共 ${all.length}`;
+    summary.className = "pill " + (kw ? "pill-info" : "pill-neutral");
+  }
+  if (!all.length) {
+    body.innerHTML = `<div class="card"><div class="panel-body">暂无可展示的接口。</div></div>`;
+    return;
+  }
+  if (!matched.length) {
+    body.innerHTML = `<div class="card"><div class="panel-body">没有匹配「${esc(keyword)}」的接口。</div></div>`;
+    return;
+  }
+  // 按 tag 分组并保持出现顺序
+  const order = [];
+  const groups = {};
+  matched.forEach((it) => {
+    const g = it.tag || "其他";
+    if (!groups[g]) { groups[g] = []; order.push(g); }
+    groups[g].push(it);
+  });
+  body.innerHTML = order.map((g) => `
+    <div class="card" style="margin-bottom:16px">
+      <div class="panel-head"><div class="panel-title">${esc(g)}</div><span class="pill pill-neutral">${groups[g].length}</span></div>
+      <div class="panel-body" style="padding:0">
+        ${groups[g].map((it) => _apiDocRow(it)).join("")}
+      </div>
+    </div>`).join("");
+}
+
+export function filterApiDoc() {
+  const input = document.getElementById("apiDocSearch");
+  renderApiDoc(input ? input.value : "");
+}
+
+function _apiDocRow(it) {
+  const paramRows = (it.params || []).length
+    ? `<table class="api-param-table"><thead><tr><th>参数</th><th>位置</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>${
+        it.params.map((p) => `<tr><td><code class="mono">${esc(p.name)}</code></td><td>${esc(p.in || "")}</td><td>${esc(p.type || "")}</td><td>${p.required ? "是" : "否"}</td><td>${esc(p.desc || "")}</td></tr>`).join("")
+      }</tbody></table>`
+    : "";
+  const sample = it.body_sample
+    ? `<div class="hint" style="margin:6px 0 2px">请求体示例</div><pre class="api-sample">${esc(it.body_sample)}</pre>`
+    : "";
+  const usage = it.usage
+    ? `<div class="hint api-usage"><b>用法：</b>${esc(it.usage)}</div>`
+    : "";
+  const note = it.note ? `<div class="hint" style="color:var(--warn)">${esc(it.note)}</div>` : "";
+  const undocumentedBadge = it.documented ? "" : '<span class="pill pill-warn" style="margin-left:6px">待补充说明</span>';
+  return `
+    <div class="api-doc-row">
+      <div class="api-doc-head">
+        ${_apiDocMethodBadge(it.method)}
+        <code class="mono api-doc-path">${esc(it.path)}</code>
+        <span class="api-doc-summary">${esc(it.summary || "")}${undocumentedBadge}</span>
+        <button class="btn btn-sm api-doc-try" data-method="${esc(it.method)}" data-path="${esc(it.path)}" data-sample="${esc(it.body_sample || "")}">试一试</button>
+      </div>
+      ${paramRows}
+      ${sample}
+      ${usage}
+      ${note}
+    </div>`;
+}
+
+export function openApiDocTry(method, path, sample) {
+  const modalEl = document.getElementById("modal");
+  const mask = document.getElementById("modalMask");
+  if (!modalEl || !mask) return;
+  const keyInput = document.getElementById("apiDocKey");
+  const key = (keyInput && keyInput.value || "").trim();
+  const needsBody = method !== "GET" && method !== "HEAD";
+  modalEl.style.width = "";
+  modalEl.innerHTML = `
+    <div class="modal-head"><div class="modal-title">试调用 ${esc(method)} ${esc(path)}</div><button class="icon-btn" id="modalClose">✕</button></div>
+    <div class="modal-body">
+      <div class="form-field"><label>鉴权头</label>
+        <div class="hint">将使用下方密钥以 <code class="mono">Authorization: Bearer</code> 发送</div>
+        <input class="input mono" id="apiDocTryKey" value="${esc(key)}" autocomplete="off">
+      </div>
+      ${needsBody ? `<div class="form-field"><label>请求体 (JSON)</label><textarea class="input mono" id="apiDocTryBody" rows="6" style="font-family:var(--mono)">${esc(sample || "{}")}</textarea></div>` : ""}
+      <div class="form-field"><label>响应</label><pre class="api-sample" id="apiDocTryResp" style="max-height:280px;overflow:auto">（点击「发送」查看结果）</pre></div>
+    </div>
+    <div class="modal-foot"><button class="btn" id="modalCancel">关闭</button><button class="btn btn-primary" id="apiDocTrySend">发送</button></div>`;
+  document.getElementById("modalClose").onclick = closeModal;
+  document.getElementById("modalCancel").onclick = closeModal;
+  document.getElementById("apiDocTrySend").onclick = async () => {
+    const k = document.getElementById("apiDocTryKey").value.trim();
+    const sendBtn = document.getElementById("apiDocTrySend");
+    const respEl = document.getElementById("apiDocTryResp");
+    sendBtn.disabled = true; sendBtn.textContent = "发送中…";
+    try {
+      const headers = { "Accept": "application/json" };
+      if (k) headers["Authorization"] = `Bearer ${k}`;
+      const opts = { method, headers };
+      if (needsBody) {
+        headers["Content-Type"] = "application/json";
+        opts.body = document.getElementById("apiDocTryBody").value;
+      }
+      const resp = await fetch(path, opts);
+      let text = await resp.text();
+      let pretty = text;
+      try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+      respEl.textContent = `HTTP ${resp.status} ${resp.statusText}\n\n${pretty}`;
+      respEl.style.color = resp.ok ? "var(--text)" : "var(--danger,#d9534f)";
+    } catch (e) {
+      respEl.textContent = `请求失败: ${e.message}`;
+      respEl.style.color = "var(--danger,#d9534f)";
+    } finally {
+      sendBtn.disabled = false; sendBtn.textContent = "发送";
+    }
+  };
+  mask.classList.add("open");
 }
 
 // ============ 备份管理 ============
