@@ -2253,7 +2253,7 @@ class ConfigStore:
         return sign_url(path, config.signed_url.secret, config.signed_url.ttl_seconds)
 
     def get_redirect_signing_config(self) -> Dict[str, Any]:
-        """302 加签改写配置（SIGNED_REDIRECT_PLAN.md）。"""
+        """302 加签改写配置。"""
         config = self.load_runtime_config().signed_redirect
         return {
             "enabled": config.enabled,

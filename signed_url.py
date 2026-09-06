@@ -113,7 +113,7 @@ def strip_signature_params(query_string: str) -> str:
     return urlencode(pairs)
 
 
-# ===== 302 加签改写（SIGNED_REDIRECT_PLAN.md v2） =====
+# ===== 302 加签改写 =====
 
 def _resource_message(resource_id: str, st: int, client_ip: Optional[str]) -> bytes:
     """构造资源签名消息体：``resource_id\\nst``（bind_ip 时追加 ``\\nclient_ip``）。

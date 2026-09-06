@@ -308,7 +308,7 @@ class SignedUrlConfig:
 
 @dataclass
 class SignedRedirectConfig:
-    """302 加签改写（SIGNED_REDIRECT_PLAN.md）：把返回客户端的 3xx Location
+    """302 加签改写：把返回客户端的 3xx Location
     改写为系统固定签名链接 `{base_url}/_signed/{resource_id}?_st&_sig`。
 
     - enabled：总开关，关闭时行为与现状完全一致；

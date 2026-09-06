@@ -215,7 +215,7 @@ class ProxyServer:
         self.app.router.add_get('/_block/{token}/info', self.block_token_info)
         self.app.router.add_post('/_block/{token}/confirm', self.block_token_confirm)
         self.admin_console.register(self.app)
-        # 302 加签改写（SIGNED_REDIRECT_PLAN.md v2）：固定签名端点，验签后内部跟随代理
+        # 302 加签改写：固定签名端点，验签后内部跟随代理
         self.app.router.add_route('*', '/_signed/{resource_id}', self.handle_signed_resource)
         self.app.router.add_route('*', '/{path:.*}', self.handle_proxy)
     
@@ -764,7 +764,7 @@ class ProxyServer:
             pass
 
     async def handle_signed_resource(self, request: web.Request) -> web.StreamResponse:
-        """302 加签改写（SIGNED_REDIRECT_PLAN.md v2）固定端点。
+        """302 加签改写固定端点。
 
         校验签名（含客户端 IP 一致性）→ 解码 resource_id 还原原始资源路径 →
         以内部强制跟随模式重跑完整代理管道。本处理器永不外发 3xx（防循环）。
@@ -829,7 +829,7 @@ class ProxyServer:
         request["_signed_query"] = query
         request["_signed_reentry"] = True
 
-        # 双模式领取（SIGNED_REDIRECT_PLAN.md v3）：
+        # 双模式领取：
         # A(redirect_return)=领取时回显签发时缓存的上游 302，客户端自行跟随直连 CDN，
         #   媒体流量不经过本服务器；回显内容与加签前裸链完全一致，无服务器侧重入循环。
         # B(proxy_stream)=用签发时决策快照内部代理穿流（媒体流量经过本服务器）。
