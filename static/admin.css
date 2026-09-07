@@ -210,21 +210,31 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .tracked-ip{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tracked-meta{flex:1;white-space:nowrap}
 /* 功能卡：签名 URL / 302 加签改写 —— 用顶部色带 + 流向示意区分「入口校验」「出口改写」 */
-.feature-banner{display:flex;align-items:center;gap:8px;margin:-4px 0 12px;padding:7px 12px;border-radius:8px;font-size:12.5px;font-weight:600;letter-spacing:.02em}
-.feature-banner .dir{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.65);font-size:11px;font-weight:600}
+.feature-banner{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin:-4px 0 12px;padding:8px 12px;border-radius:8px;font-size:12.5px;font-weight:600;letter-spacing:.02em}
+.feature-banner .dir{flex:0 0 auto;display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.65);font-size:11px;font-weight:600}
+.feature-banner .bt{flex:1 1 0;min-width:0;line-height:1.55}
 .feature-banner.in{background:var(--brand-soft);color:var(--brand-text);border:1px solid color-mix(in srgb,var(--brand) 25%,transparent)}
 .feature-banner.out{background:var(--ok-soft);color:var(--ok-text);border:1px solid color-mix(in srgb,var(--ok) 25%,transparent)}
-.feature-purpose{font-size:13px;line-height:1.7;color:var(--text);margin:2px 0 10px}
+.feature-purpose{font-size:13px;line-height:1.75;color:var(--text);margin:2px 0 10px}
 .feature-purpose b{color:var(--text-2);font-weight:600;margin-right:4px}
-.feature-flow{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text-2);margin:4px 0 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.feature-flow{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text-2);margin:4px 0 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .feature-flow .step{padding:2px 7px;border-radius:5px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-weight:600}
 .feature-flow .step.in{background:var(--brand-soft);border-color:color-mix(in srgb,var(--brand) 30%,transparent);color:var(--brand-text)}
 .feature-flow .step.out{background:var(--ok-soft);border-color:color-mix(in srgb,var(--ok) 30%,transparent);color:var(--ok-text)}
 .feature-flow .arrow{color:var(--text-3);font-family:inherit}
-.feature-applies{font-size:12px;line-height:1.65;color:var(--text-2);padding:7px 10px;border-left:3px solid var(--border-strong);background:var(--surface-2);border-radius:0 6px 6px 0;margin:2px 0 10px}
+/* 卡内分区小标题：横线贯穿，组织「模式 / 适用 / 注意」等内容块 */
+.feature-block-title{display:flex;align-items:center;gap:8px;font-size:11.5px;font-weight:600;color:var(--text-3);letter-spacing:.04em;margin:14px 0 8px}
+.feature-block-title::after{content:"";flex:1;height:1px;background:var(--border)}
+/* A/B 模式行：徽章 + 说明 */
+.mode-row{display:flex;align-items:flex-start;gap:9px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);font-size:12px;line-height:1.65;color:var(--text-2);margin-bottom:6px}
+.mode-row .mode-badge{flex:0 0 auto;width:19px;height:19px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;background:var(--ok);margin-top:1px}
+.mode-row b{color:var(--text);font-weight:600}
+.feature-applies{font-size:12px;line-height:1.65;color:var(--text-2);padding:7px 10px;border-left:3px solid var(--border-strong);background:var(--surface-2);border-radius:0 6px 6px 0;margin:2px 0 8px}
 .feature-applies b{color:var(--text);font-weight:600}
 .feature-applies.warn{border-left-color:var(--warn);background:var(--warn-soft);color:var(--text)}
-.feature-desc{font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)}
+.feature-desc{font-size:12px;color:var(--text-3);line-height:1.7;margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)}
+/* kv 值的副行说明：主值短句 + 小字补充 */
+.kv .val-sub{font-size:11.5px;color:var(--text-3);line-height:1.6;margin-top:3px}
 /* 盗链监控看板（HOTLINK_PROTECTION.md 阶段 1） */
 .hotlink-subtitle{font-weight:600;font-size:13px;margin-bottom:8px}
 .hotlink-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed var(--border)}

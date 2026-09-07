@@ -2071,17 +2071,18 @@ export async function loadSignedUrlSettings() {
       const ttlHuman = formatTtl(ttlSec);
       body.innerHTML =
         // 顶部色带：明确这是「入口校验」—— 播放器→代理方向
-        `<div class="feature-banner in"><span class="dir">↓ 入口校验</span><span>对进入代理的请求做签名校验</span></div>` +
+        `<div class="feature-banner in"><span class="dir">↓ 入口校验</span><span class="bt">对进入代理的请求做签名校验</span></div>` +
         `<div class="feature-purpose"><b>做什么：</b>所有代理请求必须携带有效签名 <code>?_st=…&amp;_sig=…</code>，否则直接返回 403，不放行到上游。</div>` +
         // 流向示意：把校验环节高亮出来
         `<div class="feature-flow"><span>客户端</span><span class="arrow">→</span><span class="step in">验签</span><span class="arrow">→</span><span>代理转发</span><span class="arrow">→</span><span>上游</span></div>` +
-        // 适用与禁用提示
+        `<div class="feature-block-title">适用与注意</div>` +
         `<div class="feature-applies"><b>适用：</b>播放链路能拿到带签名的链接（需配合「302 加签改写」等签发层）。</div>` +
         `<div class="feature-applies warn"><b>慎用：</b>固定 URL 直连代理的播放器开启后会被误拦 —— 此功能不签发链接，只校验。</div>` +
         // 当前配置
-        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 未签名请求将被拒绝' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不校验签名（行为与旧版一致）'}</div></div>` +
-        `<div class="kv"><div class="k">链接有效期</div><div class="val">${esc(ttlHuman)}（${ttlSec} 秒）</div></div>` +
-        `<div class="kv"><div class="k">签名密钥</div><div class="val">${data.has_secret ? "已生成（HMAC-SHA256，存于数据库）" : '<span class="text-warn">未生成</span>'}</div></div>` +
+        `<div class="feature-block-title">当前配置</div>` +
+        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 未签名请求将被拒绝<div class="val-sub">关闭后不校验签名，行为与旧版一致</div>' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不校验签名<div class="val-sub">当前行为与旧版完全一致</div>'}</div></div>` +
+        `<div class="kv"><div class="k">链接有效期</div><div class="val">${esc(ttlHuman)}<div class="val-sub">${ttlSec} 秒；建议 ≥ 预计播放时长 + 30 分钟</div></div></div>` +
+        `<div class="kv"><div class="k">签名密钥</div><div class="val">${data.has_secret ? "已生成<div class=\"val-sub\">HMAC-SHA256，仅存服务端数据库，签发结果不含密钥</div>" : '<span class="text-warn">未生成</span>'}</div></div>` +
         `<div class="feature-desc">完整说明与使用流程见编辑弹窗「开启前必读」与「生成签名链接」弹窗。</div>`;
     }
   } catch (_) {}
@@ -2200,20 +2201,23 @@ export async function loadRedirectSigningSettings() {
       const ttlHuman = formatTtl(ttlSec);
       const baseUrl = data.base_url || "";
       body.innerHTML =
-        // 顶部色带：明确这是「出口改写」—— 代理→客户端方向
-        `<div class="feature-banner out"><span class="dir">↑ 出口改写</span><span>把返回客户端的跳转改写为本系统签名链接（跟随型/本地代理规则同样生效）</span></div>` +
-        `<div class="feature-purpose"><b>做什么：</b>开启后播放器的<b>首次代理请求一律改写</b>为 <code>{base_url}/_signed/{资源id}?_st&amp;_sig</code>，客户端始终只见系统签名链接——无论规则是否「跟随上游」。</div>` +
-        // 流向示意：A / B 双模式分叉
+        // 顶部色带：明确这是「出口改写」—— 代理→客户端方向；长限定语放「做什么」，banner 只留短句防挤压
+        `<div class="feature-banner out"><span class="dir">↑ 出口改写</span><span class="bt">跳转一律改写为本系统签名链接</span></div>` +
+        `<div class="feature-purpose"><b>做什么：</b>开启后，播放器的<b>首次代理请求一律改写</b>为 <code>{base_url}/_signed/{资源id}?_st&amp;_sig</code>，客户端始终只见系统签名链接，裸的上游 / CDN 地址不再外泄。跟随型 / 本地代理规则同样生效。</div>` +
+        // 流向示意：签发环节高亮
         `<div class="feature-flow"><span>客户端</span><span class="arrow">→</span><span>代理</span><span class="arrow">→</span><span>上游</span><span class="arrow">→</span><span class="step out">改写签名</span><span class="arrow">→</span><span>客户端领取</span></div>` +
-        `<div class="feature-applies"><b>A 不跟随型规则：</b>领取时换回签发时缓存的上游 302，客户端直连 CDN（媒体不过本机）。</div>` +
-        `<div class="feature-applies"><b>B 跟随型/本地代理：</b>领取后由本系统凭签发快照内部代理穿流（媒体过本机）。</div>` +
-        // 适用与禁用提示
-        `<div class="feature-applies"><b>适用：</b>隐藏上游/CDN 地址，阻断「固定 URL 直连代理」的盗链与抓包；播放器重放原始地址或命中结果缓存时同样重新签发，无法绕过签名。</div>` +
-        `<div class="feature-applies warn"><b>注意：</b>需正确填写「对外基础地址」，否则回退到请求 Host（经反代时可能是内网地址）。IP 绑定开启后手机切网会换 IP，续播需重新取地址；链接中 _ip 为盲化令牌（密钥哈希），不含明文客户端 IP。</div>` +
-        // 当前配置
-        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 首次请求一律改写为签名链接（A 领取换302直连 / B 领取后本机穿流）' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不改写（不跟随型原样透传上游 302，跟随型内部跟随直出，行为与旧版一致）'}</div></div>` +
-        `<div class="kv"><div class="k">签名链接有效期</div><div class="val">${esc(ttlHuman)}（${ttlSec} 秒）</div></div>` +
-        `<div class="kv"><div class="k">IP 绑定</div><div class="val">${data.bind_ip ? '<span class="pill pill-ok" style="font-size:11px">开启</span> 领取与使用必须同 IP，否则 403（_ip 为盲化令牌，不含明文 IP）' : '<span class="pill pill-neutral" style="font-size:11px">关闭</span> 不校验 IP'}</div></div>` +
+        // A/B 双模式：独立分区 + 徽章行，替代堆在一起的灰色提示块
+        `<div class="feature-block-title">领取后的两种出流模式</div>` +
+        `<div class="mode-row"><span class="mode-badge">A</span><span><b>不跟随型规则</b> —— 领取时换回签发时缓存的上游 302，客户端直连 CDN，媒体不过本机。</span></div>` +
+        `<div class="mode-row"><span class="mode-badge">B</span><span><b>跟随型 / 本地代理</b> —— 领取后由本系统凭签发快照内部代理穿流，媒体经本机回传。</span></div>` +
+        `<div class="feature-block-title">适用与注意</div>` +
+        `<div class="feature-applies"><b>适用：</b>隐藏上游 / CDN 地址，阻断「固定 URL 直连代理」的盗链与抓包；重放原始地址或命中结果缓存时同样重新签发，无法绕过。</div>` +
+        `<div class="feature-applies warn"><b>注意：</b>「对外基础地址」须填写播放器可达的地址，否则回退请求 Host（经反代可能是内网地址）；IP 绑定开启后手机切网需重新取地址。</div>` +
+        // 当前配置：主值短句 + val-sub 副行补充，避免 pill 后拖长串
+        `<div class="feature-block-title">当前配置</div>` +
+        `<div class="kv"><div class="k">状态</div><div class="val">${data.enabled ? '<span class="pill pill-ok" style="font-size:11px">已启用</span> 首次请求一律改写为签名链接<div class="val-sub">A 不跟随型＝领取换 302 直连；B 跟随型＝领取后本机穿流</div>' : '<span class="pill pill-neutral" style="font-size:11px">未启用</span> 不改写，行为与旧版一致<div class="val-sub">不跟随型原样透传上游 302；跟随型内部跟随直出</div>'}</div></div>` +
+        `<div class="kv"><div class="k">签名链接有效期</div><div class="val">${esc(ttlHuman)}<div class="val-sub">${ttlSec} 秒；须覆盖完整观看会话（播放器用同一 URL 持续发 Range）</div></div></div>` +
+        `<div class="kv"><div class="k">IP 绑定</div><div class="val">${data.bind_ip ? '<span class="pill pill-ok" style="font-size:11px">开启</span> 领取与使用必须同 IP，否则 403<div class="val-sub">_ip 为盲化令牌（密钥哈希），链接不含明文客户端 IP</div>' : '<span class="pill pill-neutral" style="font-size:11px">关闭</span> 不校验 IP<div class="val-sub">链接转分享后仍可领取使用</div>'}</div></div>` +
         `<div class="kv"><div class="k">对外基础地址</div><div class="val">${baseUrl ? esc(baseUrl) : '<span class="text-warn">未配置（回退请求 Host 头）</span>'}</div></div>` +
         `<div class="feature-desc">完整工作原理与场景说明见「编辑配置」弹窗首屏。</div>`;
     }
