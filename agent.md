@@ -4,8 +4,8 @@
 这是一个带 302 重定向处理的 Python HTTP 反向代理服务器，基于 aiohttp 构建。核心功能包括：自动跟踪 HTTP 重定向、大媒体文件流式传输、基于 path_prefix 的分组转发、IP 定位与访问控制、后台管理界面。
 
 ## 技术栈
-- 后端：Python 3.11+, aiohttp, SQLite3
-- 前端：原生 HTML/CSS/JS（无框架）
+- 后端：Python 3.8+（开发与 CI 用 3.11），aiohttp, SQLite3
+- 前端：原生 HTML/CSS/JS（无框架），ESM 模块化（`static/js/`）
 - 配置：YAML + SQLite 持久化
 
 ## 代码修改原则
@@ -26,10 +26,19 @@
 | main.py | 服务器入口、路由注册、全局中间件、日志记录 |
 | proxy_core.py | 请求代理核心：路由选择、URL 构造、传输模式、访问控制检查 |
 | config.py | 数据模型、配置解析、工具函数 |
-| config_store.py | SQLite 数据库操作：CRUD、DDL 迁移 |
-| admin_console.py | 后台 API 路由处理 |
-| geo_service.py | IP 归属地查询（在线+离线 MMDB） |
+| config_store.py | SQLite 数据库操作：CRUD、DDL 迁移、配置历史 |
+| admin_console.py | 后台 API 路由处理、登录鉴权、审计埋点 |
+| signed_url.py | 签名 URL 校验、302 加签改写（A/B 双模式）、id 快照 |
+| rate_limiter.py | 主动速率限制令牌桶（per-IP/per-rule） |
+| upstream_health.py | 上游健康检查探针 + 多目标故障转移 |
+| notifier.py | 通知分发：邮件 + Webhook/IM（飞书/钉钉/Slack/Generic） |
+| metrics.py | Prometheus 指标导出（可选依赖，缺库 no-op） |
+| auto_ban_monitor.py | 自动封禁滑动窗口监控 + 告警回调 |
+| offline_geoip_sync.py | 离线 IP 库（MMDB）定时同步 |
+| geo_service.py | IP 归属地查询（在线 + 离线 MMDB） |
 | ip_ban_manager.py | IP 封禁管理（支持临时封禁过期） |
+| ip_result_cache.py | 重定向结果缓存 |
+| request_dedup.py | 请求去重缓存（ip\|method\|url\|range） |
 
 ## 关键业务规则
 - 一个路由组（相同 path_prefix + request_host）只能有一条默认规则；设置新的默认规则必须先清除同组现有默认规则

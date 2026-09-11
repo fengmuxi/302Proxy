@@ -23,6 +23,20 @@ import {
 
 const esc = (v) => escapeHtml(v == null ? "" : String(v));
 
+// 百分号编码（URL encode）解码显示：仅还原 %XX 序列，保留 :/?=&# 等结构性字符；
+// 非法 % 序列（如 %ZZ、%E4% 截断）会抛错，此时回退原串，绝不破坏原始值。
+// 已解码串（无 %XX 序列）调用后原样返回，故对「已解码 / 未解码」两种存储都安全。
+const decodeUrlDisplay = (v) => {
+  if (v == null) return "";
+  const s = String(v);
+  if (!s.includes("%")) return s;
+  try {
+    return decodeURIComponent(s);
+  } catch (_e) {
+    return s;
+  }
+};
+
 // 秒数 → 易读时长（小于 1 分钟走「秒」、小于 1 小时走「分秒」、更大走「小时分钟」）
 function formatTtl(sec) {
   sec = Math.max(0, Math.round(Number(sec) || 0));
@@ -39,7 +53,7 @@ function formatTtl(sec) {
 
 // ============ 页面激活 / 导航 ============
 
-const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "system", "backup", "email", "signing", "apidoc", "apikeys"];
+const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "audit", "system", "backup", "email", "signing", "apidoc", "apikeys"];
 
 export function setActivePage(page) {
   state.activeModule = page;
@@ -52,7 +66,7 @@ export function setActivePage(page) {
   const crumb = document.getElementById("breadcrumb");
   const labels = {
     overview: "系统概览", routing: "路由配置", security: "安全与封禁",
-    geo: "IP 定位", logs: "日志与审计", system: "系统设置",
+    geo: "IP 定位", logs: "日志与审计", audit: "审计日志", system: "系统设置",
     backup: "备份与恢复", email: "邮件提醒", signing: "加签防护", apidoc: "API 文档", apikeys: "API 密钥",
   };
   if (crumb) crumb.innerHTML = `${esc(labels[page] || "")} / <b>${esc(labels[page] || "")}</b>`;
@@ -98,12 +112,19 @@ export function activatePage(page) {
       refreshAppLogModule().catch((e) => showToast(e.message, true));
       if (getChecked("log_auto_refresh_enabled")) startAutoRefresh();
       break;
+    case "audit":
+      loadAuditLogs().catch((e) => showToast(e.message, true));
+      break;
     case "system":
       loadIpCacheSettings();
       loadIpCacheStats();
       loadDedupSettings();
       loadDedupStats();
       loadStreamGuardSettings();
+      loadLoginProtectionSettings();
+      loadRateLimitSettings();
+      loadCorsSettings();
+      loadSettingsHistory();
       break;
     case "signing":
       // 签名 URL / 302 加签改写两张功能卡已独立为「加签防护」页
@@ -119,6 +140,7 @@ export function activatePage(page) {
       break;
     case "email":
       loadEmailSettings();
+      loadNotificationsSettings();
       break;
   }
 }
@@ -236,6 +258,7 @@ function renderTrendSvg(hours) {
   const counts = h.map((x) => x.count || 0);
   const redirects = h.map((x) => x.redirects || 0);
   const failed = h.map((x) => x.failed || 0);
+  const streamed = h.map((x) => x.streamed || 0);
   const n = Math.max(counts.length, 1);
   const W = 680, H = 210, padL = 40, padR = 10, padT = 14, padB = 22;
   if (n < 2) {
@@ -245,7 +268,7 @@ function renderTrendSvg(hours) {
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
   const stepX = innerW / (n - 1);
-  const rawMax = Math.max(1, ...counts, ...redirects, ...failed);
+  const rawMax = Math.max(1, ...counts, ...redirects, ...failed, ...streamed);
   // 向上取整到 1/2/5×10^k 的整刻度，Y 轴标签更易读
   const pow = Math.pow(10, Math.floor(Math.log10(rawMax)));
   const base = rawMax / pow;
@@ -269,6 +292,7 @@ function renderTrendSvg(hours) {
   const { line, area } = pathOf(counts, true);
   const lineRedirect = pathOf(redirects, false).line;
   const lineFailed = pathOf(failed, false).line;
+  const lineStreamed = pathOf(streamed, false).line;
   let grid = "";
   for (let g = 1; g <= 3; g++) {
     const y = padT + (innerH * g) / 4;
@@ -302,12 +326,14 @@ function renderTrendSvg(hours) {
       <path d="${area}" fill="url(#ovTrendFill)"/>
       <path d="${line}" fill="none" stroke="var(--brand)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       <path d="${lineRedirect}" fill="none" stroke="var(--info)" stroke-width="1.5" stroke-dasharray="4 3" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${lineStreamed}" fill="none" stroke="var(--ok)" stroke-width="1.5" stroke-dasharray="6 3" stroke-linejoin="round" stroke-linecap="round"/>
       <path d="${lineFailed}" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="2 3" stroke-linejoin="round" stroke-linecap="round"/>
       <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="var(--brand)" stroke="var(--surface)" stroke-width="1.5"/>
       <g id="trendHover" style="display:none">
         <line id="trendHoverLine" y1="${padT}" y2="${padT + innerH}" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="2 3"/>
         <circle id="trendHoverCount" r="3.5" fill="var(--brand)" stroke="var(--surface)" stroke-width="1.5"/>
         <circle id="trendHoverRedirect" r="3" fill="var(--info)" stroke="var(--surface)" stroke-width="1.5"/>
+        <circle id="trendHoverStream" r="3" fill="var(--ok)" stroke="var(--surface)" stroke-width="1.5"/>
         <circle id="trendHoverFailed" r="3" fill="var(--danger)" stroke="var(--surface)" stroke-width="1.5"/>
       </g>
       ${labels}
@@ -316,7 +342,7 @@ function renderTrendSvg(hours) {
 
   // 悬停十字线 + 数值气泡：鼠标位置反推最近的小时桶（viewBox 拉伸后需按实际宽换算）
   container.style.position = "relative";
-  container._trendData = { h, counts, redirects, failed, n, stepX, padL, padT, innerH, W, maxValue };
+  container._trendData = { h, counts, redirects, failed, streamed, n, stepX, padL, padT, innerH, W, maxValue };
   if (!container._trendBound) {
     container._trendBound = true;
     container.addEventListener("mousemove", (e) => {
@@ -335,13 +361,15 @@ function renderTrendSvg(hours) {
         const yOfLocal = (v) => d.padT + d.innerH - (Math.min(Math.max(v, 0), d.maxValue) / d.maxValue) * d.innerH;
         set("trendHoverCount", "cx", x); set("trendHoverCount", "cy", yOfLocal(d.counts[idx]));
         set("trendHoverRedirect", "cx", x); set("trendHoverRedirect", "cy", yOfLocal(d.redirects[idx]));
+        set("trendHoverStream", "cx", x); set("trendHoverStream", "cy", yOfLocal(d.streamed[idx]));
         set("trendHoverFailed", "cx", x); set("trendHoverFailed", "cy", yOfLocal(d.failed[idx]));
       }
       const tip = container.querySelector(".trend-tip");
       if (tip) {
         tip.innerHTML = `<strong>${trendTimeLabel(d.h, idx, d.n)}</strong>`
           + `<span><i style="background:var(--brand)"></i>请求 ${d.counts[idx]}</span>`
-          + `<span><i style="background:var(--info)"></i>302 跟随 ${d.redirects[idx]}</span>`
+          + `<span><i style="background:var(--info)"></i>302 跳转 ${d.redirects[idx]}</span>`
+          + `<span><i style="background:var(--ok)"></i>本地代理 ${d.streamed[idx]}</span>`
           + `<span><i style="background:var(--danger)"></i>失败拦截 ${d.failed[idx]}</span>`;
         tip.style.display = "flex";
         const tipW = tip.offsetWidth || 180;
@@ -447,13 +475,21 @@ export async function renderOverview() {
   // KPI：「今日请求」取聚合接口的今日计数（本地时区 0 点起），累计数进副标题
   const todayRequests = ov.requests_today ?? 0;
   const totalAll = ov.requests_total ?? st.total_requests ?? 0;
-  const redirect = st.redirected_requests || 0;
-  const failed = st.failed_requests || 0;
+
+  // 302 跳转 / 本地代理 / 拦截：与「今日请求」同窗口（今日 0 点起），分项相加 ≤ 今日请求
+  // （此前用 24h 滚动窗口 ⊃ 今日，出现「48+41 > 70」的口径错位；更早前用 ProxyStats
+  // 内存计数器，重启归零造成「图表有数据、卡片显示 0」——两类问题同源于数据源不统一）
+  const hoursArr = Array.isArray(ov.hours) ? ov.hours : [];
+  const sumBucket = (key) => hoursArr.reduce((s, x) => s + (x[key] || 0), 0);
+  const redirect = ov.redirects_today ?? ov.redirects_24h ?? sumBucket("redirects");
+  const streamed = ov.streamed_today ?? ov.streamed_24h ?? sumBucket("streamed");
+  const failed = ov.failed_today ?? ov.failed_24h ?? sumBucket("failed");
 
   setText("kpiTotal", todayRequests.toLocaleString("en-US"));
   const totalDelta = document.getElementById("kpiTotalDelta");
   if (totalDelta) totalDelta.textContent = `累计 ${totalAll.toLocaleString("en-US")} 次请求`;
   setText("kpiRedirect", redirect.toLocaleString("en-US"));
+  setText("kpiStream", streamed.toLocaleString("en-US"));
   setText("kpiFailed", failed.toLocaleString("en-US"));
 
   // 平均延迟：由 /_admin/api/overview-stats 对近 24h 全量日志 SQL 聚合
@@ -472,7 +508,7 @@ export async function renderOverview() {
       : `近 24 小时 · ${ov.latency_sample_count ?? 0} 个样本`;
   }
 
-  // 趋势三序列（总请求 / 302 跟随 / 失败拦截），24 个整点桶（含 UTC ts，供 x 轴呈现本地时钟时间）
+  // 趋势三序列（总请求 / 302 跳转 / 失败拦截），24 个整点桶（含 UTC ts，供 x 轴呈现本地时钟时间）
   const hours = Array.isArray(ov.hours) ? ov.hours : [];
   renderTrendSvg(hours);
 
@@ -602,6 +638,34 @@ const GROUP_SCHEMA = [
   { key: "region_blacklist", label: "地区黑名单", type: "text" },
   { key: "notes", label: "备注", type: "text" },
   { key: "region_matching_enabled", label: "地区匹配", type: "switch", hint: "该前缀下所有规则按地区过滤命中" },
+  // 组级规则默认（P2-4.1）：留空/选「不设置」= 组未设默认，规则「继承组」时回落全局默认
+  { key: "rd_timeout", label: "默认超时（秒）", type: "number", placeholder: "不设置", group: "组级默认配置（规则可继承）" },
+  { key: "rd_max_redirects", label: "默认最大重定向", type: "number", placeholder: "不设置", group: "组级默认配置（规则可继承）" },
+  { key: "rd_retry_times", label: "默认重试次数", type: "number", placeholder: "不设置", group: "组级默认配置（规则可继承）" },
+  { key: "rd_follow_redirects", label: "默认跟随重定向", type: "seg", options: [
+    { value: "", label: "不设置" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "组级默认配置（规则可继承）" },
+  { key: "rd_enable_streaming", label: "默认流式转发", type: "seg", options: [
+    { value: "", label: "不设置" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "组级默认配置（规则可继承）" },
+  { key: "rd_strip_prefix", label: "默认去前缀", type: "seg", options: [
+    { value: "", label: "不设置" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "组级默认配置（规则可继承）" },
+  { key: "rd_referer_whitelist", label: "默认 Referer 白名单", type: "text", placeholder: "不设置（如 *.example.com）", group: "组级默认配置（规则可继承）" },
+  { key: "rd_referer_policy", label: "默认空 Referer 策略", type: "select", options: [
+    { value: "", label: "不设置" },
+    { value: "allow", label: "允许（本地播放器/直链）" },
+    { value: "deny", label: "拒绝（仅白名单网页引用）" },
+  ], group: "组级默认配置（规则可继承）" },
+  { key: "rd_ua_blacklist", label: "默认 UA 黑名单", type: "text", placeholder: "不设置（如 curl, python-requests）", group: "组级默认配置（规则可继承）" },
+  { key: "rd_ua_whitelist", label: "默认 UA 白名单", type: "text", placeholder: "不设置（如 NASKTV, ExoPlayer）", group: "组级默认配置（规则可继承）" },
+  { key: "rd_note", type: "note", text: "以上默认值不直接生效：规则中对应字段选择「继承组默认」时才取这里的值。保存后可把组内与默认相同的显式配置一键转为继承。", group: "组级默认配置（规则可继承）" },
 ];
 
 // 后台/系统保留路径：这些路由由后台控制台或系统内置接口直接处理，不经过代理兜底，
@@ -618,6 +682,9 @@ function matchReservedPath(pathPrefix) {
 
 export function openRouteGroupModal(group) {
   const isEdit = Boolean(group);
+  const rd = (group && group.rule_defaults) || {};
+  const rdStr = (k) => (rd[k] == null ? "" : String(rd[k]));
+  const rdBool = (k) => (rd[k] === true ? "1" : rd[k] === false ? "0" : "");
   const values = group ? {
     path_prefix: group.path_prefix,
     request_host: normalizeRequestHost(group.request_host),
@@ -627,6 +694,11 @@ export function openRouteGroupModal(group) {
     region_blacklist: group.region_blacklist || "",
     notes: group.notes || "",
     region_matching_enabled: Boolean(group.region_matching_enabled),
+    // 组级默认（P2-4.1）
+    rd_timeout: rdStr("timeout"), rd_max_redirects: rdStr("max_redirects"), rd_retry_times: rdStr("retry_times"),
+    rd_follow_redirects: rdBool("follow_redirects"), rd_enable_streaming: rdBool("enable_streaming"), rd_strip_prefix: rdBool("strip_prefix"),
+    rd_referer_whitelist: rdStr("referer_whitelist"), rd_referer_policy: rdStr("referer_policy"),
+    rd_ua_blacklist: rdStr("ua_blacklist"), rd_ua_whitelist: rdStr("ua_whitelist"),
   } : { region_matching_enabled: true };
 
   openFormModal({
@@ -639,9 +711,23 @@ export function openRouteGroupModal(group) {
       if (!pp) return "路径前缀不能为空";
       const reserved = matchReservedPath(pp);
       if (reserved) return `路径前缀不能使用后台保留路径「${reserved}」，该路径由系统内部占用，转发规则不会生效。`;
+      for (const k of ["rd_timeout", "rd_max_redirects", "rd_retry_times"]) {
+        const v = String(out[k] ?? "").trim();
+        if (v !== "" && (!Number.isFinite(Number(v)) || Number(v) <= 0)) return "组级默认中的数值需为正整数（留空表示不设置）";
+      }
       return null;
     },
     onSave: async (out) => {
+      // 组级默认收集：留空/「不设置」的键不出现在 rule_defaults 里
+      const ruleDefaults = {};
+      const rdNum = (k) => { const v = String(out[k] ?? "").trim(); if (v !== "") ruleDefaults[k] = Number(v); };
+      const rdBool = (k) => { if (out[k] !== "") ruleDefaults[k] = out[k] === "1"; };
+      const rdText = (k) => { const v = String(out[k] ?? "").trim(); if (v !== "") ruleDefaults[k] = v; };
+      rdNum("timeout"); rdNum("max_redirects"); rdNum("retry_times");
+      rdBool("follow_redirects"); rdBool("enable_streaming"); rdBool("strip_prefix");
+      rdText("referer_whitelist"); rdText("ua_blacklist"); rdText("ua_whitelist");
+      if (out.rd_referer_policy) ruleDefaults.referer_policy = out.rd_referer_policy;
+
       const payload = {
         old_path_prefix: isEdit ? group.path_prefix : "",
         old_request_host: isEdit ? normalizeRequestHost(group.request_host) : "",
@@ -653,6 +739,7 @@ export function openRouteGroupModal(group) {
         region_blacklist: out.region_blacklist || "",
         notes: out.notes || "",
         region_matching_enabled: Boolean(out.region_matching_enabled),
+        rule_defaults: ruleDefaults,
       };
       if (isEdit) {
         await apiFetch("/_admin/api/route-groups", { method: "PUT", body: JSON.stringify(payload) });
@@ -661,9 +748,48 @@ export function openRouteGroupModal(group) {
         await apiFetch("/_admin/api/route-groups", { method: "POST", body: JSON.stringify(payload) });
         showToast("路径前缀已创建。");
       }
+      // 存量迁移（用户拍板：切换时弹窗询问）：统计组内显式值 == 组默认 的规则，询问是否转继承
+      if (isEdit && Object.keys(ruleDefaults).length) {
+        const matches = countRulesMatchingGroupDefaults(group, ruleDefaults);
+        if (matches > 0) {
+          openConfirm({
+            title: "转为继承组默认",
+            danger: false,
+            message: `检测到组内 <strong>${matches}</strong> 条规则的显式配置与组级默认完全相同。<br>是否把这些字段转为「继承组默认」？转换后调整组默认即可对它们整体生效。`,
+            onOk: async () => {
+              try {
+                const res = await apiFetch("/_admin/api/route-groups/inherit-convert", {
+                  method: "POST",
+                  body: JSON.stringify({ path_prefix: payload.path_prefix, request_host: payload.request_host }),
+                });
+                showToast(`已转换 ${res.converted_rules || 0} 条规则（${res.converted_fields || 0} 个字段）。`);
+              } catch (e) { showToast(e.message, true); }
+              await loadDashboard();
+            },
+          });
+        }
+      }
       await loadDashboard();
     },
   });
+}
+
+// 统计组内「未继承 且 显式值 == 组默认」的规则数（前端预估，后端 inherit-convert 会再精确过滤）
+function countRulesMatchingGroupDefaults(group, ruleDefaults) {
+  const normalizedHost = normalizeRequestHost(group.request_host);
+  const keys = Object.keys(ruleDefaults || {});
+  if (!keys.length) return 0;
+  return (state.rules || []).filter((r) => {
+    if (r.path_prefix !== group.path_prefix || normalizeRequestHost(r.request_host) !== normalizedHost) return false;
+    const inherit = new Set(r.inherit_fields || []);
+    return keys.some((k) => {
+      if (inherit.has(k)) return false;
+      const dv = ruleDefaults[k];
+      if (typeof dv === "boolean") return Boolean(r[k]) === dv;
+      if (typeof dv === "number") return Number(r[k]) === dv;
+      return String(r[k] || "").trim() === String(dv).trim();
+    });
+  }).length;
 }
 
 export async function updateGroupRegionSwitch(pathPrefix, requestHost, enabled) {
@@ -709,6 +835,32 @@ export function populateRuleGroupFilter() {
     options.map((o) => `<option value="${esc(o.path_prefix)}|${esc(o.request_host)}">${esc(o.label)}</option>`).join("");
   if (current && options.some((o) => `${o.path_prefix}|${o.request_host}` === current)) select.value = current;
   syncSelect(select);
+}
+
+// 多上游 target_urls（JSON 数组字符串）↔ 多行文本互转（P1-2.2）
+function ruleUrlsToLines(raw) {
+  if (!raw) return "";
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(arr)) return arr.map((u) => String(u || "").trim()).filter(Boolean).join("\n");
+  } catch (_) {}
+  return "";
+}
+function linesToRuleUrls(text) {
+  const list = String(text || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return list.length ? JSON.stringify(list) : "";
+}
+// 健康徽标：返回各上游小圆点（绿=健康 / 红=不健康）
+function healthBadges(health) {
+  if (!health || typeof health !== "object") return "";
+  const entries = Object.entries(health);
+  if (!entries.length) return "";
+  const dots = entries.map(([target, ok]) => {
+    const color = ok ? "#3fb950" : "#f85149";
+    const label = ok ? "健康" : "不健康";
+    return `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin:0 2px;vertical-align:middle" title="${esc(target)} · ${label}"></span>`;
+  }).join("");
+  return `<span style="margin-left:6px;white-space:nowrap">${dots}</span>`;
 }
 
 export function renderRules(rules) {
@@ -781,7 +933,7 @@ export function renderRules(rules) {
     tr.innerHTML = `
       <td class="mono">${rule.id}</td>
       <td><strong>${esc(rule.name || "(未命名规则)")}</strong><div class="hint">${esc(rule.path_prefix)} · ${esc(hostLabel)}</div></td>
-      <td class="cell-truncate" title="${esc(rule.target_url)}">${esc(rule.target_url)}</td>
+      <td class="cell-truncate" title="${esc(rule.target_url)}">${esc(rule.target_url)}${healthBadges(rule.health)}</td>
       <td class="cell-truncate">${rewriteCell}</td>
       <td class="cell-truncate" title="${esc(regionText)}">${regionText ? esc(regionText) : '<span class="text-muted">默认</span>'}</td>
       <td>${rule.priority ?? 0}</td>
@@ -798,34 +950,76 @@ export function renderRules(rules) {
   });
 }
 
+// 规则表单 schema：group 字段收进「高级选项」折叠组（components.openFormModal 渲染），
+// 明面只留核心四项（路由组/名称/目标/启用），简化主配置路径
 const RULE_SCHEMA = [
   { key: "name", label: "规则名称", type: "text", required: true, placeholder: "示例流媒体" },
-  { key: "target_url", label: "目标地址", type: "text", required: true, placeholder: "https://target.example.com" },
-  { key: "priority", label: "优先级", type: "number", default: 0 },
-  { key: "timeout", label: "超时（秒）", type: "number", default: 30 },
-  { key: "max_redirects", label: "最大重定向", type: "number", default: 10 },
-  { key: "retry_times", label: "重试次数", type: "number", default: 3 },
-  { key: "path_rewrite_pattern", label: "正则重写·匹配", type: "text", placeholder: "^(.*)$" },
-  { key: "path_rewrite_replacement", label: "正则重写·替换", type: "text", placeholder: "/new$1" },
-  { key: "ip_whitelist", label: "IP 白名单（路由）", type: "text" },
-  { key: "region_filters", label: "地区条件", type: "text", placeholder: "CN,HK" },
-  { key: "access_ip_whitelist", label: "访问控制 IP 白", type: "text" },
-  { key: "ip_blacklist", label: "访问控制 IP 黑", type: "text" },
-  { key: "region_whitelist", label: "地区白名单", type: "text" },
-  { key: "region_blacklist", label: "地区黑名单", type: "text" },
-  { key: "referer_whitelist", label: "Referer 白名单", type: "text", placeholder: "*.dwzynj.top, example.com（留空不校验）" },
+  { key: "target_url", label: "目标地址（主）", type: "text", required: true, placeholder: "https://target.example.com" },
+  { key: "target_urls", label: "额外上游（故障转移）", type: "textarea", placeholder: "https://cdn2.example.com\nhttps://cdn3.example.com\n（每行一个；留空则仅用上方主目标）", group: "故障转移与健康探针" },
+  { key: "health_check_enabled", label: "启用健康探针", type: "switch", hint: "周期探测各上游，故障自动从可用列表剔除", group: "故障转移与健康探针" },
+  { key: "health_check_path", label: "探针路径", type: "text", placeholder: "/health（留空则 TCP 建连探测）", group: "故障转移与健康探针" },
+  { key: "health_check_interval", label: "探针间隔（秒）", type: "number", default: 30, group: "故障转移与健康探针" },
+  { key: "health_check_timeout", label: "探针超时（秒）", type: "number", default: 5, group: "故障转移与健康探针" },
+  { key: "priority", label: "优先级", type: "number", default: 0, group: "转发行为与重写", groupOpen: true },
+  // —— 组级继承三态（P2-4.1）：数值字段用「模式 select + dependsOn 数值输入」，开关字段直接三态 select ——
+  { key: "timeout_mode", label: "超时", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "custom", label: "自定义" },
+  ], group: "转发行为与重写" },
+  { key: "timeout", label: "超时值（秒）", type: "number", default: 30, dependsOn: { field: "timeout_mode", value: "custom" }, group: "转发行为与重写" },
+  { key: "max_redirects_mode", label: "最大重定向", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "custom", label: "自定义" },
+  ], group: "转发行为与重写" },
+  { key: "max_redirects", label: "最大重定向值", type: "number", default: 10, dependsOn: { field: "max_redirects_mode", value: "custom" }, group: "转发行为与重写" },
+  { key: "retry_times_mode", label: "重试次数", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "custom", label: "自定义" },
+  ], group: "转发行为与重写" },
+  { key: "retry_times", label: "重试次数值", type: "number", default: 3, dependsOn: { field: "retry_times_mode", value: "custom" }, group: "转发行为与重写" },
+  { key: "strip_prefix", label: "去前缀", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "转发行为与重写" },
+  { key: "follow_redirects", label: "跟随重定向", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "转发行为与重写" },
+  { key: "enable_streaming", label: "流式转发", type: "seg", options: [
+    { value: "inherit", label: "继承组默认" },
+    { value: "1", label: "开" },
+    { value: "0", label: "关" },
+  ], group: "转发行为与重写" },
+  { key: "is_default", label: "默认规则", type: "switch", group: "转发行为与重写" },
+  { key: "path_rewrite_pattern", label: "正则重写·匹配", type: "text", placeholder: "^(.*)$", group: "转发行为与重写" },
+  { key: "path_rewrite_replacement", label: "正则重写·替换", type: "text", placeholder: "/new$1", group: "转发行为与重写" },
+  { key: "ip_whitelist", label: "IP 白名单（路由）", type: "text", hint: "选路维度，不是拦截：命中的客户端 IP 优先由本规则服务（支持 CIDR，如 10.0.0.0/8）；未命中走其他规则。要拒绝访问请用下面的「访问控制」两项", group: "访问控制" },
+  { key: "region_filters", label: "地区条件", type: "text", placeholder: "CN,HK", hint: "选路维度：客户端 IP 属地命中才优先选中本规则（不同地区可定向不同上游）；未命中走默认/其他规则", group: "访问控制" },
+  { key: "access_ip_whitelist", label: "访问控制 IP 白", type: "text", hint: "拒绝层：配置后名单外的 IP 一律 403（组级先于规则级生效）；留空不启用", group: "访问控制" },
+  { key: "ip_blacklist", label: "访问控制 IP 黑", type: "text", hint: "拒绝层：名单内 IP 一律 403，无论是否命中其他条件；留空不启用", group: "访问控制" },
+  { key: "region_whitelist", label: "地区白名单", type: "text", group: "访问控制" },
+  { key: "region_blacklist", label: "地区黑名单", type: "text", group: "访问控制" },
+  { key: "referer_whitelist", label: "Referer 白名单", type: "text", placeholder: "*.dwzynj.top, example.com", hint: "留空=继承组默认（组也未配置=不校验）；填 - = 组有默认时对本规则强制停用", group: "访问控制" },
   { key: "referer_policy", label: "空 Referer 策略", type: "select", options: [
+    { value: "", label: "继承组默认" },
     { value: "allow", label: "允许（本地播放器/直链）" },
     { value: "deny", label: "拒绝（仅白名单网页引用）" },
-  ] },
-  { key: "ua_blacklist", label: "UA 黑名单", type: "text", placeholder: "curl, python-requests（子串匹配，留空不校验）" },
-  { key: "ua_whitelist", label: "UA 白名单", type: "text", placeholder: "NASKTV, ExoPlayer（子串匹配；启用后无 UA 也拦截；留空不校验）" },
-  { key: "notes", label: "备注", type: "text" },
+  ], group: "访问控制" },
+  { key: "ua_blacklist", label: "UA 黑名单", type: "text", placeholder: "curl, python-requests（子串匹配）", hint: "留空=继承组默认（组也未配置=不校验）；填 - = 组有默认时对本规则强制停用", group: "访问控制" },
+  { key: "ua_whitelist", label: "UA 白名单", type: "text", placeholder: "NASKTV, ExoPlayer（子串匹配；启用后无 UA 也拦截）", hint: "留空=继承组默认（组也未配置=不校验）；填 - = 组有默认时对本规则强制停用", group: "访问控制" },
+  { key: "cors_origins", label: "CORS 来源覆盖", type: "text", placeholder: "https://app.example.com（留空继承全局 CORS 配置）", group: "上游 TLS 与请求注入" },
+  { key: "inject_request_headers", label: "自定义请求头（JSON）", type: "textarea", placeholder: '{"X-Custom-Auth": "token123"}', hint: "JSON 对象；转发前注入，同名头覆盖", group: "上游 TLS 与请求注入" },
+  { key: "upstream_verify_ssl", label: "上游 TLS 校验", type: "select", default: -1, options: [
+    { value: -1, label: "继承全局配置" },
+    { value: 1, label: "强制校验证书" },
+    { value: 0, label: "关闭校验（不安全）" },
+  ], group: "上游 TLS 与请求注入" },
+  { key: "client_cert", label: "mTLS 客户端证书（PEM 路径）", type: "text", placeholder: "/path/client.crt（留空不启用）", group: "上游 TLS 与请求注入" },
+  { key: "client_key", label: "mTLS 私钥（PEM 路径）", type: "text", placeholder: "/path/client.key", group: "上游 TLS 与请求注入" },
+  { key: "notes", label: "备注", type: "text", group: "其他" },
   { key: "enabled", label: "启用", type: "switch" },
-  { key: "is_default", label: "默认规则", type: "switch" },
-  { key: "strip_prefix", label: "去前缀", type: "switch" },
-  { key: "follow_redirects", label: "跟随重定向", type: "switch" },
-  { key: "enable_streaming", label: "流式转发", type: "switch" },
 ];
 
 function buildRuleGroupOptions(groups) {
@@ -862,25 +1056,53 @@ export function openRuleModal(rule, presetGroup = null) {
     ...RULE_SCHEMA,
   ];
 
+  // 组级继承三态：编辑时按规则 inherit_fields 还原；新建默认全部「继承组默认」，
+  // 组未设默认的字段在运行时回落全局/内建默认（与旧行为一致）
+  const inherits = new Set((rule && rule.inherit_fields) || []);
+  const tri = (key, explicit) => (inherits.has(key) ? "inherit" : explicit);
+
   const values = rule ? {
     route_group: String(selectedIndex),
-    name: rule.name, target_url: rule.target_url, priority: rule.priority ?? 0, timeout: rule.timeout ?? 30,
-    max_redirects: rule.max_redirects ?? 10, retry_times: rule.retry_times ?? 3,
+    name: rule.name, target_url: rule.target_url, priority: rule.priority ?? 0,
+    timeout_mode: tri("timeout", "custom"), timeout: rule.timeout ?? 30,
+    max_redirects_mode: tri("max_redirects", "custom"), max_redirects: rule.max_redirects ?? 10,
+    retry_times_mode: tri("retry_times", "custom"), retry_times: rule.retry_times ?? 3,
+    strip_prefix: tri("strip_prefix", rule.strip_prefix ? "1" : "0"),
+    follow_redirects: tri("follow_redirects", rule.follow_redirects !== false ? "1" : "0"),
+    enable_streaming: tri("enable_streaming", rule.enable_streaming ? "1" : "0"),
     path_rewrite_pattern: rule.path_rewrite_pattern || "", path_rewrite_replacement: rule.path_rewrite_replacement || "",
     ip_whitelist: rule.ip_whitelist || "", region_filters: rule.region_filters || "",
     access_ip_whitelist: rule.access_ip_whitelist || "", ip_blacklist: rule.ip_blacklist || "",
     region_whitelist: rule.region_whitelist || "", region_blacklist: rule.region_blacklist || "",
-    referer_whitelist: rule.referer_whitelist || "", referer_policy: rule.referer_policy || "allow",
-    ua_blacklist: rule.ua_blacklist || "",
-    ua_whitelist: rule.ua_whitelist || "",
+    // 字符串继承哨兵是空串：继承中的字段显示为空（保存空串 = 仍继承），
+    // 需要强制停用填 "-"；显式值原样回显
+    referer_whitelist: inherits.has("referer_whitelist") ? "" : (rule.referer_whitelist || ""),
+    referer_policy: tri("referer_policy", rule.referer_policy || "allow"),
+    ua_blacklist: inherits.has("ua_blacklist") ? "" : (rule.ua_blacklist || ""),
+    ua_whitelist: inherits.has("ua_whitelist") ? "" : (rule.ua_whitelist || ""),
+    // 多上游 + 健康检查（P1-2.2）：target_urls(JSON 数组) ↔ 多行文本互转
+    target_urls: ruleUrlsToLines(rule.target_urls),
+    health_check_enabled: Boolean(rule.health_check_enabled),
+    health_check_path: rule.health_check_path || "",
+    health_check_interval: rule.health_check_interval ?? 30,
+    health_check_timeout: rule.health_check_timeout ?? 5,
+    cors_origins: rule.cors_origins || "",
+    inject_request_headers: rule.inject_request_headers || "",
+    upstream_verify_ssl: Number(rule.upstream_verify_ssl ?? -1),
+    client_cert: rule.client_cert || "",
+    client_key: rule.client_key || "",
     notes: rule.notes || "", enabled: Boolean(rule.enabled), is_default: Boolean(rule.is_default),
-    strip_prefix: Boolean(rule.strip_prefix), follow_redirects: rule.follow_redirects !== false,
-    enable_streaming: Boolean(rule.enable_streaming),
   } : {
     route_group: String(selectedIndex),
-    priority: 0, timeout: 30, max_redirects: 10, retry_times: 3,
-    referer_whitelist: "", referer_policy: "allow", ua_blacklist: "", ua_whitelist: "",
-    enabled: true, is_default: false, strip_prefix: false, follow_redirects: true, enable_streaming: true,
+    priority: 0,
+    timeout_mode: "inherit", timeout: 30,
+    max_redirects_mode: "inherit", max_redirects: 10,
+    retry_times_mode: "inherit", retry_times: 3,
+    strip_prefix: "inherit", follow_redirects: "inherit", enable_streaming: "inherit",
+    referer_whitelist: "", referer_policy: "", ua_blacklist: "", ua_whitelist: "",
+    target_urls: "", health_check_enabled: false, health_check_path: "",
+    health_check_interval: 30, health_check_timeout: 5, cors_origins: "",
+    enabled: true, is_default: false,
   };
 
   openFormModal({
@@ -896,21 +1118,43 @@ export function openRuleModal(rule, presetGroup = null) {
     },
     onSave: async (out) => {
       const gi = groupOptions[Number(out.route_group)] || groupOptions[0];
+      // 组级继承（P2-4.1）：三态控件 → inherit_fields 清单；标记字段后端写哨兵
+      const inheritFields = [];
+      ["timeout", "max_redirects", "retry_times"].forEach((k) => {
+        if (out[`${k}_mode`] === "inherit") inheritFields.push(k);
+      });
+      ["follow_redirects", "enable_streaming", "strip_prefix"].forEach((k) => {
+        if (out[k] === "inherit") inheritFields.push(k);
+      });
+      // referer_policy 空串选项 = 继承组默认
+      if (out.referer_policy === "") inheritFields.push("referer_policy");
       const payload = {
         name: out.name, path_prefix: gi.path_prefix, request_host: gi.request_host,
         target_url: out.target_url, ip_whitelist: out.ip_whitelist || "", region_filters: out.region_filters || "",
         access_ip_whitelist: out.access_ip_whitelist || "", ip_blacklist: out.ip_blacklist || "",
         region_whitelist: out.region_whitelist || "", region_blacklist: out.region_blacklist || "",
-        referer_whitelist: out.referer_whitelist || "", referer_policy: out.referer_policy || "allow",
+        referer_whitelist: out.referer_whitelist || "", referer_policy: out.referer_policy || "",
         ua_blacklist: out.ua_blacklist || "",
         ua_whitelist: out.ua_whitelist || "",
-        priority: Number(out.priority ?? 0), timeout: Number(out.timeout ?? 30),
+        target_urls: linesToRuleUrls(out.target_urls),
+        health_check_enabled: Boolean(out.health_check_enabled),
+        health_check_path: out.health_check_path || "",
+        health_check_interval: Number(out.health_check_interval ?? 30),
+        health_check_timeout: Number(out.health_check_timeout ?? 5),
+        cors_origins: out.cors_origins || "",
+        inject_request_headers: out.inject_request_headers || "",
+        upstream_verify_ssl: Number(out.upstream_verify_ssl ?? -1),
+        client_cert: out.client_cert || "",
+        client_key: out.client_key || "",
+        priority: Number(out.priority ?? 0),
+        timeout: Number(out.timeout ?? 30),
         max_redirects: Number(out.max_redirects ?? 10), retry_times: Number(out.retry_times ?? 3),
         notes: out.notes || "", path_rewrite_pattern: out.path_rewrite_pattern || "",
         path_rewrite_replacement: out.path_rewrite_replacement || "",
         enabled: Boolean(out.enabled), is_default: Boolean(out.is_default),
-        strip_prefix: Boolean(out.strip_prefix), follow_redirects: Boolean(out.follow_redirects),
-        enable_streaming: Boolean(out.enable_streaming),
+        strip_prefix: out.strip_prefix === "1", follow_redirects: out.follow_redirects !== "0",
+        enable_streaming: out.enable_streaming !== "0",
+        inherit_fields: inheritFields,
       };
       if (isEdit) {
         await apiFetch(`/_admin/api/rules/${rule.id}`, { method: "PUT", body: JSON.stringify(payload) });
@@ -959,6 +1203,9 @@ export function openRuleDrawer(ruleId) {
   const kv = (k, v) => `<div class="kv"><div class="k">${esc(k)}</div><div class="val">${v}</div></div>`;
   const title = document.getElementById("drawerTitle");
   const body = document.getElementById("drawerBody");
+  // 组级继承（P2-4.1）：继承字段加「继承组默认」徽标，值显示的是解析后的有效值
+  const inherits = new Set(rule.inherit_fields || []);
+  const inhw = (k) => (inherits.has(k) ? ' <span class="pill pill-brand" title="取自路由组级默认配置">继承组</span>' : "");
   if (title) title.textContent = `规则 #${rule.id}`;
   if (body) {
     body.innerHTML = `
@@ -969,16 +1216,19 @@ export function openRuleDrawer(ruleId) {
       ${kv("路径前缀", `<code class="mono">${esc(rule.path_prefix || "")}</code>`)}
       ${kv("请求域名", cell(hostLabel))}
       ${kv("目标地址", rule.target_url ? `<a class="drawer-link" href="${esc(rule.target_url)}" target="_blank" rel="noopener">${esc(rule.target_url)}</a>` : cell(rule.target_url))}
+      ${kv("额外上游", cell(ruleUrlsToLines(rule.target_urls) || "—"))}
+      ${kv("上游健康", healthBadges(rule.health) || '<span class="text-muted">未启用探针</span>')}
+      ${kv("健康探针", rule.health_check_enabled ? `<span class="pill pill-ok">开</span> ${(rule.health_check_path || "TCP")} · ${(rule.health_check_interval ?? 30)}s` : '<span class="pill pill-neutral">关</span>')}
       ${kv("优先级", cell(rule.priority ?? 0))}
       ${kv("默认规则", bool(rule.is_default))}
       ${kv("启用状态", bool(rule.enabled))}
       <div class="section-h" style="margin-top:16px">请求处理</div>
-      ${kv("超时(秒)", cell(rule.timeout ?? 30))}
-      ${kv("最大重定向", cell(rule.max_redirects ?? 10))}
-      ${kv("重试次数", cell(rule.retry_times ?? 3))}
-      ${kv("去前缀", bool(rule.strip_prefix))}
-      ${kv("跟随重定向", bool(rule.follow_redirects !== false))}
-      ${kv("流式转发", bool(rule.enable_streaming))}
+      ${kv("超时(秒)", cell(rule.timeout ?? 30) + inhw("timeout"))}
+      ${kv("最大重定向", cell(rule.max_redirects ?? 10) + inhw("max_redirects"))}
+      ${kv("重试次数", cell(rule.retry_times ?? 3) + inhw("retry_times"))}
+      ${kv("去前缀", bool(rule.strip_prefix) + inhw("strip_prefix"))}
+      ${kv("跟随重定向", bool(rule.follow_redirects !== false) + inhw("follow_redirects"))}
+      ${kv("流式转发", bool(rule.enable_streaming) + inhw("enable_streaming"))}
       ${kv("正则模式", cell(rule.path_rewrite_pattern))}
       ${kv("正则替换", cell(rule.path_rewrite_replacement))}
       <div class="section-h" style="margin-top:16px">访问控制</div>
@@ -988,10 +1238,10 @@ export function openRuleDrawer(ruleId) {
       ${kv("访问控制 IP 黑", cell(rule.ip_blacklist))}
       ${kv("地区白名单", cell(rule.region_whitelist))}
       ${kv("地区黑名单", cell(rule.region_blacklist))}
-      ${kv("Referer 白名单", rule.referer_whitelist ? `<code class="mono">${esc(rule.referer_whitelist)}</code>` : '<span class="text-muted">未启用校验</span>')}
-      ${kv("空 Referer 策略", esc((rule.referer_policy || "allow") === "deny" ? "拒绝（仅白名单网页引用）" : "允许（本地播放器/直链）"))}
-      ${kv("UA 黑名单", rule.ua_blacklist ? `<code class="mono">${esc(rule.ua_blacklist)}</code>` : '<span class="text-muted">未启用</span>')}
-      ${kv("UA 白名单", rule.ua_whitelist ? `<code class="mono">${esc(rule.ua_whitelist)}</code>` : '<span class="text-muted">未启用（放行全部 UA）</span>')}
+      ${kv("Referer 白名单", rule.referer_whitelist ? `<code class="mono">${esc(rule.referer_whitelist)}</code>` : '<span class="text-muted">未启用校验</span>' + inhw("referer_whitelist"))}
+      ${kv("空 Referer 策略", esc((rule.referer_policy || "allow") === "deny" ? "拒绝（仅白名单网页引用）" : "允许（本地播放器/直链）") + inhw("referer_policy"))}
+      ${kv("UA 黑名单", rule.ua_blacklist ? `<code class="mono">${esc(rule.ua_blacklist)}</code>` : '<span class="text-muted">未启用</span>' + inhw("ua_blacklist"))}
+      ${kv("UA 白名单", rule.ua_whitelist ? `<code class="mono">${esc(rule.ua_whitelist)}</code>` : '<span class="text-muted">未启用（放行全部 UA）</span>' + inhw("ua_whitelist"))}
     `;
   }
   openDrawer();
@@ -1417,14 +1667,14 @@ export function renderRouteLogs(payload) {
             <div class="route-log-item-actions">${banButtonHtml}<button class="btn btn-sm btn-danger" data-action="delete-route-log" data-id="${log.id}">删除</button></div>
           </div>
           <div class="route-log-item-fields">
-            <div class="route-log-field"><span class="route-log-field-label">请求</span><div class="route-log-field-value"><strong>${esc(log.request_method || "-")}</strong><span class="route-log-path" title="${esc(log.request_path || "")}">${esc(log.request_path || "-")}</span>${log.request_query_string ? `<span class="route-log-query" title="${esc(log.request_query_string)}">?${esc(log.request_query_string)}</span>` : ""}</div></div>
+            <div class="route-log-field"><span class="route-log-field-label">请求</span><div class="route-log-field-value"><strong>${esc(log.request_method || "-")}</strong><span class="route-log-path" title="${esc(decodeUrlDisplay(log.request_path))}">${esc(decodeUrlDisplay(log.request_path || "-"))}</span>${log.request_query_string ? `<span class="route-log-query" title="${esc(decodeUrlDisplay(log.request_query_string))}">?${esc(decodeUrlDisplay(log.request_query_string))}</span>` : ""}</div></div>
             <div class="route-log-field"><span class="route-log-field-label">域名</span><div class="route-log-field-value"><span>${esc(formatRouteLogRequestHost(log.request_host || ""))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">前缀</span><div class="route-log-field-value"><strong>${esc(log.path_prefix || "-")}</strong></div></div>
             <div class="route-log-field"><span class="route-log-field-label">规则</span><div class="route-log-field-value"><span>${esc(log.rule_name || "-")}</span><span class="hint">命中域名: ${esc(formatRouteLogRuleRequestHost(log.rule_request_host || ""))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">地区</span><div class="route-log-field-value"><strong>${esc(log.geo_summary || "-")}</strong><span class="hint">命中: ${esc(log.matched_region || "-")}</span><span class="hint">源: ${esc(log.geo_source || "-")}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">匹配</span><div class="route-log-field-value"><strong>${esc(formatMatchStrategy(log.match_strategy))}</strong><span class="hint">${esc(formatMatchDetail(log.match_detail))}</span></div></div>
-            <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(log.redirect_location || "")}">${esc(log.redirect_location || "-")}</strong></div></div>
-            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${isSignedReentry ? '<span class="pill pill-info">签名重入</span>' : ""}${resultKindBadge}<strong class="route-log-target-url" title="${esc(log.target_url || "")}">${esc(log.target_url || "-")}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(decodeUrlDisplay(log.redirect_location))}">${esc(decodeUrlDisplay(log.redirect_location || "-"))}</strong></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${isSignedReentry ? '<span class="pill pill-info">签名重入</span>' : ""}${resultKindBadge}<strong class="route-log-target-url" title="${esc(decodeUrlDisplay(log.target_url))}">${esc(decodeUrlDisplay(log.target_url || "-"))}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">链路</span><div class="route-log-field-value">${chainText ? `<span class="route-log-chain" title="${esc(chainText)}">${esc(chainText)}</span>` : "-"}</div></div>
             ${log.error_message ? `<div class="route-log-field"><span class="route-log-field-label">错误</span><div class="route-log-field-value"><span class="route-log-error" title="${esc(log.error_message)}">${esc(log.error_message)}</span></div></div>` : ""}
             <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
@@ -1480,6 +1730,93 @@ export async function loadRouteLogs() {
 export async function refreshRouteLogModule() {
   // 盗链监控已迁入「设置与监控」弹窗，改为打开弹窗时按需加载，不再随日志页刷新
   await Promise.all([loadRouteLogSettings(), loadRouteLogs()]);
+}
+
+// ============ 转发结果 CSV 导出（路径/URL 已解码） ============
+// 复用 collectRouteLogFilters 取当前筛选条件，分页拉取全部匹配记录（后端 limit 上限 500），
+// 对 request_path / request_query_string / redirect_location / target_url 做 URL 解码后写 CSV。
+// 解码与列表显示共用 decodeUrlDisplay，保证「看得到的解码值 = 导出的解码值」。
+
+// CSV 单元格转义：含逗号/引号/换行时用双引号包裹并把内部引号翻倍（RFC 4180）。
+function csvCell(v) {
+  const s = v == null ? "" : String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+const ROUTE_LOG_CSV_COLUMNS = [
+  ["id", "ID"],
+  ["created_at", "时间"],
+  ["request_method", "方法"],
+  ["request_path", "请求路径", true],
+  ["request_query_string", "查询串", true],
+  ["request_host", "域名"],
+  ["path_prefix", "前缀"],
+  ["rule_name", "规则"],
+  ["rule_request_host", "命中域名"],
+  ["geo_summary", "地区"],
+  ["matched_region", "命中地区"],
+  ["match_strategy", "匹配策略"],
+  ["match_detail", "匹配详情"],
+  ["redirect_location", "302地址", true],
+  ["target_url", "转发目标", true],
+  ["upstream_status", "上游状态"],
+  ["cache_status", "缓存状态"],
+  ["result_status", "结果"],
+  ["operation_duration_ms", "耗时(ms)"],
+  ["original_client_ip", "原始IP"],
+  ["client_ip", "匹配IP"],
+  ["referer", "Referer"],
+  ["bytes_transferred", "传输字节"],
+  ["chain", "链路"],
+  ["error_message", "错误"],
+];
+
+function routeLogsToCsv(rows) {
+  const header = ROUTE_LOG_CSV_COLUMNS.map((c) => csvCell(c[1])).join(",");
+  const lines = rows.map((r) =>
+    ROUTE_LOG_CSV_COLUMNS.map((c) => {
+      const raw = r[c[0]];
+      // 第三项为 true 的列为 URL 字段，导出时解码；其余原样输出
+      const val = c[2] ? decodeUrlDisplay(raw) : raw;
+      return csvCell(val);
+    }).join(",")
+  );
+  return [header, ...lines].join("\r\n");
+}
+
+export async function exportRouteLogs(showToast) {
+  const baseFilters = collectRouteLogFilters();
+  const PAGE = 500; // 后端 list_route_logs 的 limit 上限
+  const SAFETY_CAP = 200000; // 单次导出行数上限，避免极端数据量拖垮浏览器
+  let page = 1;
+  const all = [];
+  // 逐页拉取，直到取完当前筛选条件下的全部记录
+  while (true) {
+    const payload = await apiFetch(
+      `/_admin/api/logs?${buildRouteLogQuery({ ...baseFilters, limit: PAGE, page })}`
+    );
+    const items = (payload && Array.isArray(payload.items)) ? payload.items : [];
+    all.push(...items);
+    const total = payload ? Number(payload.total || 0) : 0;
+    if (items.length < PAGE || all.length >= total || all.length >= SAFETY_CAP) break;
+    page += 1;
+  }
+  if (!all.length) {
+    if (showToast) showToast("没有可导出的记录（当前筛选条件下无数据）。");
+    return;
+  }
+  const csv = routeLogsToCsv(all);
+  // 前置 BOM 让 Excel 正确识别 UTF-8（含中文）；download 属性触发浏览器下载
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `route_logs_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  if (showToast) showToast(`已导出 ${all.length} 条转发记录（CSV，路径/URL 已解码）。`);
 }
 
 // ---- 盗链监控看板（HOTLINK_PROTECTION.md 阶段 1） ----
@@ -2053,6 +2390,555 @@ export function openStreamGuardSettings() {
   });
 }
 
+// ============ 登录防爆破（P0-1.2） ============
+
+export async function loadLoginProtectionSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/login-protection");
+    const body = document.getElementById("loginProtectionBody");
+    const pill = document.getElementById("loginProtectionPill");
+    const maxAttempts = Number(data.max_attempts || 0);
+    const lockoutMinutes = Number(data.lockout_minutes || 0);
+    const cooldownSeconds = Number(data.cooldown_seconds || 0);
+    setValue("login_max_attempts", String(maxAttempts));
+    setValue("login_lockout_minutes", String(lockoutMinutes));
+    setValue("login_cooldown_seconds", String(cooldownSeconds));
+    if (pill) {
+      pill.className = "pill " + (maxAttempts > 0 ? "pill-ok" : "pill-neutral");
+      pill.textContent = maxAttempts > 0 ? `${maxAttempts} 次 / 锁 ${lockoutMinutes} 分` : "未配置";
+    }
+    if (body) {
+      body.innerHTML =
+        `<div class="kv"><div class="k">失败阈值</div><div class="val">${esc(String(maxAttempts))} 次</div></div>` +
+        `<div class="kv"><div class="k">锁定时长</div><div class="val">${esc(String(lockoutMinutes))} 分钟</div></div>` +
+        `<div class="kv"><div class="k">重试冷却</div><div class="val">${cooldownSeconds > 0 ? esc(String(cooldownSeconds)) + " 秒" : "不限制"}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：同一 IP + 账号连续失败达到阈值即锁定该组合（含正确密码也拒绝），返回 429 并带 Retry-After；登录成功即清空计数。部署在反代后请确保透传 X-Forwarded-For / X-Real-IP，否则所有来源会被视为同一地址而互相牵连。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openLoginProtectionSettings() {
+  openFormModal({
+    title: "登录防爆破",
+    size: 560,
+    sub: "限制后台登录的连续失败次数，抵御暴力破解。",
+    schema: [
+      { type: "note", text: "【生效范围】按「客户端 IP + 账号」组合分别计数，互不影响。\n【生效行为】连续失败达到阈值后，该组合在锁定时长内一律拒绝登录（即使密码正确），返回 429 并附 Retry-After；期满自动恢复。\n【计数清空】任意一次登录成功即清空该组合计数。\n【反代注意】前置 nginx 需透传 X-Forwarded-For / X-Real-IP，否则所有来源被视作同一地址而互相牵连。\n【审计】登录成功会记入审计日志（对象类型：登录）。" },
+      { key: "max_attempts", label: "失败次数阈值", type: "number", default: 5, hint: "达到即锁定；建议 3~10" },
+      { key: "lockout_minutes", label: "锁定时长（分钟）", type: "number", default: 15, hint: "锁定期间该组合无法登录" },
+      { key: "cooldown_seconds", label: "重试冷却（秒）", type: "number", default: 0, hint: "0 = 不额外冷却（预留）" },
+    ],
+    values: {
+      max_attempts: Number(getValue("login_max_attempts") || 5),
+      lockout_minutes: Number(getValue("login_lockout_minutes") || 15),
+      cooldown_seconds: Number(getValue("login_cooldown_seconds") || 0),
+    },
+    validate: (out) => {
+      if (Number(out.max_attempts ?? 0) < 1) return "失败次数阈值至少为 1";
+      if (Number(out.lockout_minutes ?? 0) < 1) return "锁定时长至少为 1 分钟";
+      if (Number(out.cooldown_seconds ?? 0) < 0) return "冷却时间不能为负数";
+      return null;
+    },
+    onSave: async (out) => {
+      const data = await apiFetch("/_admin/api/login-protection", {
+        method: "PUT",
+        body: JSON.stringify({
+          max_attempts: Math.max(1, Number(out.max_attempts ?? 5)),
+          lockout_minutes: Math.max(1, Number(out.lockout_minutes ?? 15)),
+          cooldown_seconds: Math.max(0, Number(out.cooldown_seconds ?? 0)),
+        }),
+      });
+      setValue("login_max_attempts", String(data.max_attempts || 0));
+      setValue("login_lockout_minutes", String(data.lockout_minutes || 0));
+      setValue("login_cooldown_seconds", String(data.cooldown_seconds || 0));
+      await loadLoginProtectionSettings();
+      showToast("登录防爆破配置已保存。");
+    },
+  });
+}
+
+// ============ 主动速率限制（P1-2.1） ============
+
+export async function loadRateLimitSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/rate-limit");
+    const body = document.getElementById("rateLimitBody");
+    const pill = document.getElementById("rateLimitPill");
+    const enabled = Boolean(data.enabled);
+    const rps = Number(data.requests_per_second || 0);
+    const burst = Number(data.burst || 0);
+    const perIp = Boolean(data.per_ip);
+    setValue("rate_limit_enabled", enabled ? "1" : "0");
+    setValue("rate_limit_rps", String(rps));
+    setValue("rate_limit_burst", String(burst));
+    setValue("rate_limit_per_ip", perIp ? "1" : "0");
+    if (pill) {
+      pill.className = "pill " + (enabled ? "pill-ok" : "pill-neutral");
+      pill.textContent = enabled ? `${rps} 次/秒 · 突发 ${burst}` : "未启用";
+    }
+    if (body) {
+      body.innerHTML =
+        `<div class="kv"><div class="k">状态</div><div class="val">${enabled ? "启用" : "未启用"}</div></div>` +
+        `<div class="kv"><div class="k">速率</div><div class="val">${esc(String(rps))} 请求/秒</div></div>` +
+        `<div class="kv"><div class="k">突发容量</div><div class="val">${esc(String(burst))} 个令牌</div></div>` +
+        `<div class="kv"><div class="k">限流维度</div><div class="val">${perIp ? "按客户端 IP" : "全局共享"}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：在封禁检查之后、请求去重之前做柔性节流。令牌桶按「速率」持续补充、容量上限为「突发」，瞬时超过即返回 429 + Retry-After。部署在反代后请确保透传 X-Forwarded-For / X-Real-IP，否则所有来源会被视作同一地址而互相牵连。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openRateLimitSettings() {
+  openFormModal({
+    title: "主动速率限制",
+    size: 560,
+    sub: "在封禁之前柔性限流，避免正常突发被误封。",
+    schema: [
+      { type: "note", text: "【触发顺序】限流在 IP 封禁之后、请求去重之前执行。\n【限流维度】默认按客户端 IP 独立计数；关掉则全局共享一个令牌桶。\n【封顶】requests_per_second 按 0.1~1000 钳制，burst ≥ 1。\n【出口】超限返回 429 + Retry-After，并在请求日志中记为 rate_limited。\n【反代注意】前置 nginx 需透传 X-Forwarded-For / X-Real-IP。" },
+      { key: "enabled", label: "启用限流", type: "switch", default: false },
+      { key: "requests_per_second", label: "速率（请求/秒）", type: "number", default: 10, hint: "令牌桶填充速率，建议 5~50" },
+      { key: "burst", label: "突发容量", type: "number", default: 20, hint: "允许瞬时可消耗的令牌数" },
+      { key: "per_ip", label: "按客户端 IP 限流", type: "switch", default: true, hint: "关闭则全局共享一个桶" },
+    ],
+    values: {
+      enabled: getValue("rate_limit_enabled") === "1",
+      requests_per_second: Number(getValue("rate_limit_rps") || 10),
+      burst: Number(getValue("rate_limit_burst") || 20),
+      per_ip: getValue("rate_limit_per_ip") !== "0",
+    },
+    validate: (out) => {
+      if (out.enabled) {
+        if (Number(out.requests_per_second ?? 0) <= 0) return "速率必须大于 0";
+        if (Number(out.burst ?? 0) < 1) return "突发容量至少为 1";
+      }
+      return null;
+    },
+    onSave: async (out) => {
+      const data = await apiFetch("/_admin/api/rate-limit", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          requests_per_second: Math.max(0.1, Number(out.requests_per_second ?? 10)),
+          burst: Math.max(1, Number(out.burst ?? 20)),
+          per_ip: Boolean(out.per_ip),
+        }),
+      });
+      setValue("rate_limit_enabled", data.enabled ? "1" : "0");
+      setValue("rate_limit_rps", String(data.requests_per_second || 0));
+      setValue("rate_limit_burst", String(data.burst || 0));
+      setValue("rate_limit_per_ip", data.per_ip ? "1" : "0");
+      await loadRateLimitSettings();
+      showToast("主动速率限制配置已保存。");
+    },
+  });
+}
+
+// ============ 跨域资源共享 CORS（P2-3.2） ============
+
+export async function loadCorsSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/cors");
+    const body = document.getElementById("corsBody");
+    const pill = document.getElementById("corsPill");
+    const enabled = Boolean(data.enabled);
+    const origins = String(data.allowed_origins || "");
+    setValue("cors_enabled", enabled ? "1" : "0");
+    setValue("cors_allowed_origins", origins);
+    setValue("cors_allowed_methods", String(data.allowed_methods || "GET,HEAD,OPTIONS"));
+    setValue("cors_allow_credentials", data.allow_credentials ? "1" : "0");
+    setValue("cors_max_age", String(data.max_age ?? 600));
+    if (pill) {
+      pill.className = "pill " + (enabled ? "pill-ok" : "pill-neutral");
+      pill.textContent = enabled ? (origins === "*" ? "允许全部来源" : `${origins.split(",").filter(Boolean).length} 个来源`) : "未启用";
+    }
+    if (body) {
+      body.innerHTML =
+        `<div class="kv"><div class="k">状态</div><div class="val">${enabled ? "启用" : "未启用"}</div></div>` +
+        `<div class="kv"><div class="k">允许来源</div><div class="val" style="word-break:break-all">${esc(origins || "—")}</div></div>` +
+        `<div class="kv"><div class="k">允许方法</div><div class="val">${esc(String(data.allowed_methods || ""))}</div></div>` +
+        `<div class="kv"><div class="k">携带凭据</div><div class="val">${data.allow_credentials ? "允许" : "不允许"}</div></div>` +
+        `<div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:8px">说明：只作用于代理路径，管理后台（/_admin）一律不允许跨域。预检 OPTIONS 请求直接返回 204，不占用上游与限流配额。规则可在「代理规则」里按条目覆盖允许来源（留空继承此处全局配置）。</div>`;
+    }
+  } catch (_) {}
+}
+
+export function openCorsSettings() {
+  openFormModal({
+    title: "跨域资源共享 (CORS)",
+    size: 560,
+    sub: "允许浏览器跨源直接拉取代理资源；管理接口不受影响。",
+    schema: [
+      { type: "note", text: "【作用范围】仅代理路径；/_admin 永不注入 CORS 头。\n【来源】逗号分隔，如 https://a.com, https://b.com；填 * 表示全部（此时不能开启凭据）。\n【预检】浏览器预检 OPTIONS 由本服务直接应答 204，不转发上游。" },
+      { key: "enabled", label: "启用 CORS", type: "switch", default: false },
+      { key: "allowed_origins", label: "允许来源", type: "text", placeholder: "https://app.example.com 或 *", hint: "逗号分隔多个来源" },
+      { key: "allowed_methods", label: "允许方法", type: "text", default: "GET,HEAD,OPTIONS" },
+      { key: "allow_credentials", label: "允许携带凭据", type: "switch", default: false, hint: "Cookie / Authorization；来源为 * 时不可开启" },
+      { key: "max_age", label: "预检缓存（秒）", type: "number", default: 600 },
+    ],
+    values: {
+      enabled: getValue("cors_enabled") === "1",
+      allowed_origins: getValue("cors_allowed_origins") || "",
+      allowed_methods: getValue("cors_allowed_methods") || "GET,HEAD,OPTIONS",
+      allow_credentials: getValue("cors_allow_credentials") === "1",
+      max_age: Number(getValue("cors_max_age") || 600),
+    },
+    validate: (out) => {
+      if (out.enabled) {
+        if (!String(out.allowed_origins || "").trim()) return "启用 CORS 时必须填写允许来源";
+        const creds = Boolean(out.allow_credentials);
+        const wildcard = String(out.allowed_origins).split(",").map((s) => s.trim()).includes("*");
+        if (creds && wildcard) return "来源为 * 时不能开启「允许携带凭据」（CORS 规范禁止）";
+      }
+      return null;
+    },
+    onSave: async (out) => {
+      const data = await apiFetch("/_admin/api/cors", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(out.enabled),
+          allowed_origins: String(out.allowed_origins || "").trim(),
+          allowed_methods: String(out.allowed_methods || "GET,HEAD,OPTIONS").trim(),
+          allow_credentials: Boolean(out.allow_credentials),
+          max_age: Math.max(0, Number(out.max_age ?? 600) || 0),
+        }),
+      });
+      setValue("cors_enabled", data.enabled ? "1" : "0");
+      setValue("cors_allowed_origins", String(data.allowed_origins || ""));
+      setValue("cors_allowed_methods", String(data.allowed_methods || ""));
+      setValue("cors_allow_credentials", data.allow_credentials ? "1" : "0");
+      setValue("cors_max_age", String(data.max_age ?? 600));
+      await loadCorsSettings();
+      showToast("CORS 配置已保存。");
+    },
+  });
+}
+
+// ============ Webhook / IM 告警通知（P1-2.4） ============
+
+const NOTIFY_TYPE_LABELS = { generic: "通用 Webhook", feishu: "飞书机器人", dingtalk: "钉钉机器人", slack: "Slack" };
+const NOTIFY_TYPES = [
+  { type: "generic", hasSecret: false },
+  { type: "feishu", hasSecret: true },
+  { type: "dingtalk", hasSecret: true },
+  { type: "slack", hasSecret: false },
+];
+
+export async function loadNotificationsSettings() {
+  try {
+    const data = await apiFetch("/_admin/api/notifications");
+    const pill = document.getElementById("notifyPill");
+    const body = document.getElementById("notifyBody");
+    const enabled = Boolean(data.enabled);
+    const channels = data.channels || [];
+    state.notifyChannels = channels;
+    setValue("notify_enabled", enabled ? "1" : "0");
+    if (pill) {
+      pill.className = "pill " + (enabled ? "pill-ok" : "pill-neutral");
+      const active = channels.filter((c) => c.enabled && c.url).length;
+      pill.textContent = enabled ? (active ? `${active} 个启用渠道` : "无启用渠道") : "未启用";
+    }
+    if (body) {
+      body.innerHTML = channels.length
+        ? channels.map((c) =>
+          `<div class="kv"><div class="k">${esc(NOTIFY_TYPE_LABELS[c.type] || c.type)}${c.name ? ` · ${esc(c.name)}` : ""}</div>`
+          + `<div class="val">${c.enabled ? '<span class="pill pill-ok">启用</span>' : '<span class="pill pill-neutral">停用</span>'}`
+          + `<span class="hint" style="margin-left:8px">${esc(c.url)}</span></div></div>`).join("")
+        : '<div class="hint">尚未配置任何 Webhook 渠道。支持飞书 / 钉钉 / Slack / 通用 Webhook，封禁事件自动推送。</div>';
+    }
+  } catch (_) {}
+}
+
+export function openNotificationsSettings() {
+  const channels = state.notifyChannels || [];
+  const byType = {};
+  channels.forEach((c) => { byType[c.type] = c; });
+  const schema = [
+    { type: "note", text: "【总开关】关闭后所有 Webhook 渠道都不推送（邮件不受影响）。\n【渠道】只保存填写了 URL 的渠道；type 固定为对应平台，签名密钥仅飞书/钉钉需要。\n【触发】自动封禁 / 后台手动封禁时广播；可用下方「发送 Webhook 测试」验证连通性。" },
+    { key: "enabled", label: "启用 Webhook 告警", type: "switch", default: false },
+    ...NOTIFY_TYPES.flatMap(({ type, hasSecret }) => {
+      const label = NOTIFY_TYPE_LABELS[type];
+      return [
+        { key: `${type}_enabled`, label: `${label} · 启用`, type: "switch", default: false },
+        { key: `${type}_url`, label: `${label} · Webhook 地址`, type: "text", placeholder: type === "feishu" ? "https://open.feishu.cn/open-apis/bot/v2/hook/xxx" : type === "dingtalk" ? "https://oapi.dingtalk.com/robot/send?access_token=xxx" : "https://example.com/hook" },
+        ...(hasSecret ? [{ key: `${type}_secret`, label: `${label} · 签名密钥`, type: "text", placeholder: "加签密钥（未启用加签可留空）" }] : []),
+      ];
+    }),
+  ];
+  const values = { enabled: getValue("notify_enabled") === "1" };
+  NOTIFY_TYPES.forEach(({ type }) => {
+    const ch = byType[type] || {};
+    values[`${type}_enabled`] = Boolean(ch.enabled);
+    values[`${type}_url`] = ch.url || "";
+    values[`${type}_secret`] = ch.secret || "";
+  });
+
+  openFormModal({
+    title: "Webhook / IM 告警",
+    size: 640,
+    schema,
+    values,
+    validate: (out) => {
+      for (const { type } of NOTIFY_TYPES) {
+        if (out[`${type}_enabled`] && !String(out[`${type}_url`] || "").trim()) {
+          return `${NOTIFY_TYPE_LABELS[type]}已启用但未填写 Webhook 地址`;
+        }
+      }
+      return null;
+    },
+    onSave: async (out) => {
+      const channels = NOTIFY_TYPES
+        .map(({ type }) => ({
+          type,
+          name: "",
+          enabled: Boolean(out[`${type}_enabled`]),
+          url: String(out[`${type}_url`] || "").trim(),
+          secret: String(out[`${type}_secret`] || "").trim(),
+        }))
+        .filter((c) => c.url);
+      const data = await apiFetch("/_admin/api/notifications", {
+        method: "PUT",
+        body: JSON.stringify({ enabled: Boolean(out.enabled), channels }),
+      });
+      state.notifyChannels = data.channels || [];
+      setValue("notify_enabled", data.enabled ? "1" : "0");
+      await loadNotificationsSettings();
+      showToast("Webhook 告警配置已保存。");
+    },
+  });
+}
+
+export async function testNotifications() {
+  const el = document.getElementById("notifyTestResult");
+  const channels = (state.notifyChannels || []).filter((c) => c.enabled && c.url);
+  if (!channels.length) {
+    if (el) el.textContent = "没有已启用的渠道，请先编辑配置。";
+    return;
+  }
+  if (el) el.textContent = "发送中……";
+  const results = [];
+  for (const c of channels) {
+    try {
+      const r = await apiFetch("/_admin/api/notifications/test", { method: "POST", body: JSON.stringify(c) });
+      results.push(`${NOTIFY_TYPE_LABELS[c.type] || c.type}：${r.ok ? "✅ 发送成功" : `❌ ${r.message}`}`);
+    } catch (e) {
+      results.push(`${NOTIFY_TYPE_LABELS[c.type] || c.type}：❌ ${e.message}`);
+    }
+  }
+  if (el) el.innerHTML = results.map((s) => `<div>${esc(s)}</div>`).join("");
+}
+
+// ============ 配置版本历史 / 导出导入（P2-3.5） ============
+
+export async function loadSettingsHistory() {
+  const module = getValue("settings_history_module") || document.getElementById("settingsModuleSelect")?.value || "rate-limit";
+  setValue("settings_history_module", module);
+  await renderSettingsHistory(module);
+}
+
+async function renderSettingsHistory(module) {
+  const body = document.getElementById("settingsHistoryBody");
+  if (!body) return;
+  try {
+    const data = await apiFetch(`/_admin/api/settings-history/${encodeURIComponent(module)}?limit=10`);
+    const items = data.items || [];
+    body.innerHTML = items.length
+      ? items.map((h) =>
+        `<div class="kv"><div class="k">#${h.id} · ${esc(String(h.created_at || "").replace("T", " "))}</div>`
+        + `<div class="val"><span class="hint">${esc(h.changed_by || "system")}</span>`
+        + `<button class="btn btn-sm" data-action="rollback-history" data-module="${esc(module)}" data-id="${h.id}">回滚</button></div></div>`
+      ).join("")
+      : `<div class="hint">该模块暂无变更历史。保存一次配置后即可在此回滚。</div>`;
+  } catch (_) {
+    body.innerHTML = '<div class="hint">历史加载失败。</div>';
+  }
+}
+
+export async function rollbackSettingsHistory(module, historyId) {
+  if (!module || !Number.isFinite(historyId)) return;
+  // 回滚会把配置整体恢复为历史快照，误点会造成配置回退——先确认
+  if (!window.confirm(`确认把「${module}」配置回滚到历史版本 #${historyId} 吗？`)) return;
+  try {
+    await apiFetch(`/_admin/api/settings-history/${encodeURIComponent(module)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ history_id: historyId }),
+    });
+    showToast("已回滚到指定历史版本。");
+    await loadSettingsHistory();
+  } catch (e) {
+    showToast(e.message || "回滚失败", true);
+  }
+}
+
+export async function exportSettingsModule() {
+  const module = document.getElementById("settingsModuleSelect")?.value || "rate-limit";
+  const data = await apiFetch(`/_admin/api/settings-export/${encodeURIComponent(module)}`);
+  const text = JSON.stringify(data, null, 2);
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${module}-config-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (_) {}
+  showToast("配置已导出（下载 JSON 文件）。");
+}
+
+export function openSettingsImport() {
+  const module = document.getElementById("settingsModuleSelect")?.value || "rate-limit";
+  openFormModal({
+    title: `导入配置：${module}`,
+    size: 560,
+    sub: "粘贴此前导出的 JSON 配置；导入等价于一次普通保存（含校验与钳制）。",
+    schema: [
+      { key: "payload_text", label: "配置 JSON", type: "textarea", required: true, placeholder: '{\n  "enabled": true, ...\n}' },
+    ],
+    validate: (out) => {
+      try {
+        const v = JSON.parse(out.payload_text);
+        if (!v || typeof v !== "object" || Array.isArray(v)) return "必须是 JSON 对象";
+      } catch (_) {
+        return "JSON 解析失败，请检查格式";
+      }
+      return null;
+    },
+    onSave: async (out) => {
+      const parsed = JSON.parse(out.payload_text);
+      await apiFetch(`/_admin/api/settings-import/${encodeURIComponent(module)}`, {
+        method: "POST",
+        body: JSON.stringify(parsed.payload ? parsed : { payload: parsed }),
+      });
+      showToast("配置导入成功。");
+      await loadSettingsHistory();
+    },
+  });
+}
+
+// ============ 管理操作审计日志（P0-1.3） ============
+
+const AUDIT_ACTION_LABELS = {
+  create: "新增",
+  update: "修改",
+  delete: "删除",
+  login: "登录",
+};
+
+// 动作语义配色：新增=绿 / 修改=蓝 / 删除=红 / 登录=中性灰；未知动作回落中性
+const AUDIT_ACTION_PILLS = {
+  create: "pill-ok",
+  update: "pill-info",
+  delete: "pill-danger",
+  login: "pill-neutral",
+};
+
+const AUDIT_TARGET_LABELS = {
+  rule: "转发规则",
+  route_group: "路由组",
+  banned_ip: "封禁 IP",
+  api_key: "API 密钥",
+  backup: "备份",
+  email_settings: "邮件配置",
+  log_settings: "日志设置",
+  logging_settings: "运行日志",
+  ip_cache_settings: "结果缓存",
+  dedup_settings: "请求去重",
+  auto_ban_settings: "自动封禁",
+  stream_guard_settings: "并发限制",
+  signed_url_settings: "签名 URL",
+  redirect_signing_settings: "302 加签",
+  geoip: "IP 定位",
+  route_log: "请求日志",
+  app_log: "应用日志",
+  auth: "登录",
+};
+
+const AUDIT_ACTOR_LABELS = {
+  session: "后台会话",
+  apikey: "API 密钥",
+  anonymous: "未登录",
+};
+
+export function collectAuditFilters() {
+  return {
+    keyword: getValue("auditKeyword"),
+    action: getValue("auditAction"),
+    target_type: getValue("auditTargetType"),
+    date_from: getValue("auditDateFrom"),
+    date_to: getValue("auditDateTo"),
+    page: state.auditCurrentPage || 1,
+    limit: Number(getValue("auditPageSize") || 20),
+  };
+}
+
+function buildAuditQuery(filters) {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== "" && value !== null && value !== undefined) params.set(key, String(value));
+  });
+  return params.toString();
+}
+
+export async function loadAuditLogs() {
+  const query = buildAuditQuery(collectAuditFilters());
+  const payload = await apiFetch(`/_admin/api/audit-logs${query ? `?${query}` : ""}`);
+  renderAuditLogs(payload || { items: [], total: 0 });
+}
+
+export async function goToAuditPage(page) {
+  page = Math.max(1, Math.min(state.auditTotalPages || 1, page));
+  state.auditCurrentPage = page;
+  await loadAuditLogs();
+}
+
+export function renderAuditLogs(payload) {
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const total = payload.total ?? items.length;
+  const totalPages = payload.total_pages ?? 1;
+  const currentPage = payload.page ?? 1;
+  const limit = payload.limit ?? 20;
+  state.auditTotalPages = totalPages;
+  state.auditCurrentPage = currentPage;
+
+  const startOffset = (currentPage - 1) * limit + 1;
+  const endOffset = Math.min(currentPage * limit, total);
+  setText("auditTotalCount", total > 0 ? `共 ${total} 条（${startOffset}-${endOffset} / ${total}）` : "共 0 条");
+
+  const container = document.getElementById("auditListBody");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!items.length) {
+    container.innerHTML = '<div class="route-log-empty">暂无审计记录。</div>';
+    renderPagination(1, 1, "auditPagination", goToAuditPage);
+    return;
+  }
+
+  items.forEach((log) => {
+    const actorTypeText = AUDIT_ACTOR_LABELS[log.actor_type] || log.actor_type || "-";
+    const actionText = AUDIT_ACTION_LABELS[log.action] || log.action || "-";
+    const targetText = AUDIT_TARGET_LABELS[log.target_type] || log.target_type || "-";
+    const card = document.createElement("article");
+    card.className = "route-log-item";
+    card.innerHTML = `
+      <div class="route-log-item-main">
+        <div class="route-log-item-body">
+          <div class="route-log-item-header">
+            <div class="route-log-item-time"><strong>${esc(formatDateTime(log.created_at))}</strong></div>
+          </div>
+          <div class="route-log-item-fields">
+            <div class="route-log-field"><span class="route-log-field-label">操作者</span><div class="route-log-field-value"><strong>${esc(log.actor_id || "-")}</strong><span class="hint">${esc(actorTypeText)}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">动作</span><div class="route-log-field-value"><span class="pill ${AUDIT_ACTION_PILLS[log.action] || "pill-neutral"}">${esc(actionText)}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">对象</span><div class="route-log-field-value"><strong>${esc(targetText)}</strong>${log.target_id ? `<span class="hint">${esc(log.target_id)}</span>` : ""}</div></div>
+            <div class="route-log-field"><span class="route-log-field-label">详情</span><div class="route-log-field-value"><span class="route-log-chain" title="${esc(log.detail || "")}">${esc(log.detail || "-")}</span></div></div>
+          </div>
+        </div>
+      </div>`;
+    container.appendChild(card);
+  });
+  renderPagination(state.auditCurrentPage, state.auditTotalPages, "auditPagination", goToAuditPage);
+}
+
 // ============ 签名 URL（HOTLINK_PROTECTION.md 阶段 4） ============
 
 export async function loadSignedUrlSettings() {
@@ -2533,6 +3419,7 @@ function renderBannedIpList(items) {
       statusBadge = '<span class="pill pill-neutral">未知</span>';
     }
     const extendBtn = item.permanent ? "" : `<button class="btn btn-sm" data-action="extend-ban-ip" data-ip="${esc(item.ip)}" data-expire="${item.expire_at || 0}">延长</button>`;
+    const permanentBtn = item.permanent ? "" : `<button class="btn btn-sm" data-action="set-ban-permanent" data-ip="${esc(item.ip)}">设为永久</button>`;
     // 封禁路径：空=全局封禁，非空=仅拦截该路径前缀
     const pathCell = item.path_prefix
       ? `<code class="mono">${esc(item.path_prefix)}</code>`
@@ -2545,7 +3432,7 @@ function renderBannedIpList(items) {
       <td>${statusBadge}</td>
       <td>${esc(item.reason || "-")}${sourceText}</td>
       <td>${expireText}</td>
-      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">${extendBtn}<button class="btn btn-sm btn-danger" data-action="unban-ip" data-ip="${esc(item.ip)}">解封</button></div></td>`;
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">${permanentBtn}${extendBtn}<button class="btn btn-sm btn-danger" data-action="unban-ip" data-ip="${esc(item.ip)}">解封</button></div></td>`;
     tbody.appendChild(tr);
   });
 }
@@ -2618,6 +3505,20 @@ export async function unbanIp(ip) {
   });
 }
 
+export async function setBanPermanent(ip) {
+  openConfirm({
+    title: "设为永久封禁",
+    message: `确认将 IP ${ip} 转为永久封禁吗？转换后不再自动过期。`,
+    onOk: async () => {
+      try {
+        await apiFetch(`/_admin/api/banned-ips/${encodeURIComponent(ip)}/permanent`, { method: "POST" });
+        showToast(`IP ${ip} 已设为永久封禁`);
+        loadBannedIpList();
+      } catch (e) { showToast(e.message, true); }
+    },
+  });
+}
+
 export async function clearBans() {
   openConfirm({
     title: "清空封禁记录",
@@ -2674,11 +3575,17 @@ export async function loadApiKeys() {
   } catch (_) {}
 }
 
-function formatApiKeyTime(sec) {
-  if (!sec || sec <= 0) return "—";
+function formatApiKeyTime(value) {
+  if (!value || value <= 0) return "—";
   try {
-    return new Date(sec * 1000).toLocaleString("zh-CN", { hour12: false });
-  } catch (_) { return String(sec); }
+    // 双格式兼容：expires_at 为 Unix 秒；created_at/last_used_at 为 UTC isoformat 字符串
+    if (typeof value === "number" || /^\d+$/.test(String(value))) {
+      return new Date(Number(value) * 1000).toLocaleString("zh-CN", { hour12: false });
+    }
+    const d = new Date(String(value));
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString("zh-CN", { hour12: false });
+  } catch (_) { return String(value); }
 }
 
 function renderApiKeys() {
@@ -2699,6 +3606,12 @@ function renderApiKeys() {
     else if (!k.enabled) statusBadge = '<span class="pill pill-danger">已停用</span>';
     else statusBadge = '<span class="pill pill-ok">启用中</span>';
     const permBadge = k.readonly ? '<span class="pill pill-neutral">只读</span>' : '<span class="pill pill-ok">读写</span>';
+    // P1-2.3 权限摘要徽标
+    const scopeCount = String(k.scopes || "").split(",").map((s) => s.trim()).filter(Boolean).length;
+    const scopeBadge = k.scopes
+      ? `<span class="pill pill-neutral" title="${esc(k.scopes)}">限定 ${scopeCount} 项</span>`
+      : '<span class="pill pill-neutral" title="未限定端点">全部端点</span>';
+    const rateBadge = (k.rate_limit || 0) > 0 ? `<span class="pill pill-warn">${k.rate_limit}/s</span>` : "";
     const toggleLabel = k.enabled ? "停用" : "启用";
     const expiresText = k.expires_at && k.expires_at > 0
       ? `${formatApiKeyTime(k.expires_at)}${expired ? "（已过期）" : ""}`
@@ -2707,13 +3620,14 @@ function renderApiKeys() {
     <tr>
       <td><strong>${esc(k.name)}</strong></td>
       <td><code class="mono">${esc(k.key_prefix)}…</code></td>
-      <td>${permBadge}</td>
+      <td>${permBadge}${scopeBadge}${rateBadge}</td>
       <td>${statusBadge}</td>
       <td>${k.use_count || 0}</td>
       <td>${formatApiKeyTime(k.created_at)}</td>
       <td>${k.last_used_at ? formatApiKeyTime(k.last_used_at) : "—"}</td>
       <td>${expiresText}</td>
       <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn btn-sm" data-action="edit-api-key" data-id="${k.id}">编辑</button>
         <button class="btn btn-sm" data-action="toggle-api-key" data-id="${k.id}" data-enabled="${k.enabled ? 1 : 0}" ${expired ? "disabled" : ""}>${toggleLabel}</button>
         <button class="btn btn-sm btn-danger" data-action="delete-api-key" data-id="${k.id}" data-name="${esc(k.name)}">删除</button>
       </div></td>
@@ -2721,21 +3635,80 @@ function renderApiKeys() {
   }).join("");
 }
 
+// ============ API 密钥细粒度权限（P1-2.3） ============
+
+const API_KEY_SCOPES = ["routing", "security", "geo", "logs", "system", "backup", "email", "signing", "apidoc", "apikeys"];
+
+const API_KEY_PERM_SCHEMA = [
+  { type: "note", text: "【端点权限】每行一个 tag：routing / security / geo / logs / system / backup / email / signing / apidoc / apikeys。\n留空 = 不限制（可访问全部端点）。\n【绑定 IP】逗号分隔、精确匹配（如 10.0.0.5,192.168.1.23），留空 = 不限来源。\n【速率上限】该密钥每秒允许的请求数，超限返回 429 + Retry-After；0 = 不限。" },
+  { key: "scopes", label: "端点权限 scopes（每行一个）", type: "textarea", placeholder: "routing\nlogs\nsystem" },
+  { key: "allowed_ips", label: "绑定 IP 白名单（逗号分隔）", type: "text", placeholder: "10.0.0.5, 192.168.1.23（留空不限）" },
+  { key: "rate_limit", label: "速率上限（请求/秒）", type: "number", default: 0, hint: "0 表示不限速" },
+];
+
+function csvToLines(v) {
+  return String(v || "").split(",").map((s) => s.trim()).filter(Boolean).join("\n");
+}
+function linesToCsv(v) {
+  return String(v || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean).join(",");
+}
+function validateKeyPerm(out) {
+  const tags = String(out.scopes || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  for (const tag of tags) {
+    if (!API_KEY_SCOPES.includes(tag)) return `未知端点 tag：${tag}（可选：${API_KEY_SCOPES.join(" / ")}）`;
+  }
+  const rps = Number(out.rate_limit);
+  if (!Number.isFinite(rps) || rps < 0 || rps > 10000) return "速率上限须在 0（不限）~ 10000 之间";
+  return null;
+}
+function permPayload(out) {
+  return {
+    scopes: linesToCsv(out.scopes),
+    allowed_ips: String(out.allowed_ips || "").replace(/，/g, ",").split(",").map((s) => s.trim()).filter(Boolean).join(","),
+    rate_limit: Math.max(0, Math.round(Number(out.rate_limit) || 0)),
+  };
+}
+
+export function openApiKeyPermModal(keyId) {
+  const key = (state.apiKeys || []).find((k) => k.id === Number(keyId));
+  if (!key) return;
+  openFormModal({
+    title: `编辑密钥权限 · ${key.name}`,
+    size: 560,
+    sub: `前缀 ${key.key_prefix}… · ${key.readonly ? "只读" : "读写"}密钥`,
+    schema: API_KEY_PERM_SCHEMA,
+    values: {
+      scopes: csvToLines(key.scopes),
+      allowed_ips: String(key.allowed_ips || ""),
+      rate_limit: key.rate_limit || 0,
+    },
+    validate: validateKeyPerm,
+    onSave: async (out) => {
+      await apiFetch(`/_admin/api/keys/${key.id}`, { method: "PUT", body: JSON.stringify(permPayload(out)) });
+      showToast("密钥权限已更新。");
+      await loadApiKeys();
+    },
+  });
+}
+
 export function openApiKeyCreateModal() {
   openFormModal({
     title: "签发 API 密钥",
+    // 保存成功后不自动关窗：由 onSave 打开「明文仅此一次」弹窗接管
+    autoClose: false,
     schema: [
       { key: "name", label: "密钥名称", type: "text", required: true, placeholder: "如：自动化脚本 / 监控面板", hint: "仅用于辨识用途，≤64 字符" },
       { key: "readonly", label: "只读模式", type: "switch", default: false, hint: "开启后该密钥仅能调用 GET 接口（查询类），且无法访问密钥管理本身" },
       { key: "expires_days", label: "有效期（天）", type: "number", default: 0, hint: "0 表示永久有效，最大 3650 天" },
+      ...API_KEY_PERM_SCHEMA,
     ],
-    values: { name: "", readonly: false, expires_days: 0 },
+    values: { name: "", readonly: false, expires_days: 0, scopes: "", allowed_ips: "", rate_limit: 0 },
     validate: (out) => {
       if (!String(out.name || "").trim()) return "密钥名称不能为空";
       if (String(out.name).trim().length > 64) return "密钥名称过长（≤64 字符）";
       const days = Number(out.expires_days);
       if (!Number.isFinite(days) || days < 0 || days > 3650) return "有效期须在 0（永久）~ 3650 之间";
-      return null;
+      return validateKeyPerm(out);
     },
     onSave: async (out) => {
       const created = await apiFetch("/_admin/api/keys", {
@@ -2744,6 +3717,7 @@ export function openApiKeyCreateModal() {
           name: String(out.name).trim(),
           readonly: Boolean(out.readonly),
           expires_days: Math.round(Number(out.expires_days) || 0),
+          ...permPayload(out),
         }),
       });
       showToast("API 密钥已签发，请立即保存明文");
@@ -2780,8 +3754,12 @@ function showApiKeyOnceModal(created) {
     <div class="modal-foot"><button class="btn btn-primary" id="modalCancel">我已保存，关闭</button></div>`;
   document.getElementById("modalClose").onclick = closeModal;
   document.getElementById("modalCancel").onclick = closeModal;
-  document.getElementById("apiKeyCopyBtn").onclick = () => {
+  const copyBtn = document.getElementById("apiKeyCopyBtn");
+  copyBtn.onclick = () => {
     copyToClipboard(raw);
+    const original = copyBtn.textContent;
+    copyBtn.textContent = "已复制 ✓";
+    window.setTimeout(() => { copyBtn.textContent = original; }, 1200);
   };
   mask.classList.add("open");
   window.setTimeout(() => {

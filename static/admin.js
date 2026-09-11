@@ -25,7 +25,7 @@ import {
   renderGeoSources, openGeoSourceModal, persistGeoSettings,
   openGeoOnlineSettings, openGeoOfflineSettings, openGeoSourceTest, openOfflineTest,
   syncOffline, rollbackOffline, clearGeoCache,
-  loadRouteLogs, refreshRouteLogModule, loadHotlinkStats, saveLogRetention, cleanupLogs,
+  loadRouteLogs, refreshRouteLogModule, exportRouteLogs, loadHotlinkStats, saveLogRetention, cleanupLogs,
   getAutoRefreshConfig, saveAutoRefreshConfig, startAutoRefresh, stopAutoRefresh,
   loadAppLogContent, startAppLogAutoRefresh, stopAppLogAutoRefresh,
   refreshAppLogModule, cleanupAppLogFiles, loadLoggingSettings, saveDiskLogRetention,
@@ -33,13 +33,19 @@ import {
   loadDedupSettings, loadDedupStats, openDedupSettings, clearDedupCache,
   loadAutoBanSettings, loadAutoBanStats, openAutoBanSettings,
   loadStreamGuardSettings, openStreamGuardSettings,
+  loadLoginProtectionSettings, openLoginProtectionSettings,
+  loadRateLimitSettings, openRateLimitSettings,
+  loadCorsSettings, openCorsSettings,
+  loadSettingsHistory, rollbackSettingsHistory, exportSettingsModule, openSettingsImport,
+  loadNotificationsSettings, openNotificationsSettings, testNotifications,
+  loadAuditLogs,
   loadSignedUrlSettings, openSignedUrlSettings, openSignedUrlTool,
   loadRedirectSigningSettings, openRedirectSigningSettings,
   loadApiDoc, openApiDocTry, filterApiDoc,
   loadEmailSettings, openEmailSettings, testEmail,
   loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
-  banIpFromLog, unbanIp, clearBans,
-  loadApiKeys, openApiKeyCreateModal, toggleApiKey, deleteApiKey,
+  banIpFromLog, unbanIp, setBanPermanent, clearBans,
+  loadApiKeys, openApiKeyCreateModal, openApiKeyPermModal, toggleApiKey, deleteApiKey,
   getBanAutoRefreshConfig, saveBanAutoRefreshConfig, startBanAutoRefresh, stopBanAutoRefresh,
   loadBackups, createBackup, downloadBackup, openRestoreModal, openUploadRestoreModal, deleteBackup,
   initFilterSelects,
@@ -225,6 +231,7 @@ function bindSecurity() {
     const action = btn.dataset.action;
     if (action === "unban-ip") unbanIp(ip);
     else if (action === "extend-ban-ip") openBanExtendModal(ip, parseFloat(btn.dataset.expire || "0") || 0);
+    else if (action === "set-ban-permanent") setBanPermanent(ip);
   });
 
   // API 密钥表事件委托（启停 / 删除）
@@ -235,6 +242,14 @@ function bindSecurity() {
     const action = btn.dataset.action;
     if (action === "toggle-api-key") toggleApiKey(keyId, btn.dataset.enabled !== "1");
     else if (action === "delete-api-key") deleteApiKey(keyId, btn.dataset.name || "");
+    else if (action === "edit-api-key") openApiKeyPermModal(keyId);
+  });
+
+  // 配置历史回滚按钮（P2-3.5，事件委托于历史卡片）
+  $("settingsHistoryBody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action='rollback-history']");
+    if (!btn) return;
+    rollbackSettingsHistory(btn.dataset.module, Number(btn.dataset.id));
   });
 }
 
@@ -254,7 +269,7 @@ function bindApiKeys() {
     if (getChecked("ban_auto_refresh_enabled")) startBanAutoRefresh();
   });
   $("ban_page_size")?.addEventListener("change", () => {
-    const size = parseInt(getValue("ban_page_size") || "20", 10) || 20;
+    const size = parseInt(getValue("ban_page_size") || "5", 10) || 5;
     state.banPageSize = Math.max(1, size);
     state.banCurrentPage = 1;
     localStorage.setItem("ban_page_size", String(state.banPageSize));
@@ -382,6 +397,15 @@ function bindLogs() {
   $("route-log-delete-all-btn")?.addEventListener("click", clearAllLogs);
   $("logClearAllBtn")?.addEventListener("click", clearAllLogs);
 
+  // 转发结果 CSV 导出（按当前筛选条件，路径/URL 已解码）
+  $("route-log-export-btn")?.addEventListener("click", async () => {
+    try {
+      await exportRouteLogs(showToast);
+    } catch (err) {
+      showToast(err.message || "导出失败", true);
+    }
+  });
+
   // 日志列表事件委托（复制 / 删除 / 封禁 / 解禁 + URL tooltip）
   const logList = $("route-logs-list-body");
   logList?.addEventListener("mouseover", (e) => {
@@ -484,6 +508,37 @@ function bindLogs() {
   });
 }
 
+// ============ 审计日志（P0-1.3） ============
+
+function bindAudit() {
+  // 筛选表单：查询条件变化一律回到第一页
+  $("auditFilterForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    state.auditCurrentPage = 1;
+    try { await loadAuditLogs(); showToast("审计日志查询已更新。"); }
+    catch (err) { showToast(err.message, true); }
+  });
+
+  $("auditRefreshBtn")?.addEventListener("click", () => {
+    loadAuditLogs().catch((err) => showToast(err.message, true));
+  });
+
+  $("auditResetBtn")?.addEventListener("click", () => {
+    setValue("auditKeyword", "");
+    setValue("auditAction", "");
+    setValue("auditTargetType", "");
+    setValue("auditDateFrom", "");
+    setValue("auditDateTo", "");
+    state.auditCurrentPage = 1;
+    loadAuditLogs().catch((err) => showToast(err.message, true));
+  });
+
+  $("auditPageSize")?.addEventListener("change", () => {
+    state.auditCurrentPage = 1;
+    loadAuditLogs().catch((err) => showToast(err.message, true));
+  });
+}
+
 // ============ 系统设置 ============
 
 function bindSystem() {
@@ -496,6 +551,17 @@ function bindSystem() {
 
   $("editIpCacheBtn")?.addEventListener("click", () => openIpCacheSettings());
   $("clearResultCache")?.addEventListener("click", () => clearIpCache());
+
+  $("editLoginProtectionBtn")?.addEventListener("click", () => openLoginProtectionSettings());
+  $("editRateLimitBtn")?.addEventListener("click", () => openRateLimitSettings());
+  $("editCorsBtn")?.addEventListener("click", () => openCorsSettings());
+  $("viewHistoryBtn")?.addEventListener("click", () => loadSettingsHistory());
+  $("exportModuleBtn")?.addEventListener("click", () => exportSettingsModule().catch((e) => showToast(e.message, true)));
+  $("importModuleBtn")?.addEventListener("click", () => openSettingsImport());
+  $("settingsModuleSelect")?.addEventListener("change", () => loadSettingsHistory());
+
+  $("editNotifyBtn")?.addEventListener("click", () => openNotificationsSettings());
+  $("testNotifyBtn")?.addEventListener("click", () => testNotifications().catch((e) => showToast(e.message, true)));
 
   $("saveDedup")?.addEventListener("click", () => openDedupSettings());
   $("clearDedup")?.addEventListener("click", () => clearDedupCache());
@@ -620,8 +686,9 @@ const PAGE_INDEX = [
   { page: "routing", title: "路由配置", kw: "路由 规则 转发 前缀 重定向 routing rule" },
   { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 api 密钥 key token security ban" },
   { page: "geo", title: "IP 定位", kw: "定位 地理 离线库 mmdb 在线源 geo" },
-  { page: "logs", title: "日志与审计", kw: "日志 审计 请求日志 应用日志 logs log" },
-  { page: "system", title: "系统设置", kw: "系统 设置 缓存 去重 并发 system" },
+  { page: "logs", title: "日志与审计", kw: "日志 请求日志 应用日志 logs log" },
+  { page: "audit", title: "审计日志", kw: "审计 操作记录 审计日志 后台操作 audit" },
+  { page: "system", title: "系统设置", kw: "系统 设置 缓存 去重 并发 登录保护 system" },
   { page: "signing", title: "加签防护", kw: "签名 加签 防盗链 签名链接 signed url redirect" },
   { page: "apidoc", title: "API 文档", kw: "api 文档 接口 文档 文档页 endpoint 开发者 doc" },
   { page: "backup", title: "备份与恢复", kw: "备份 恢复 快照 回滚 下载 backup restore" },
@@ -638,6 +705,8 @@ const COMMAND_INDEX = [
   { title: "清空定位缓存", sub: "清除在线定位结果缓存", page: "geo", action: "clear-geo-cache" },
   { title: "编辑邮件配置", sub: "配置 SMTP 邮件提醒", page: "email", action: "email-settings" },
   { title: "发送测试邮件", sub: "验证邮件提醒配置", page: "email", action: "test-email" },
+  { title: "登录防爆破配置", sub: "配置登录失败次数与锁定时长", page: "system", action: "login-protection-settings" },
+  { title: "查看审计日志", sub: "查看后台管理操作记录", page: "audit", action: "goto" },
   { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "system", action: "ip-cache-settings" },
   { title: "请求去重配置", sub: "编辑请求去重参数", page: "system", action: "dedup-settings" },
   { title: "创建备份", sub: "生成一份数据快照", page: "backup", action: "create-backup" },
@@ -745,6 +814,7 @@ function applySearchResult(r) {
       break;
     case "email-settings": activatePage("email"); openEmailSettings(); break;
     case "test-email": activatePage("email"); testEmail(); break;
+    case "login-protection-settings": activatePage("system"); openLoginProtectionSettings(); break;
     case "ip-cache-settings": activatePage("system"); openIpCacheSettings(); break;
     case "dedup-settings": activatePage("system"); openDedupSettings(); break;
     case "create-backup": activatePage("backup"); createBackup(); break;
@@ -869,7 +939,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   const savedLogPageSize = parseInt(localStorage.getItem("log_page_size") || "10", 10) || 10;
   state.logPageSize = savedLogPageSize;
   setValue("log_page_size", String(savedLogPageSize));
-  const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "20", 10) || 20;
+  const savedBanPageSize = parseInt(localStorage.getItem("ban_page_size") || "5", 10) || 5;
   state.banPageSize = savedBanPageSize;
   setValue("ban_page_size", String(savedBanPageSize));
 
@@ -888,6 +958,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   bindSecurity();
   bindGeo();
   bindLogs();
+  bindAudit();
   bindSystem();
   bindApiKeys();
   bindApiDoc();

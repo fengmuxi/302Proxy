@@ -25,6 +25,9 @@ from config import (
     OfflineGeoIPSettings,
     PrimaryGeoIPSettings,
     ProxyRule,
+    RateLimitConfig,
+    CorsConfig,
+    NotificationsConfig,
     RequestDedupConfig,
     RouteGroupConfig,
     RemoteConfigSettings,
@@ -33,10 +36,16 @@ from config import (
     SSLConfig,
     ServerConfig,
     StreamingConfig,
+    GROUP_RULE_DEFAULT_FIELDS,
+    RULE_INHERIT_SENTINEL_INT,
+    RULE_EXPLICIT_OFF_SENTINEL,
     coerce_bool,
     normalize_request_host,
     normalize_region_filter_value,
 )
+
+
+logger = logging.getLogger("proxy")
 
 
 def utc_now() -> str:
@@ -115,6 +124,19 @@ class ConfigStore:
         ("redirect_signing_ttl_seconds", "INTEGER NOT NULL DEFAULT 21600"),
         ("redirect_signing_bind_ip", "INTEGER NOT NULL DEFAULT 1"),
         ("public_base_url", "TEXT NOT NULL DEFAULT ''"),
+        ("login_max_attempts", "INTEGER NOT NULL DEFAULT 5"),
+        ("login_lockout_minutes", "INTEGER NOT NULL DEFAULT 15"),
+        ("login_cooldown_seconds", "INTEGER NOT NULL DEFAULT 0"),
+        ("rate_limit_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("rate_limit_rps", "REAL NOT NULL DEFAULT 10.0"),
+        ("rate_limit_burst", "INTEGER NOT NULL DEFAULT 20"),
+        ("rate_limit_per_ip", "INTEGER NOT NULL DEFAULT 1"),
+        ("cors_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("cors_allowed_origins", "TEXT NOT NULL DEFAULT ''"),
+        ("cors_allowed_methods", "TEXT NOT NULL DEFAULT 'GET,HEAD,OPTIONS'"),
+        ("cors_allow_credentials", "INTEGER NOT NULL DEFAULT 0"),
+        ("cors_max_age", "INTEGER NOT NULL DEFAULT 600"),
+        ("notifications_config", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # route_logs 的演进列（017 引入）：旧库 base schema（CREATE TABLE IF NOT EXISTS）
@@ -132,6 +154,26 @@ class ConfigStore:
         ("referer_policy", "TEXT NOT NULL DEFAULT 'allow'"),
         ("ua_blacklist", "TEXT NOT NULL DEFAULT ''"),
         ("ua_whitelist", "TEXT NOT NULL DEFAULT ''"),
+        # P1-2.2 多上游 + 健康检查
+        ("target_urls", "TEXT NOT NULL DEFAULT ''"),
+        ("health_check_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("health_check_path", "TEXT NOT NULL DEFAULT ''"),
+        ("health_check_interval", "INTEGER NOT NULL DEFAULT 30"),
+        ("health_check_timeout", "INTEGER NOT NULL DEFAULT 5"),
+        # P2-3.2 CORS 规则级覆盖
+        ("cors_origins", "TEXT NOT NULL DEFAULT ''"),
+        # P2-3.3 每规则自定义请求头 + 上游 TLS
+        ("inject_request_headers", "TEXT NOT NULL DEFAULT ''"),
+        ("upstream_verify_ssl", "INTEGER NOT NULL DEFAULT -1"),
+        ("client_cert", "TEXT NOT NULL DEFAULT ''"),
+        ("client_key", "TEXT NOT NULL DEFAULT ''"),
+    )
+
+    # api_keys 的演进列（031 引入）：P1-2.3 细粒度权限
+    LEGACY_API_KEYS_COLUMNS: Tuple[Tuple[str, str], ...] = (
+        ("scopes", "TEXT NOT NULL DEFAULT ''"),
+        ("allowed_ips", "TEXT NOT NULL DEFAULT ''"),
+        ("rate_limit", "INTEGER NOT NULL DEFAULT 0"),
     )
 
     def __init__(self, db_path: Optional[str] = None, bootstrap_config: Optional[Config] = None):
@@ -170,6 +212,19 @@ class ConfigStore:
                     logging_format TEXT NOT NULL,
                     logging_file_path TEXT,
                     logging_retention_days INTEGER NOT NULL DEFAULT 30,
+                    login_max_attempts INTEGER NOT NULL DEFAULT 5,
+                    login_lockout_minutes INTEGER NOT NULL DEFAULT 15,
+                    login_cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+                    rate_limit_enabled INTEGER NOT NULL DEFAULT 0,
+                    rate_limit_rps REAL NOT NULL DEFAULT 10.0,
+                    rate_limit_burst INTEGER NOT NULL DEFAULT 20,
+                    rate_limit_per_ip INTEGER NOT NULL DEFAULT 1,
+                    cors_enabled INTEGER NOT NULL DEFAULT 0,
+                    cors_allowed_origins TEXT NOT NULL DEFAULT '',
+                    cors_allowed_methods TEXT NOT NULL DEFAULT 'GET,HEAD,OPTIONS',
+                    cors_allow_credentials INTEGER NOT NULL DEFAULT 0,
+                    cors_max_age INTEGER NOT NULL DEFAULT 600,
+                    notifications_config TEXT NOT NULL DEFAULT '',
                     streaming_enabled INTEGER NOT NULL,
                     streaming_chunk_size INTEGER NOT NULL,
                     streaming_large_file_threshold INTEGER NOT NULL,
@@ -228,6 +283,7 @@ class ConfigStore:
                     ip_blacklist TEXT NOT NULL DEFAULT '',
                     region_whitelist TEXT NOT NULL DEFAULT '',
                     region_blacklist TEXT NOT NULL DEFAULT '',
+                    rule_defaults TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (request_host, path_prefix)
                 );
@@ -378,7 +434,10 @@ class ConfigStore:
                     use_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     last_used_at TEXT NOT NULL DEFAULT '',
-                    expires_at INTEGER
+                    expires_at INTEGER,
+                    scopes TEXT NOT NULL DEFAULT '',
+                    allowed_ips TEXT NOT NULL DEFAULT '',
+                    rate_limit INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS forward_rules (
@@ -408,7 +467,17 @@ class ConfigStore:
                     region_whitelist TEXT NOT NULL DEFAULT '',
                     region_blacklist TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    target_urls TEXT NOT NULL DEFAULT '',
+                    health_check_enabled INTEGER NOT NULL DEFAULT 0,
+                    health_check_path TEXT NOT NULL DEFAULT '',
+                    health_check_interval INTEGER NOT NULL DEFAULT 30,
+                    health_check_timeout INTEGER NOT NULL DEFAULT 5,
+                    cors_origins TEXT NOT NULL DEFAULT '',
+                    inject_request_headers TEXT NOT NULL DEFAULT '',
+                    upstream_verify_ssl INTEGER NOT NULL DEFAULT -1,
+                    client_cert TEXT NOT NULL DEFAULT '',
+                    client_key TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_forward_rules_path_prefix
@@ -434,8 +503,47 @@ class ConfigStore:
                     expires_at REAL NOT NULL,
                     used INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS admin_login_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    fail_count INTEGER NOT NULL DEFAULT 0,
+                    first_fail_at INTEGER NOT NULL DEFAULT 0,
+                    locked_until INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_user
+                    ON admin_login_attempts(ip, username);
+
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_type TEXT NOT NULL DEFAULT '',
+                    actor_id TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL DEFAULT '',
+                    target_type TEXT NOT NULL DEFAULT '',
+                    target_id TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log(created_at);
+                CREATE INDEX IF NOT EXISTS idx_audit_target
+                    ON admin_audit_log(target_type, target_id);
+
+                CREATE TABLE IF NOT EXISTS system_settings_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    changed_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_settings_history_module
+                    ON system_settings_history(module, id);
                 """
             )
+            # 基表 CREATE IF NOT EXISTS 对已存在的旧表不会加列；这里先补一次
+            # route_groups 演进列（_run_migrations 的 fresh-DB 分支会提前 return 跳过补列循环）
+            self._ensure_column(connection, "route_groups", "rule_defaults", "TEXT NOT NULL DEFAULT '{}'")
         self._run_migrations()
         # 旧库补齐后，确保签名 URL 密钥非空（幂等：仅当为空时生成）
         with self._connect() as connection:
@@ -515,6 +623,10 @@ class ConfigStore:
                 self._ensure_column(connection, "route_logs", column_name, definition)
             for column_name, definition in self.LEGACY_FORWARD_RULES_COLUMNS:
                 self._ensure_column(connection, "forward_rules", column_name, definition)
+            for column_name, definition in self.LEGACY_API_KEYS_COLUMNS:
+                self._ensure_column(connection, "api_keys", column_name, definition)
+            # route_groups 演进列（034 引入）：组级规则默认配置（规则继承 P2-4.1）
+            self._ensure_column(connection, "route_groups", "rule_defaults", "TEXT NOT NULL DEFAULT '{}'")
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
@@ -578,6 +690,7 @@ class ConfigStore:
                 ip_blacklist TEXT NOT NULL DEFAULT '',
                 region_whitelist TEXT NOT NULL DEFAULT '',
                 region_blacklist TEXT NOT NULL DEFAULT '',
+                rule_defaults TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (request_host, path_prefix)
             );
@@ -861,8 +974,12 @@ class ConfigStore:
                 max_redirects, follow_redirects, retry_times, enable_streaming, ip_whitelist, region_filters,
                 is_default, enabled, priority, notes, path_rewrite_pattern, path_rewrite_replacement,
                 access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist,
-                referer_whitelist, referer_policy, ua_blacklist, ua_whitelist, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                referer_whitelist, referer_policy, ua_blacklist, ua_whitelist,
+                target_urls, health_check_enabled, health_check_path, health_check_interval, health_check_timeout,
+                cors_origins,
+                inject_request_headers, upstream_verify_ssl, client_cert, client_key,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
@@ -890,9 +1007,19 @@ class ConfigStore:
                 normalize_region_filter_value(rule.region_whitelist),
                 normalize_region_filter_value(rule.region_blacklist),
                 normalize_region_filter_value(rule.referer_whitelist),
-                rule.normalized_referer_policy(),
+                rule.stored_referer_policy(),
                 normalize_region_filter_value(rule.ua_blacklist),
                 normalize_region_filter_value(rule.ua_whitelist),
+                rule.target_urls or "",
+                int(rule.health_check_enabled),
+                rule.health_check_path or "",
+                rule.health_check_interval,
+                rule.health_check_timeout,
+                rule.cors_origins or "",
+                rule.inject_request_headers or "",
+                int(rule.upstream_verify_ssl),
+                rule.client_cert or "",
+                rule.client_key or "",
                 now,
                 now,
             ),
@@ -988,6 +1115,109 @@ class ConfigStore:
             (now,),
         )
 
+    # ===== 组级规则默认（P2-4.1 规则继承）=====
+
+    def _parse_group_rule_defaults(self, raw: Any) -> Dict[str, Any]:
+        """route_groups.rule_defaults JSON 串 → 清洗后的 dict。
+
+        非法 JSON / 非对象 / 未知键 / 类型不合法一律剔除（宁缺勿错：
+        剔除后回落全局默认，比把脏值灌进转发链路安全）。
+        """
+        if raw in (None, ""):
+            return {}
+        if isinstance(raw, dict):
+            parsed = raw
+        else:
+            try:
+                parsed = json.loads(str(raw))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("route_groups.rule_defaults 解析失败，忽略组级默认: %r", raw)
+                return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return self._sanitize_group_rule_defaults(parsed)
+
+    def _sanitize_group_rule_defaults(self, value: Any) -> Dict[str, Any]:
+        """校验/归一化组级默认 dict：只保留 GROUP_RULE_DEFAULT_FIELDS 里的合法键值。"""
+        if not isinstance(value, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for key, raw in value.items():
+            if key not in GROUP_RULE_DEFAULT_FIELDS or raw is None:
+                continue
+            kind = GROUP_RULE_DEFAULT_FIELDS[key]
+            try:
+                if kind == "int":
+                    num = int(raw)
+                    if num <= 0:
+                        continue
+                    out[key] = num
+                elif kind == "bool":
+                    parsed_bool = coerce_bool(raw, None)
+                    if parsed_bool is not None:
+                        out[key] = parsed_bool
+                else:
+                    text = normalize_region_filter_value(raw)
+                    if not text:
+                        continue
+                    if key == "referer_policy":
+                        text = text.lower()
+                        if text not in ("allow", "deny"):
+                            continue
+                    out[key] = text
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _group_defaults_map(self, connection: sqlite3.Connection) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        """从 DB 直读 route_groups.rule_defaults → (host, prefix) → 默认 dict。"""
+        rows = connection.execute("SELECT request_host, path_prefix, rule_defaults FROM route_groups").fetchall()
+        out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in rows:
+            raw = row["rule_defaults"] if "rule_defaults" in row.keys() else "{}"
+            out[(normalize_request_host(row["request_host"]), row["path_prefix"])] = self._parse_group_rule_defaults(raw)
+        return out
+
+    def _apply_group_defaults_to_rules(
+        self,
+        rules: List[ProxyRule],
+        group_defaults_map: Dict[Tuple[str, str], Dict[str, Any]],
+    ) -> None:
+        """把「继承组默认」的规则字段原地替换为组级默认值（P2-4.1）。
+
+        解析后 proxy_core / 健康探针拿到的是有效值，无需感知哨兵；
+        inherit_fields 保留在规则对象上，供 serialize_rule 输出给后台 UI。
+        """
+        for rule in rules:
+            inherit = rule.inherit_set()
+            if not inherit:
+                continue
+            defaults = group_defaults_map.get((normalize_request_host(rule.request_host), rule.path_prefix))
+            if not defaults:
+                continue
+            for field in inherit:
+                if field not in GROUP_RULE_DEFAULT_FIELDS or field not in defaults:
+                    continue
+                kind = GROUP_RULE_DEFAULT_FIELDS[field]
+                value = defaults[field]
+                try:
+                    if kind == "int":
+                        setattr(rule, field, int(value))
+                    elif kind == "bool":
+                        setattr(rule, field, bool(value))
+                    else:
+                        setattr(rule, field, str(value))
+                except (TypeError, ValueError):
+                    continue
+
+    def _serialize_rule_resolved(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """单条规则的序列化（组默认已合入）：get/create/update 返回值用。"""
+        rule = self._row_to_rule(row)
+        with self._connect() as connection:
+            gmap = self._group_defaults_map(connection)
+        self._apply_group_defaults_to_rules([rule], gmap)
+        return self.serialize_rule(rule)
+
     def _upsert_route_group(
         self,
         connection: sqlite3.Connection,
@@ -999,6 +1229,7 @@ class ConfigStore:
         ip_blacklist: Optional[str] = None,
         region_whitelist: Optional[str] = None,
         region_blacklist: Optional[str] = None,
+        rule_defaults: Optional[Dict[str, Any]] = None,
     ) -> None:
         normalized_host = normalize_request_host(request_host)
         normalized_enabled = None if region_matching_enabled is None else coerce_bool(region_matching_enabled, False)
@@ -1007,12 +1238,23 @@ class ConfigStore:
             (normalized_host, path_prefix),
         ).fetchone()
         now = utc_now()
+        # rule_defaults=None 表示本次调用不涉及组默认（如规则保存时顺带 upsert 组），保留现值
+        if rule_defaults is None and existing and "rule_defaults" in existing.keys():
+            existing_defaults_raw = existing["rule_defaults"]
+        else:
+            existing_defaults_raw = None
+        defaults_json = (
+            self._normalize_json_text(self._sanitize_group_rule_defaults(rule_defaults))
+            if rule_defaults is not None
+            else (existing_defaults_raw if existing_defaults_raw else "{}")
+        )
         if existing:
             connection.execute(
                 """
                 UPDATE route_groups
                 SET region_matching_enabled = ?, notes = ?,
                     access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                    rule_defaults = ?,
                     updated_at = ?
                 WHERE request_host = ? AND path_prefix = ?
                 """,
@@ -1023,6 +1265,7 @@ class ConfigStore:
                     normalize_region_filter_value(ip_blacklist) if ip_blacklist is not None else (existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else ""),
                     normalize_region_filter_value(region_whitelist) if region_whitelist is not None else (existing["region_whitelist"] if "region_whitelist" in existing.keys() else ""),
                     normalize_region_filter_value(region_blacklist) if region_blacklist is not None else (existing["region_blacklist"] if "region_blacklist" in existing.keys() else ""),
+                    defaults_json,
                     now,
                     normalized_host,
                     path_prefix,
@@ -1033,8 +1276,8 @@ class ConfigStore:
         connection.execute(
             """
             INSERT INTO route_groups (request_host, path_prefix, region_matching_enabled, notes,
-                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                access_ip_whitelist, ip_blacklist, region_whitelist, region_blacklist, rule_defaults, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 normalized_host,
@@ -1045,6 +1288,7 @@ class ConfigStore:
                 normalize_region_filter_value(ip_blacklist or ""),
                 normalize_region_filter_value(region_whitelist or ""),
                 normalize_region_filter_value(region_blacklist or ""),
+                defaults_json,
                 now,
             ),
         )
@@ -1153,6 +1397,20 @@ class ConfigStore:
                 email_on_ban=bool(system_row["auto_ban_email_on_ban"]) if "auto_ban_email_on_ban" in system_row.keys() else False,
                 max_bytes=int(system_row["auto_ban_max_bytes"]) if "auto_ban_max_bytes" in system_row.keys() else 0,
             )
+            config.rate_limit = RateLimitConfig(
+                enabled=bool(system_row["rate_limit_enabled"]) if "rate_limit_enabled" in system_row.keys() else False,
+                requests_per_second=float(system_row["rate_limit_rps"]) if "rate_limit_rps" in system_row.keys() else 10.0,
+                burst=int(system_row["rate_limit_burst"]) if "rate_limit_burst" in system_row.keys() else 20,
+                per_ip=coerce_bool(system_row["rate_limit_per_ip"]) if "rate_limit_per_ip" in system_row.keys() else True,
+            )
+            keys = system_row.keys()
+            config.cors = CorsConfig(
+                enabled=bool(system_row["cors_enabled"]) if "cors_enabled" in keys else False,
+                allowed_origins=system_row["cors_allowed_origins"] if "cors_allowed_origins" in keys else "",
+                allowed_methods=system_row["cors_allowed_methods"] if "cors_allowed_methods" in keys else "GET,HEAD,OPTIONS",
+                allow_credentials=bool(system_row["cors_allow_credentials"]) if "cors_allow_credentials" in keys else False,
+                max_age=int(system_row["cors_max_age"]) if "cors_max_age" in keys else 600,
+            )
             config.email = EmailConfig(
                 enabled=bool(system_row["email_enabled"]),
                 smtp_host=system_row["email_smtp_host"],
@@ -1184,6 +1442,9 @@ class ConfigStore:
                 bind_ip=bool(system_row["redirect_signing_bind_ip"]) if "redirect_signing_bind_ip" in system_row.keys() else True,
                 base_url=system_row["public_base_url"] if "public_base_url" in system_row.keys() else "",
             )
+            config.notifications = self._parse_notifications_config(
+                system_row["notifications_config"] if "notifications_config" in system_row.keys() else ""
+            )
 
         if feature_row:
             config.region_matching_enabled = bool(feature_row["region_matching_enabled"])
@@ -1198,6 +1459,9 @@ class ConfigStore:
                 ip_blacklist=row["ip_blacklist"] if "ip_blacklist" in row.keys() else "",
                 region_whitelist=row["region_whitelist"] if "region_whitelist" in row.keys() else "",
                 region_blacklist=row["region_blacklist"] if "region_blacklist" in row.keys() else "",
+                rule_defaults=self._parse_group_rule_defaults(
+                    row["rule_defaults"] if "rule_defaults" in row.keys() else "{}"
+                ),
             )
             for row in group_rows
         ]
@@ -1304,6 +1568,14 @@ class ConfigStore:
             )
 
         config.proxy_rules = [self._row_to_rule(row) for row in rules]
+        # 组级默认合并（P2-4.1）：「继承组」字段回落组 rule_defaults（未设置的键回落内建/全局默认）
+        self._apply_group_defaults_to_rules(
+            config.proxy_rules,
+            {
+                (normalize_request_host(g.request_host), g.path_prefix): (g.rule_defaults or {})
+                for g in config.route_groups
+            },
+        )
         config.admin_auth = self.bootstrap_config.admin_auth
         # yaml-only 字段：数据库不存储，从引导配置透传（upstream_ipv4_only 等）
         config.upstream_ipv4_only = bool(getattr(self.bootstrap_config, "upstream_ipv4_only", False))
@@ -1647,6 +1919,135 @@ class ConfigStore:
             },
         }
 
+    # ===== 管理操作审计日志（P0-1.3） =====
+
+    def insert_audit_log(
+        self,
+        actor_type: str,
+        actor_id: str,
+        action: str,
+        target_type: str,
+        target_id: str = "",
+        detail: str = "",
+    ) -> Dict[str, Any]:
+        """落一条管理操作审计。created_at 与 route_logs 同格式（UTC ISO 字符串）。"""
+        created_at = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_type, actor_id, action, target_type, target_id, detail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(actor_type or "").strip(),
+                    str(actor_id or "").strip(),
+                    str(action or "").strip(),
+                    str(target_type or "").strip(),
+                    str(target_id or "").strip(),
+                    str(detail or "").strip(),
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM admin_audit_log WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return self.serialize_audit_log(row) if row else {
+            "id": cursor.lastrowid,
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "detail": detail,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def serialize_audit_log(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "actor_type": row["actor_type"],
+            "actor_id": row["actor_id"],
+            "action": row["action"],
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "detail": row["detail"],
+            "created_at": row["created_at"],
+        }
+
+    def list_audit_logs(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """审计日志分页查询（语义与 list_route_logs 保持一致）。"""
+        filters = filters or {}
+        clauses: List[str] = []
+        params: List[Any] = []
+
+        keyword = str(filters.get("keyword", "")).strip()
+        if keyword:
+            like_value = f"%{keyword}%"
+            clauses.append(
+                "(actor_id LIKE ? OR action LIKE ? OR target_type LIKE ? OR "
+                "target_id LIKE ? OR detail LIKE ?)"
+            )
+            params.extend([like_value] * 5)
+
+        action = str(filters.get("action", "")).strip()
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+
+        target_type = str(filters.get("target_type", "")).strip()
+        if target_type:
+            clauses.append("target_type = ?")
+            params.append(target_type)
+
+        date_from = str(filters.get("date_from", "")).strip()
+        if date_from:
+            clauses.append("created_at >= ?")
+            params.append(date_from)
+
+        date_to = str(filters.get("date_to", "")).strip()
+        if date_to:
+            clauses.append("created_at <= ?")
+            params.append(date_to)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit = max(1, min(500, int(filters.get("limit", 20) or 20)))
+        page = max(1, int(filters.get("page", 1) or 1))
+        offset = (page - 1) * limit
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM admin_audit_log
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM admin_audit_log {where_sql}",
+                params,
+            ).fetchone()[0]
+
+        return {
+            "items": [self.serialize_audit_log(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "page": page,
+            "offset": offset,
+            "total_pages": max(1, (total + limit - 1) // limit),
+            "filters": {
+                "keyword": keyword,
+                "action": action,
+                "target_type": target_type,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+        }
+
     def get_hotlink_stats(self, hours: int = 24) -> Dict[str, Any]:
         """盗链监控聚合（HOTLINK_PROTECTION.md 阶段 1）。
 
@@ -1734,7 +2135,13 @@ class ConfigStore:
         }
 
     def get_overview_stats(self) -> Dict[str, Any]:
-        """概览页聚合统计：24h 分桶（总请求/302跟随/失败）、今日请求、平均延迟。
+        """概览页聚合统计：24h 分桶（总请求/302跳转/本地代理/失败）、今日口径三项、平均延迟。
+
+        口径约定（KPI 卡与趋势图共用，保证相加自洽）：
+        - 「302 跳转」= 客户端最终拿到 30x 的请求（redirect_count>0 且非 streaming 行）；
+        - 「本地代理」= transport_mode='streaming' 的穿流请求（内部跟随上游 302 属实现
+          细节，客户端拿到的是媒体流，不计入 302 跳转）——两者按最终出流模式互斥；
+        - 「失败/拦截」= upstream_status>=400（错误维度，可与上两者重叠）。
 
         route_logs.created_at 为 UTC ISO 字符串（'2026-09-02T02:55:50+00:00'，
         由 main._build_route_log_payload 写入），因此：
@@ -1760,6 +2167,33 @@ class ConfigStore:
             requests_today = connection.execute(
                 "SELECT COUNT(*) FROM route_logs WHERE created_at >= ?", (today_cutoff_utc,)
             ).fetchone()[0]
+            # 24h 三项汇总（与小时桶同源同窗口）：KPI 卡不再用进程内存计数器，
+            # 服务重启后依旧与趋势图一致（此前 ProxyStats 重启归零导致「有数据但显示 0」）
+            # 「302 跳转」排除 streaming 行：B 模式穿流请求若上游经历 302 跟随，
+            # 该行同时带 redirect_count>0 与 transport_mode='streaming'，不排除会与
+            # 「本地代理」重复计数（48+41>70 的根因）；按最终出流模式互斥归类
+            kpi_row = connection.execute(
+                """
+                SELECT SUM(CASE WHEN redirect_count > 0 AND transport_mode != 'streaming' THEN 1 ELSE 0 END) AS redirects,
+                       SUM(CASE WHEN upstream_status >= 400 THEN 1 ELSE 0 END) AS failed,
+                       SUM(CASE WHEN transport_mode = 'streaming' THEN 1 ELSE 0 END) AS streamed
+                FROM route_logs
+                WHERE created_at >= ?
+                """,
+                (cutoff_24h,),
+            ).fetchone()
+            # 「今日」口径（与 requests_today 同窗口）：302/本地代理/拦截 KPI 与「今日请求」
+            # 同窗对比，避免 24h 滚动窗 ⊃ 今日 导致「分项相加 > 今日请求」的口径错位
+            kpi_today_row = connection.execute(
+                """
+                SELECT SUM(CASE WHEN redirect_count > 0 AND transport_mode != 'streaming' THEN 1 ELSE 0 END) AS redirects,
+                       SUM(CASE WHEN upstream_status >= 400 THEN 1 ELSE 0 END) AS failed,
+                       SUM(CASE WHEN transport_mode = 'streaming' THEN 1 ELSE 0 END) AS streamed
+                FROM route_logs
+                WHERE created_at >= ?
+                """,
+                (today_cutoff_utc,),
+            ).fetchone()
             lat_row = connection.execute(
                 "SELECT AVG(operation_duration_ms), COUNT(*) FROM route_logs "
                 "WHERE created_at >= ? AND operation_duration_ms > 0",
@@ -1769,8 +2203,9 @@ class ConfigStore:
                 """
                 SELECT substr(created_at, 1, 13) AS hour_key,
                        COUNT(*) AS cnt,
-                       SUM(CASE WHEN redirect_count > 0 THEN 1 ELSE 0 END) AS redirects,
-                       SUM(CASE WHEN upstream_status >= 400 THEN 1 ELSE 0 END) AS failed
+                       SUM(CASE WHEN redirect_count > 0 AND transport_mode != 'streaming' THEN 1 ELSE 0 END) AS redirects,
+                       SUM(CASE WHEN upstream_status >= 400 THEN 1 ELSE 0 END) AS failed,
+                       SUM(CASE WHEN transport_mode = 'streaming' THEN 1 ELSE 0 END) AS streamed
                 FROM route_logs
                 WHERE created_at >= ?
                 GROUP BY hour_key
@@ -1782,7 +2217,7 @@ class ConfigStore:
 
         # 24 个小时桶：索引 0 = 23 小时前的整点，23 = 当前小时（UTC 整点对齐）
         buckets = [
-            {"ts": int((hour0 - timedelta(hours=23 - i)).timestamp()), "count": 0, "redirects": 0, "failed": 0}
+            {"ts": int((hour0 - timedelta(hours=23 - i)).timestamp()), "count": 0, "redirects": 0, "failed": 0, "streamed": 0}
             for i in range(24)
         ]
         for row in bucket_rows:
@@ -1796,11 +2231,21 @@ class ConfigStore:
                 bucket["count"] += row["cnt"] or 0
                 bucket["redirects"] += row["redirects"] or 0
                 bucket["failed"] += row["failed"] or 0
+                bucket["streamed"] += row["streamed"] or 0
+
+        def _kpi_num(value: Any) -> int:
+            return int(value or 0)
 
         return {
             "requests_total": requests_total,
             "requests_24h": requests_24h,
             "requests_today": requests_today,
+            "redirects_24h": _kpi_num(kpi_row["redirects"]) if kpi_row else 0,
+            "failed_24h": _kpi_num(kpi_row["failed"]) if kpi_row else 0,
+            "streamed_24h": _kpi_num(kpi_row["streamed"]) if kpi_row else 0,
+            "redirects_today": _kpi_num(kpi_today_row["redirects"]) if kpi_today_row else 0,
+            "failed_today": _kpi_num(kpi_today_row["failed"]) if kpi_today_row else 0,
+            "streamed_today": _kpi_num(kpi_today_row["streamed"]) if kpi_today_row else 0,
             "avg_latency_ms": round(avg_latency, 1) if avg_latency is not None else None,
             "latency_sample_count": lat_row[1] if lat_row else 0,
             "hours": buckets,
@@ -1952,6 +2397,17 @@ class ConfigStore:
             )
         return self.get_banned_ip(ip)
 
+    def set_banned_ip_permanent(self, ip: str) -> Dict[str, Any]:
+        """将指定临时封禁转为永久封禁。"""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE banned_ips SET permanent = 1, expire_at = 0 WHERE ip = ?",
+                (ip,),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"IP {ip} 不在封禁列表中")
+        return self.get_banned_ip(ip)
+
     def clear_all_banned_ips(self) -> int:
         with self._connect() as connection:
             cursor = connection.execute("DELETE FROM banned_ips")
@@ -1976,6 +2432,7 @@ class ConfigStore:
     @staticmethod
     def _serialize_api_key(row: sqlite3.Row) -> Dict[str, Any]:
         expires_at = row["expires_at"]
+        keys = row.keys()
         return {
             "id": row["id"],
             "name": row["name"],
@@ -1987,10 +2444,19 @@ class ConfigStore:
             "last_used_at": row["last_used_at"],
             "expires_at": expires_at,
             "expired": bool(expires_at) and int(expires_at) <= int(time.time()),
+            # P1-2.3 细粒度权限（row.keys() 守卫兼容未迁移的库）
+            "scopes": row["scopes"] if "scopes" in keys else "",
+            "allowed_ips": row["allowed_ips"] if "allowed_ips" in keys else "",
+            "rate_limit": int(row["rate_limit"] or 0) if "rate_limit" in keys else 0,
         }
 
-    def create_api_key(self, name: str, readonly: bool = False, expires_days: int = 0) -> Dict[str, Any]:
-        """签发 API 密钥；完整明文只在本返回值中出现一次，库中仅存 SHA256。"""
+    def create_api_key(self, name: str, readonly: bool = False, expires_days: int = 0,
+                       scopes: str = "", allowed_ips: str = "", rate_limit: int = 0) -> Dict[str, Any]:
+        """签发 API 密钥；完整明文只在本返回值中出现一次，库中仅存 SHA256。
+
+        P1-2.3：scopes=逗号分隔端点 tag（空=全部）；allowed_ips=逗号分隔 IP（空=不限）；
+        rate_limit=每秒请求数上限（0=不限）。
+        """
         name = str(name or "").strip() or "未命名密钥"
         raw_key = f"n302_{secrets.token_hex(16)}"
         days = int(expires_days or 0)
@@ -1999,10 +2465,14 @@ class ConfigStore:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO api_keys (name, key_prefix, key_hash, readonly, enabled, use_count, created_at, last_used_at, expires_at)
-                VALUES (?, ?, ?, ?, 1, 0, ?, '', ?)
+                INSERT INTO api_keys (name, key_prefix, key_hash, readonly, enabled, use_count, created_at, last_used_at, expires_at,
+                                      scopes, allowed_ips, rate_limit)
+                VALUES (?, ?, ?, ?, 1, 0, ?, '', ?, ?, ?, ?)
                 """,
-                (name, raw_key[:13], self._hash_api_key(raw_key), int(bool(readonly)), now, expires_at),
+                (
+                    name, raw_key[:13], self._hash_api_key(raw_key), int(bool(readonly)), now, expires_at,
+                    str(scopes or "").strip(), str(allowed_ips or "").strip(), max(0, int(rate_limit or 0)),
+                ),
             )
             key_id = int(cursor.lastrowid)
         return {
@@ -2013,6 +2483,20 @@ class ConfigStore:
             "readonly": bool(readonly),
             "expires_at": expires_at,
         }
+
+    def update_api_key_config(self, key_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新密钥的细粒度权限（P1-2.3）：scopes / allowed_ips / rate_limit。"""
+        scopes = str(payload.get("scopes", "") or "").strip()
+        allowed_ips = str(payload.get("allowed_ips", "") or "").strip()
+        rate_limit = max(0, int(payload.get("rate_limit", 0) or 0))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE api_keys SET scopes = ?, allowed_ips = ?, rate_limit = ? WHERE id = ?",
+                (scopes, allowed_ips, rate_limit, int(key_id)),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"API 密钥 {key_id} 不存在")
+        return self.get_api_key(key_id)
 
     def list_api_keys(self) -> List[Dict[str, Any]]:
         with self._connect() as connection:
@@ -2243,6 +2727,450 @@ class ConfigStore:
             )
         return self.get_signed_url_config()
 
+    # ===== 登录防爆破（P0-1.2） =====
+
+    def get_login_protection_config(self) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM system_settings WHERE id = 1").fetchone()
+        keys = row.keys() if row else []
+        max_attempts = int(row["login_max_attempts"]) if row and "login_max_attempts" in keys else 5
+        lockout_minutes = int(row["login_lockout_minutes"]) if row and "login_lockout_minutes" in keys else 15
+        cooldown_seconds = int(row["login_cooldown_seconds"]) if row and "login_cooldown_seconds" in keys else 0
+        return {
+            "max_attempts": max_attempts,
+            "lockout_minutes": lockout_minutes,
+            "cooldown_seconds": cooldown_seconds,
+        }
+
+    def update_login_protection_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        max_attempts = max(1, int(payload.get("max_attempts", 5) or 5))
+        lockout_minutes = max(1, int(payload.get("lockout_minutes", 15) or 15))
+        cooldown_seconds = max(0, int(payload.get("cooldown_seconds", 0) or 0))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET login_max_attempts = ?, login_lockout_minutes = ?, "
+                "login_cooldown_seconds = ?, updated_at = ? WHERE id = 1",
+                (max_attempts, lockout_minutes, cooldown_seconds, now),
+            )
+        return self.get_login_protection_config()
+
+    # ===== 主动速率限制（P1-2.1） =====
+
+    def get_rate_limit_config(self) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM system_settings WHERE id = 1").fetchone()
+        keys = row.keys() if row else []
+        enabled = bool(row["rate_limit_enabled"]) if row and "rate_limit_enabled" in keys else False
+        rps = float(row["rate_limit_rps"]) if row and "rate_limit_rps" in keys else 10.0
+        burst = int(row["rate_limit_burst"]) if row and "rate_limit_burst" in keys else 20
+        per_ip = coerce_bool(row["rate_limit_per_ip"]) if row and "rate_limit_per_ip" in keys else True
+        return {
+            "enabled": enabled,
+            "requests_per_second": rps,
+            "burst": burst,
+            "per_ip": per_ip,
+        }
+
+    def update_rate_limit_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        # rps 钳制为 (0, 1000]，避免配置成 0 导致全部请求被拒或除零。
+        # 必须用 is not None 判断缺失，否则显式传入的 0 会被 `or 10` 兜底成默认值，
+        # 导致 max/min 钳制完全失效（例如 burst=0 既不会回落到 1，也不会保留 20）。
+        rps_raw = payload.get("requests_per_second", 10)
+        rps = max(0.1, min(1000.0, float(rps_raw))) if rps_raw is not None else 10.0
+        burst_raw = payload.get("burst", 20)
+        burst = max(1, int(burst_raw)) if burst_raw is not None else 20
+        per_ip = coerce_bool(payload.get("per_ip", True))
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET rate_limit_enabled = ?, rate_limit_rps = ?, "
+                "rate_limit_burst = ?, rate_limit_per_ip = ?, updated_at = ? WHERE id = 1",
+                (int(enabled), rps, burst, int(per_ip), now),
+            )
+        return self.get_rate_limit_config()
+
+    # ===== 跨域资源共享 CORS（P2-3.2） =====
+
+    def get_cors_config(self) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM system_settings WHERE id = 1").fetchone()
+        keys = row.keys() if row else []
+        return {
+            "enabled": bool(row["cors_enabled"]) if row and "cors_enabled" in keys else False,
+            "allowed_origins": (row["cors_allowed_origins"] if row and "cors_allowed_origins" in keys else "") or "",
+            "allowed_methods": (row["cors_allowed_methods"] if row and "cors_allowed_methods" in keys else "") or "GET,HEAD,OPTIONS",
+            "allow_credentials": coerce_bool(row["cors_allow_credentials"]) if row and "cors_allow_credentials" in keys else False,
+            "max_age": int(row["cors_max_age"]) if row and "cors_max_age" in keys else 600,
+        }
+
+    def update_cors_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled", False))
+        origins = " ".join(str(payload.get("allowed_origins", "") or "").replace(";", ",").split())
+        methods = str(payload.get("allowed_methods", "") or "").strip() or "GET,HEAD,OPTIONS"
+        credentials = coerce_bool(payload.get("allow_credentials", False))
+        max_age_raw = payload.get("max_age", 600)
+        max_age = max(0, min(86400, int(max_age_raw))) if max_age_raw is not None else 600
+        if enabled and not origins.strip():
+            raise ValueError("启用 CORS 时必须填写允许的来源（allowed_origins）")
+        if enabled and credentials and origins.strip() == "*":
+            # CORS 规范：Allow-Origin: * 与 Allow-Credentials: true 互斥，浏览器会直接拒绝
+            raise ValueError("allow_credentials=true 时 allowed_origins 不能为 *，请列出具体来源")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET cors_enabled = ?, cors_allowed_origins = ?, "
+                "cors_allowed_methods = ?, cors_allow_credentials = ?, cors_max_age = ?, updated_at = ? WHERE id = 1",
+                (int(enabled), origins, methods, int(credentials), max_age, now),
+            )
+        return self.get_cors_config()
+
+    # ===== 配置版本历史 / 导出导入（P2-3.5） =====
+
+    # 模块名 -> (getter, updater)。历史/回滚/导入全部复用 update 方法的
+    # 校验与钳制逻辑，回滚相当于「把历史快照当一次普通更新重新写入」。
+    _SETTINGS_MODULE_METHODS: Dict[str, Tuple[str, str]] = {
+        "rate-limit": ("get_rate_limit_config", "update_rate_limit_config"),
+        "cors": ("get_cors_config", "update_cors_config"),
+        "notifications": ("get_notifications_config", "update_notifications_config"),
+        "signed-url": ("get_signed_url_config", "update_signed_url_config"),
+        "redirect-signing": ("get_redirect_signing_config", "update_redirect_signing_config"),
+        "auto-ban": ("get_auto_ban_config", "update_auto_ban_config"),
+        "email": ("get_email_config", "update_email_config"),
+        "ip-cache": ("get_ip_cache_config", "update_ip_cache_config"),
+        "dedup": ("get_dedup_config", "update_dedup_config"),
+        "stream-guard": ("get_stream_guard_config", "update_stream_guard_config"),
+        "login-protection": ("get_login_protection_config", "update_login_protection_config"),
+        "remote-config": ("get_remote_config", "update_remote_config"),
+    }
+
+    def _resolve_settings_methods(self, module: str) -> Tuple[str, str]:
+        methods = self._SETTINGS_MODULE_METHODS.get(str(module or "").strip())
+        if not methods:
+            raise ValueError(f"未知配置模块: {module}")
+        return methods
+
+    def record_settings_history(self, module: str, payload: Dict[str, Any], changed_by: str = "") -> None:
+        """配置更新成功后落一条历史快照（失败仅告警，不影响主流程）。"""
+        try:
+            methods = self._resolve_settings_methods(module)
+            _ = methods  # 未知名直接在 _resolve 抛 ValueError
+            now = utc_now()
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO system_settings_history (module, payload_json, changed_by, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (module, json.dumps(payload, ensure_ascii=False), str(changed_by or ""), now),
+                )
+        except ValueError:
+            raise
+        except Exception as exc:  # pragma: no cover - 历史失败不阻断配置更新
+            logger.warning("配置历史记录失败: module=%s err=%s", module, exc)
+
+    def list_settings_history(self, module: str, limit: int = 20) -> Dict[str, Any]:
+        getter, _ = self._resolve_settings_methods(module)
+        current = getattr(self, getter)()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, module, changed_by, created_at FROM system_settings_history "
+                "WHERE module = ? ORDER BY id DESC LIMIT ?",
+                (module, max(1, min(100, int(limit or 20)))),
+            ).fetchall()
+        return {
+            "module": module,
+            "current": current,
+            "items": [
+                {"id": r["id"], "module": r["module"], "changed_by": r["changed_by"], "created_at": r["created_at"]}
+                for r in rows
+            ],
+        }
+
+    def rollback_settings(self, module: str, history_id: int) -> Dict[str, Any]:
+        """把指定历史快照作为一次普通更新写回（复用 update 校验/钳制）。"""
+        getter, updater = self._resolve_settings_methods(module)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM system_settings_history WHERE id = ? AND module = ?",
+                (int(history_id), module),
+            ).fetchone()
+        if row is None:
+            raise KeyError("历史记录不存在")
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            raise ValueError("历史快照已损坏，无法回滚")
+        if not isinstance(payload, dict):
+            raise ValueError("历史快照格式非法，无法回滚")
+        result = getattr(self, updater)(payload)
+        self.record_settings_history(module, {**result, "rollback_from": int(history_id)}, "rollback")
+        return {**result, "rollback_from": int(history_id)}
+
+    def export_module(self, module: str) -> Dict[str, Any]:
+        getter, _ = self._resolve_settings_methods(module)
+        return {"module": module, "exported_at": utc_now(), "payload": getattr(self, getter)()}
+
+    def import_module(self, module: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        _, updater = self._resolve_settings_methods(module)
+        if not isinstance(payload, dict):
+            raise ValueError("导入内容必须是 JSON 对象")
+        return getattr(self, updater)(payload)
+
+    # ===== Webhook / IM 告警通知（P1-2.4） =====
+
+    _NOTIFICATION_CHANNEL_TYPES = ("generic", "feishu", "dingtalk", "slack")
+
+    @classmethod
+    def _parse_notifications_config(cls, raw: str) -> NotificationsConfig:
+        """notifications_config JSON 串 → NotificationsConfig（解析失败回落未启用）。"""
+        if not raw:
+            return NotificationsConfig()
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return NotificationsConfig()
+            channels = []
+            for ch in data.get("channels", []) or []:
+                if not isinstance(ch, dict):
+                    continue
+                ch_type = str(ch.get("type", "")).strip()
+                if ch_type not in cls._NOTIFICATION_CHANNEL_TYPES:
+                    continue
+                channels.append({
+                    "type": ch_type,
+                    "name": str(ch.get("name", "") or "").strip(),
+                    "enabled": coerce_bool(ch.get("enabled"), False),
+                    "url": str(ch.get("url", "") or "").strip(),
+                    "secret": str(ch.get("secret", "") or "").strip(),
+                })
+            return NotificationsConfig(enabled=coerce_bool(data.get("enabled"), False), channels=channels)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("notifications_config 解析失败，回落未启用")
+            return NotificationsConfig()
+
+    def get_notifications_config(self) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM system_settings WHERE id = 1").fetchone()
+        raw = row["notifications_config"] if row and "notifications_config" in row.keys() else ""
+        cfg = self._parse_notifications_config(raw)
+        return {"enabled": cfg.enabled, "channels": cfg.channels}
+
+    def update_notifications_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = coerce_bool(payload.get("enabled"), False)
+        channels = []
+        for ch in payload.get("channels", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            ch_type = str(ch.get("type", "")).strip()
+            if ch_type not in self._NOTIFICATION_CHANNEL_TYPES:
+                continue
+            channels.append({
+                "type": ch_type,
+                "name": str(ch.get("name", "") or "").strip()[:64],
+                "enabled": coerce_bool(ch.get("enabled"), False),
+                "url": str(ch.get("url", "") or "").strip()[:2048],
+                "secret": str(ch.get("secret", "") or "").strip()[:512],
+            })
+        raw = json.dumps({"enabled": enabled, "channels": channels}, ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE system_settings SET notifications_config = ?, updated_at = ? WHERE id = 1",
+                (raw, utc_now()),
+            )
+        return self.get_notifications_config()
+
+    def record_login_failure(self, ip: str, username: str) -> int:
+        """记录一次登录失败；达到阈值即加锁。
+
+        返回**本次失败后剩余的锁定秒数**（未达阈值/未锁定返回 0），
+        便于 login 直接用作 429 的 Retry-After。
+        """
+        cfg = self.get_login_protection_config()
+        max_attempts = max(1, int(cfg.get("max_attempts", 5) or 5))
+        lockout_seconds = max(1, int(cfg.get("lockout_minutes", 15) or 15)) * 60
+        now_ts = int(time.time())
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM admin_login_attempts WHERE ip = ? AND username = ?",
+                (ip, username),
+            ).fetchone()
+
+            if row is None:
+                count = 1
+                first_fail_at = now_ts
+                prev_locked_until = 0
+            elif int(row["locked_until"] or 0) and int(row["locked_until"]) < now_ts:
+                # 上一次锁定已过期 → 从本次重新开始计数
+                count = 1
+                first_fail_at = now_ts
+                prev_locked_until = 0
+            else:
+                count = int(row["fail_count"]) + 1
+                first_fail_at = int(row["first_fail_at"] or now_ts)
+                prev_locked_until = int(row["locked_until"] or 0)
+
+            locked_until = prev_locked_until
+            if count >= max_attempts:
+                locked_until = now_ts + lockout_seconds
+
+            if row is None:
+                connection.execute(
+                    "INSERT INTO admin_login_attempts "
+                    "(ip, username, fail_count, first_fail_at, locked_until, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (ip, username, count, first_fail_at, locked_until, now_ts),
+                )
+            else:
+                connection.execute(
+                    "UPDATE admin_login_attempts "
+                    "SET fail_count = ?, first_fail_at = ?, locked_until = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (count, first_fail_at, locked_until, now_ts, row["id"]),
+                )
+
+        return max(0, locked_until - now_ts) if locked_until > now_ts else 0
+
+    def get_active_lock(self, ip: str, username: str) -> int:
+        """返回当前剩余锁定秒数；未锁定返回 0。"""
+        now_ts = int(time.time())
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM admin_login_attempts WHERE ip = ? AND username = ?",
+                (ip, username),
+            ).fetchone()
+        if not row:
+            return 0
+        locked_until = int(row["locked_until"] or 0)
+        if locked_until and locked_until > now_ts:
+            return locked_until - now_ts
+        return 0
+
+    def clear_login_failures(self, ip: str, username: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM admin_login_attempts WHERE ip = ? AND username = ?",
+                (ip, username),
+            )
+
+    # ===== 管理操作审计日志（P0-1.3） =====
+
+    def insert_audit_log(
+        self,
+        actor_type: str,
+        actor_id: str,
+        action: str,
+        target_type: str,
+        target_id: str = "",
+        detail: str = "",
+    ) -> None:
+        """写入一条管理操作审计记录。created_at 与 route_logs 同格式（UTC ISO 字符串）。"""
+        created_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_audit_log
+                    (actor_type, actor_id, action, target_type, target_id, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(actor_type or "").strip(),
+                    str(actor_id or "").strip(),
+                    str(action or "").strip(),
+                    str(target_type or "").strip(),
+                    str(target_id or "").strip(),
+                    str(detail or "").strip()[:2000],
+                    created_at,
+                ),
+            )
+
+    @staticmethod
+    def serialize_audit_log(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "actor_type": row["actor_type"],
+            "actor_id": row["actor_id"],
+            "action": row["action"],
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "detail": row["detail"],
+            "created_at": row["created_at"],
+        }
+
+    def list_audit_logs(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """审计日志分页查询（语义与 list_route_logs 保持一致）。"""
+        filters = filters or {}
+        clauses: List[str] = []
+        params: List[Any] = []
+
+        keyword = str(filters.get("keyword", "")).strip()
+        if keyword:
+            like_value = f"%{keyword}%"
+            clauses.append(
+                "("
+                "actor_id LIKE ? OR action LIKE ? OR target_type LIKE ? OR "
+                "target_id LIKE ? OR detail LIKE ?"
+                ")"
+            )
+            params.extend([like_value] * 5)
+
+        action = str(filters.get("action", "")).strip()
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+
+        target_type = str(filters.get("target_type", "")).strip()
+        if target_type:
+            clauses.append("target_type = ?")
+            params.append(target_type)
+
+        date_from = str(filters.get("date_from", "")).strip()
+        if date_from:
+            clauses.append("created_at >= ?")
+            params.append(date_from)
+
+        date_to = str(filters.get("date_to", "")).strip()
+        if date_to:
+            clauses.append("created_at <= ?")
+            params.append(date_to)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit = max(1, min(500, int(filters.get("limit", 50) or 50)))
+        page = max(1, int(filters.get("page", 1) or 1))
+        offset = (page - 1) * limit
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM admin_audit_log
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM admin_audit_log {where_sql}",
+                params,
+            ).fetchone()[0]
+
+        return {
+            "items": [self.serialize_audit_log(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "page": page,
+            "offset": offset,
+            "total_pages": max(1, (total + limit - 1) // limit),
+            "filters": {
+                "keyword": keyword,
+                "action": action,
+                "target_type": target_type,
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+        }
+
     def generate_signed_url(self, path: str) -> str:
         """签出一个相对 URL。服务端持有 secret，绝不外泄。"""
         from signed_url import sign_url
@@ -2371,6 +3299,7 @@ class ConfigStore:
                 ip_blacklist=str(payload.get("ip_blacklist", "") or "").strip(),
                 region_whitelist=str(payload.get("region_whitelist", "") or "").strip(),
                 region_blacklist=str(payload.get("region_blacklist", "") or "").strip(),
+                rule_defaults=self._sanitize_group_rule_defaults(payload.get("rule_defaults") or {}),
             )
         return self.get_route_group(path_prefix, request_host)
 
@@ -2414,11 +3343,20 @@ class ConfigStore:
                 if duplicate:
                     raise ValueError(f"Route group {new_request_host or '*'} {new_path_prefix} already exists.")
                 now = utc_now()
+                # 组默认：payload 未携带时保留现值（updateGroupRegionSwitch 等局部更新场景）
+                new_defaults = (
+                    self._sanitize_group_rule_defaults(payload["rule_defaults"])
+                    if "rule_defaults" in payload and payload["rule_defaults"] is not None
+                    else self._parse_group_rule_defaults(
+                        existing["rule_defaults"] if "rule_defaults" in existing.keys() else "{}"
+                    )
+                )
                 connection.execute(
                     """
                     UPDATE route_groups
                     SET request_host = ?, path_prefix = ?, region_matching_enabled = ?, notes = ?,
                         access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
+                        rule_defaults = ?,
                         updated_at = ?
                     WHERE request_host = ? AND path_prefix = ?
                     """,
@@ -2431,6 +3369,7 @@ class ConfigStore:
                         normalize_region_filter_value(str(payload.get("ip_blacklist", existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else "") or "")),
                         normalize_region_filter_value(str(payload.get("region_whitelist", existing["region_whitelist"] if "region_whitelist" in existing.keys() else "") or "")),
                         normalize_region_filter_value(str(payload.get("region_blacklist", existing["region_blacklist"] if "region_blacklist" in existing.keys() else "") or "")),
+                        self._normalize_json_text(new_defaults),
                         now,
                         old_request_host,
                         old_path_prefix,
@@ -2458,9 +3397,92 @@ class ConfigStore:
                     ip_blacklist=str(payload.get("ip_blacklist", existing["ip_blacklist"] if "ip_blacklist" in existing.keys() else "") or ""),
                     region_whitelist=str(payload.get("region_whitelist", existing["region_whitelist"] if "region_whitelist" in existing.keys() else "") or ""),
                     region_blacklist=str(payload.get("region_blacklist", existing["region_blacklist"] if "region_blacklist" in existing.keys() else "") or ""),
+                    rule_defaults=(
+                        self._sanitize_group_rule_defaults(payload["rule_defaults"])
+                        if "rule_defaults" in payload and payload["rule_defaults"] is not None
+                        else None
+                    ),
                 )
 
         return self.get_route_group(new_path_prefix, new_request_host)
+
+    def convert_matching_rules_to_inherit(
+        self,
+        path_prefix: str,
+        request_host: str = "",
+        fields: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """把组内「显式值 == 组级默认」的规则字段转为继承（P2-4.1 存量迁移）。
+
+        仅处理 fields ∩ 组已设置的默认键；已是继承的字段跳过。
+        数值/开关写 -1 哨兵；字符串写空串（继承语义）。
+        返回转换明细供后台确认弹窗统计展示。
+        """
+        path_prefix = str(path_prefix).strip()
+        normalized_host = normalize_request_host(request_host)
+        if not path_prefix:
+            raise ValueError("path_prefix is required.")
+        wanted = [f for f in (fields or list(GROUP_RULE_DEFAULT_FIELDS)) if f in GROUP_RULE_DEFAULT_FIELDS]
+        with self._connect() as connection:
+            group_row = connection.execute(
+                "SELECT * FROM route_groups WHERE request_host = ? AND path_prefix = ?",
+                (normalized_host, path_prefix),
+            ).fetchone()
+            if not group_row:
+                raise KeyError(f"Route group {normalized_host or '*'} {path_prefix} not found")
+            defaults = self._parse_group_rule_defaults(
+                group_row["rule_defaults"] if "rule_defaults" in group_row.keys() else "{}"
+            )
+            if not defaults:
+                return {"converted_rules": 0, "converted_fields": 0, "details": []}
+            now = utc_now()
+            converted_rules = 0
+            converted_fields = 0
+            details: List[Dict[str, Any]] = []
+            rule_rows = connection.execute(
+                "SELECT * FROM forward_rules WHERE request_host = ? AND path_prefix = ?",
+                (normalized_host, path_prefix),
+            ).fetchall()
+            for row in rule_rows:
+                rule = self._row_to_rule(row)
+                inherit = rule.inherit_set()
+                updates: Dict[str, Any] = {}
+                touched: List[str] = []
+                for field in wanted:
+                    if field not in defaults or field in inherit:
+                        continue
+                    kind = GROUP_RULE_DEFAULT_FIELDS[field]
+                    current = getattr(rule, field)
+                    default_val = defaults[field]
+                    if kind == "int":
+                        try:
+                            matched = current is not None and int(current) == int(default_val)
+                        except (TypeError, ValueError):
+                            matched = False
+                        if matched:
+                            updates[field] = RULE_INHERIT_SENTINEL_INT
+                    elif kind == "bool":
+                        if bool(current) == bool(default_val):
+                            updates[field] = RULE_INHERIT_SENTINEL_INT
+                    else:
+                        if normalize_region_filter_value(current) == str(default_val).strip():
+                            updates[field] = ""
+                    if field in updates:
+                        touched.append(field)
+                if updates:
+                    set_clause = ", ".join(f"{k} = ?" for k in updates)
+                    connection.execute(
+                        f"UPDATE forward_rules SET {set_clause}, updated_at = ? WHERE id = ?",
+                        (*updates.values(), now, rule.rule_id),
+                    )
+                    converted_rules += 1
+                    converted_fields += len(touched)
+                    details.append({"rule_id": rule.rule_id, "rule_name": rule.name, "fields": touched})
+            return {
+                "converted_rules": converted_rules,
+                "converted_fields": converted_fields,
+                "details": details,
+            }
 
     def delete_route_group(self, path_prefix: str, request_host: str = "") -> None:
         path_prefix = str(path_prefix).strip()
@@ -2490,7 +3512,7 @@ class ConfigStore:
             row = connection.execute("SELECT * FROM forward_rules WHERE id = ?", (rule_id,)).fetchone()
         if not row:
             raise KeyError(f"Rule {rule_id} not found")
-        return self.serialize_rule(self._row_to_rule(row))
+        return self._serialize_rule_resolved(row)
 
     def create_rule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         rule = self._payload_to_rule(payload)
@@ -2513,7 +3535,7 @@ class ConfigStore:
                 )
             rule_id = self._insert_rule(connection, rule, source=source)
             row = connection.execute("SELECT * FROM forward_rules WHERE id = ?", (rule_id,)).fetchone()
-        return self.serialize_rule(self._row_to_rule(row))
+        return self._serialize_rule_resolved(row)
 
     def update_rule(self, rule_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._connect() as connection:
@@ -2541,6 +3563,9 @@ class ConfigStore:
                     priority = ?, notes = ?, path_rewrite_pattern = ?, path_rewrite_replacement = ?,
                     access_ip_whitelist = ?, ip_blacklist = ?, region_whitelist = ?, region_blacklist = ?,
                     referer_whitelist = ?, referer_policy = ?, ua_blacklist = ?, ua_whitelist = ?,
+                    target_urls = ?, health_check_enabled = ?, health_check_path = ?, health_check_interval = ?, health_check_timeout = ?,
+                    cors_origins = ?,
+                    inject_request_headers = ?, upstream_verify_ssl = ?, client_cert = ?, client_key = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -2570,9 +3595,19 @@ class ConfigStore:
                     normalize_region_filter_value(rule.region_whitelist),
                     normalize_region_filter_value(rule.region_blacklist),
                     normalize_region_filter_value(rule.referer_whitelist),
-                    rule.normalized_referer_policy(),
+                    rule.stored_referer_policy(),
                     normalize_region_filter_value(rule.ua_blacklist),
                     normalize_region_filter_value(rule.ua_whitelist),
+                    rule.target_urls or "",
+                    int(rule.health_check_enabled),
+                    rule.health_check_path or "",
+                    rule.health_check_interval,
+                    rule.health_check_timeout,
+                    rule.cors_origins or "",
+                    rule.inject_request_headers or "",
+                    int(rule.upstream_verify_ssl),
+                    rule.client_cert or "",
+                    rule.client_key or "",
                     now,
                     rule_id,
                 ),
@@ -2595,7 +3630,7 @@ class ConfigStore:
             if old_path_prefix != rule.path_prefix or old_request_host != normalize_request_host(rule.request_host):
                 self._cleanup_orphan_route_group(connection, old_path_prefix, old_request_host)
             row = connection.execute("SELECT * FROM forward_rules WHERE id = ?", (rule_id,)).fetchone()
-        return self.serialize_rule(self._row_to_rule(row))
+        return self._serialize_rule_resolved(row)
 
     def delete_rule(self, rule_id: int) -> None:
         with self._connect() as connection:
@@ -3031,6 +4066,21 @@ class ConfigStore:
             # UA 黑名单（HOTLINK_PROTECTION.md 阶段 3.1）
             "ua_blacklist": rule.ua_blacklist,
             "ua_whitelist": rule.ua_whitelist,
+            # 多上游 + 健康检查（P1-2.2）
+            "target_urls": rule.target_urls,
+            "health_check_enabled": rule.health_check_enabled,
+            "health_check_path": rule.health_check_path,
+            "health_check_interval": rule.health_check_interval,
+            "health_check_timeout": rule.health_check_timeout,
+            # CORS 规则级覆盖（P2-3.2）
+            "cors_origins": rule.cors_origins,
+            "inject_request_headers": rule.inject_request_headers,
+            "upstream_verify_ssl": rule.upstream_verify_ssl,
+            "client_cert": rule.client_cert,
+            "client_key": rule.client_key,
+            # 组级继承（P2-4.1）：标记「继承组默认」的字段名列表；
+            # 其余字段输出的是有效值（组默认已合入），供占位提示与抽屉展示
+            "inherit_fields": [f for f in rule.inherit_set() if f in GROUP_RULE_DEFAULT_FIELDS],
         }
 
     def serialize_route_group(
@@ -3055,6 +4105,8 @@ class ConfigStore:
             "ip_blacklist": group.ip_blacklist,
             "region_whitelist": group.region_whitelist,
             "region_blacklist": group.region_blacklist,
+            # 组级规则默认配置（P2-4.1 规则继承）：键 ∈ GROUP_RULE_DEFAULT_FIELDS
+            "rule_defaults": group.rule_defaults or {},
             "rule_count": len(group_rules),
             "enabled_rule_count": sum(1 for rule in group_rules if rule["enabled"]),
             "default_rule_count": sum(1 for rule in group_rules if rule["is_default"]),
@@ -3106,6 +4158,41 @@ class ConfigStore:
         }
 
     def _row_to_rule(self, row: sqlite3.Row) -> ProxyRule:
+        # 组级继承哨兵检测（P2-4.1）：数值/开关列 -1 = 继承组默认；
+        # 字符串列（referer/ua）空值天然是「继承组」语义（组也没配 = 不启用）。
+        inherit = []
+        timeout_raw = int(row["timeout"]) if str(row["timeout"] or "").lstrip("-").isdigit() else 30
+        max_redirects_raw = int(row["max_redirects"]) if str(row["max_redirects"] or "").lstrip("-").isdigit() else 10
+        retry_raw = int(row["retry_times"]) if str(row["retry_times"] or "").lstrip("-").isdigit() else 3
+        follow_raw = int(row["follow_redirects"]) if "follow_redirects" in row.keys() else 1
+        streaming_raw = int(row["enable_streaming"]) if "enable_streaming" in row.keys() else 1
+        strip_raw = int(row["strip_prefix"]) if "strip_prefix" in row.keys() else 0
+        if timeout_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("timeout")
+        if max_redirects_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("max_redirects")
+        if retry_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("retry_times")
+        if follow_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("follow_redirects")
+        if streaming_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("enable_streaming")
+        if strip_raw == RULE_INHERIT_SENTINEL_INT:
+            inherit.append("strip_prefix")
+        # 字符串列：空值 = 继承组默认（组也未配置时等价于「不启用」）；
+        # "-"（显式停用哨兵）不算继承。referer_policy 空值同理。
+        referer_raw = normalize_region_filter_value(row["referer_whitelist"] if "referer_whitelist" in row.keys() else "")
+        referer_policy_raw = str(row["referer_policy"] if "referer_policy" in row.keys() else "allow").strip().lower()
+        ua_black_raw = normalize_region_filter_value(row["ua_blacklist"] if "ua_blacklist" in row.keys() else "")
+        ua_white_raw = normalize_region_filter_value(row["ua_whitelist"] if "ua_whitelist" in row.keys() else "")
+        if not referer_raw and referer_raw != RULE_EXPLICIT_OFF_SENTINEL:
+            inherit.append("referer_whitelist")
+        if referer_policy_raw not in ("allow", "deny"):
+            inherit.append("referer_policy")
+        if not ua_black_raw and ua_black_raw != RULE_EXPLICIT_OFF_SENTINEL:
+            inherit.append("ua_blacklist")
+        if not ua_white_raw and ua_white_raw != RULE_EXPLICIT_OFF_SENTINEL:
+            inherit.append("ua_whitelist")
         return ProxyRule(
             rule_id=row["id"],
             source=row["source"],
@@ -3114,12 +4201,12 @@ class ConfigStore:
             request_host=normalize_request_host(row["request_host"]),
             path_prefix=row["path_prefix"],
             target_url=row["target_url"],
-            strip_prefix=bool(row["strip_prefix"]),
-            timeout=row["timeout"],
-            max_redirects=row["max_redirects"],
-            follow_redirects=bool(row["follow_redirects"]),
-            retry_times=row["retry_times"],
-            enable_streaming=bool(row["enable_streaming"]),
+            strip_prefix=bool(strip_raw) if strip_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
+            timeout=timeout_raw if timeout_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
+            max_redirects=max_redirects_raw if max_redirects_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
+            follow_redirects=bool(follow_raw) if follow_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
+            retry_times=retry_raw if retry_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
+            enable_streaming=bool(streaming_raw) if streaming_raw != RULE_INHERIT_SENTINEL_INT else RULE_INHERIT_SENTINEL_INT,
             ip_whitelist=row["ip_whitelist"],
             region_filters=row["region_filters"],
             is_default=bool(row["is_default"]),
@@ -3132,12 +4219,25 @@ class ConfigStore:
             ip_blacklist=row["ip_blacklist"] if "ip_blacklist" in row.keys() else "",
             region_whitelist=row["region_whitelist"] if "region_whitelist" in row.keys() else "",
             region_blacklist=row["region_blacklist"] if "region_blacklist" in row.keys() else "",
-            # Referer 防盗链（018 列，row.keys() 守卫兼容未迁移的库）
+            # Referer 防盗链（018 列，row.keys() 守卫兼容未迁移的库）；
+            # 空值 = 继承组默认（组也未配置时行为同「未启用」）
             referer_whitelist=row["referer_whitelist"] if "referer_whitelist" in row.keys() else "",
             referer_policy=row["referer_policy"] if "referer_policy" in row.keys() else "allow",
             # UA 黑名单（019 列）
             ua_blacklist=row["ua_blacklist"] if "ua_blacklist" in row.keys() else "",
             ua_whitelist=row["ua_whitelist"] if "ua_whitelist" in row.keys() else "",
+            # 多上游 + 健康检查（P1-2.2），row.keys() 守卫兼容未迁移的库
+            target_urls=row["target_urls"] if "target_urls" in row.keys() else "",
+            health_check_enabled=bool(row["health_check_enabled"]) if "health_check_enabled" in row.keys() else False,
+            health_check_path=row["health_check_path"] if "health_check_path" in row.keys() else "",
+            health_check_interval=int(row["health_check_interval"]) if "health_check_interval" in row.keys() else 30,
+            health_check_timeout=int(row["health_check_timeout"]) if "health_check_timeout" in row.keys() else 5,
+            cors_origins=row["cors_origins"] if "cors_origins" in row.keys() else "",
+            inject_request_headers=row["inject_request_headers"] if "inject_request_headers" in row.keys() else "",
+            upstream_verify_ssl=int(row["upstream_verify_ssl"]) if "upstream_verify_ssl" in row.keys() else -1,
+            client_cert=row["client_cert"] if "client_cert" in row.keys() else "",
+            client_key=row["client_key"] if "client_key" in row.keys() else "",
+            inherit_fields=",".join(inherit),
         )
 
     def _payload_to_rule(self, payload: Dict[str, Any]) -> ProxyRule:
@@ -3150,6 +4250,26 @@ class ConfigStore:
         if not target_url:
             raise ValueError("target_url is required.")
 
+        # 组级继承（P2-4.1）：inherit_fields 标记「继承组默认」的字段（列表或逗号串）。
+        # 数值/开关：标记即写 -1 哨兵；字符串（referer/ua）：空串本身就是继承哨兵，
+        # 标记 referer_policy 时写空串。标记优先于 payload 携带的值 —— update_rule
+        # 内部合并的是「已解析有效值 + inherit_fields」，若让值反过来清掉标记，
+        # toggle 等局部更新会把继承字段悄悄转成显式值（往返一致性）。
+        raw_inherit = payload.get("inherit_fields") or []
+        if isinstance(raw_inherit, str):
+            inherit_marks = {part.strip() for part in raw_inherit.split(",") if part.strip()}
+        else:
+            inherit_marks = {str(part).strip() for part in raw_inherit if str(part).strip()}
+        inherit_marks &= set(GROUP_RULE_DEFAULT_FIELDS)
+
+        timeout_inherit = "timeout" in inherit_marks
+        max_redirects_inherit = "max_redirects" in inherit_marks
+        retry_inherit = "retry_times" in inherit_marks
+        follow_inherit = "follow_redirects" in inherit_marks
+        streaming_inherit = "enable_streaming" in inherit_marks
+        strip_inherit = "strip_prefix" in inherit_marks
+        raw_referer_policy = str(payload.get("referer_policy", "") or "").strip().lower()
+
         return ProxyRule(
             rule_id=payload.get("id"),
             external_id=payload.get("external_id"),
@@ -3157,12 +4277,12 @@ class ConfigStore:
             request_host=normalize_request_host(payload.get("request_host", "")),
             path_prefix=path_prefix,
             target_url=target_url,
-            strip_prefix=coerce_bool(payload.get("strip_prefix"), False),
-            timeout=int(payload.get("timeout", 30) or 30),
-            max_redirects=int(payload.get("max_redirects", 10) or 10),
-            follow_redirects=coerce_bool(payload.get("follow_redirects"), True),
-            retry_times=int(payload.get("retry_times", 3) or 3),
-            enable_streaming=coerce_bool(payload.get("enable_streaming"), True),
+            strip_prefix=RULE_INHERIT_SENTINEL_INT if strip_inherit else coerce_bool(payload.get("strip_prefix"), False),
+            timeout=RULE_INHERIT_SENTINEL_INT if timeout_inherit else int(payload.get("timeout", 30) or 30),
+            max_redirects=RULE_INHERIT_SENTINEL_INT if max_redirects_inherit else int(payload.get("max_redirects", 10) or 10),
+            follow_redirects=RULE_INHERIT_SENTINEL_INT if follow_inherit else coerce_bool(payload.get("follow_redirects"), True),
+            retry_times=RULE_INHERIT_SENTINEL_INT if retry_inherit else int(payload.get("retry_times", 3) or 3),
+            enable_streaming=RULE_INHERIT_SENTINEL_INT if streaming_inherit else coerce_bool(payload.get("enable_streaming"), True),
             ip_whitelist=normalize_region_filter_value(payload.get("ip_whitelist", "")),
             region_filters=normalize_region_filter_value(payload.get("region_filters", "")),
             is_default=coerce_bool(payload.get("is_default"), False),
@@ -3176,16 +4296,29 @@ class ConfigStore:
             ip_blacklist=normalize_region_filter_value(payload.get("ip_blacklist", "")),
             region_whitelist=normalize_region_filter_value(payload.get("region_whitelist", "")),
             region_blacklist=normalize_region_filter_value(payload.get("region_blacklist", "")),
-            # Referer 防盗链：白名单走统一归一化；policy 用 ProxyRule.normalized_referer_policy
-            # 的同款守卫（非法值回退 allow），此处先行归一再入 dataclass
-            referer_whitelist=normalize_region_filter_value(payload.get("referer_whitelist", "")),
+            # Referer 防盗链：白名单走统一归一化；policy 非法值回退 allow。
+            # 空串 = 继承组默认（组也未设置时运行时 normalized_referer_policy 回落 allow）。
+            # 标记继承的字符串字段一律写空串哨兵，不落 payload 携带的有效值
+            # （组默认变更后规则才能跟随）
+            referer_whitelist=("" if "referer_whitelist" in inherit_marks else normalize_region_filter_value(payload.get("referer_whitelist", ""))),
             referer_policy=(
-                str(payload.get("referer_policy", "allow") or "allow").strip().lower()
-                if str(payload.get("referer_policy", "allow") or "allow").strip().lower() in ("allow", "deny")
-                else "allow"
+                ""
+                if "referer_policy" in inherit_marks
+                else (raw_referer_policy if raw_referer_policy in ("allow", "deny") else "")
             ),
-            ua_blacklist=normalize_region_filter_value(payload.get("ua_blacklist", "")),
-            ua_whitelist=normalize_region_filter_value(payload.get("ua_whitelist", "")),
+            ua_blacklist=("" if "ua_blacklist" in inherit_marks else normalize_region_filter_value(payload.get("ua_blacklist", ""))),
+            ua_whitelist=("" if "ua_whitelist" in inherit_marks else normalize_region_filter_value(payload.get("ua_whitelist", ""))),
+            target_urls=str(payload.get("target_urls", "") or "").strip(),
+            health_check_enabled=coerce_bool(payload.get("health_check_enabled"), False),
+            health_check_path=str(payload.get("health_check_path", "") or "").strip(),
+            health_check_interval=int(payload.get("health_check_interval", 30) or 30),
+            health_check_timeout=int(payload.get("health_check_timeout", 5) or 5),
+            cors_origins=str(payload.get("cors_origins", "") or "").strip(),
+            inject_request_headers=str(payload.get("inject_request_headers", "") or "").strip(),
+            upstream_verify_ssl=max(-1, min(1, int(payload.get("upstream_verify_ssl", -1) if payload.get("upstream_verify_ssl", -1) is not None else -1))),
+            client_cert=str(payload.get("client_cert", "") or "").strip(),
+            client_key=str(payload.get("client_key", "") or "").strip(),
+            inherit_fields=",".join(sorted(inherit_marks)),
         )
 
     def _remote_item_to_rule(self, item: Dict[str, Any], remote: Dict[str, Any]) -> ProxyRule:

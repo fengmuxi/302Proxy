@@ -94,7 +94,7 @@ body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Micros
 .btn-sm{padding:5px 11px;font-size:12px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
 .grid{display:grid;gap:16px}
-.kpi-grid{grid-template-columns:repeat(5,minmax(0,1fr))}
+.kpi-grid{grid-template-columns:repeat(6,minmax(0,1fr))}
 .kpi{padding:16px 18px}
 .kpi-label{font-size:12px;color:var(--text-2);display:flex;align-items:center;gap:6px}
 .kpi-value{font-size:26px;font-weight:500;margin-top:6px;letter-spacing:-.01em}
@@ -137,13 +137,17 @@ textarea{resize:vertical;min-height:64px}
 .cs-caret{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-3);pointer-events:none;transition:transform .15s,color .15s}
 .cs-trigger.open .cs-caret{transform:translateY(-50%) rotate(180deg);color:var(--brand)}
 .cs-label{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cs-pop{position:fixed;top:0;left:0;z-index:100;min-width:120px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-pop);padding:6px;max-height:min(480px,calc(100vh - 24px));overflow-y:scroll;overscroll-behavior:contain;display:none}
+.cs-pop{position:fixed;top:0;left:0;z-index:100;min-width:120px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-pop);padding:6px;max-height:min(480px,calc(100vh - 24px));overflow-y:auto;overscroll-behavior:contain;display:none}
 .cs-pop.open{display:block;animation:csIn .14s ease}
 @keyframes csIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-.cs-pop::-webkit-scrollbar{width:10px}
-.cs-pop::-webkit-scrollbar-track{background:var(--surface-2);border-radius:5px}
-.cs-pop::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:5px;border:2px solid var(--surface-2)}
-.cs-pop{scrollbar-width:thin;scrollbar-color:var(--border-strong) var(--surface-2)}
+/* 滚动条必须与两侧底色有足够对比度（暗色主题下 --border-strong≈--surface-2 几乎不可见），
+   thumb 用 --text-3 常态 / --text-2 悬停，保证拖动条抓得住 */
+.cs-pop::-webkit-scrollbar{width:12px}
+.cs-pop::-webkit-scrollbar-track{background:var(--surface-2);border-radius:6px}
+.cs-pop::-webkit-scrollbar-thumb{background:var(--text-3);border-radius:6px;border:3px solid var(--surface-2);min-height:28px}
+.cs-pop::-webkit-scrollbar-thumb:hover{background:var(--text-2)}
+.cs-pop::-webkit-scrollbar-thumb:active{background:var(--text-2)}
+.cs-pop{scrollbar-width:auto;scrollbar-color:var(--text-3) var(--surface-2)}
 .cs-opt{padding:8px 10px;border-radius:7px;font-size:13px;cursor:pointer;white-space:nowrap;display:flex;align-items:center;justify-content:space-between;gap:8px;transition:background-color .12s,color .12s}
 .cs-opt:hover{background:var(--surface-2)}
 .cs-opt.sel{background:var(--brand);color:#fff}
@@ -173,6 +177,22 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .pill-info{background:var(--info-soft);color:var(--info-text)}
 .pill-neutral{background:var(--surface-3);color:var(--text-2)}
 .pill-brand{background:var(--brand-soft);color:var(--brand-text)}
+
+/* 表单折叠组：核心字段留在明面，高级选项按领域收进 details */
+/* 注意：details 上不能设 overflow:hidden——新版 Chromium 的 ::details-content 槽位
+   遇到非 visible overflow 会把盒子高度钳死（关闭态漏内容、展开态被裁剪）。
+   收起改为自行 display:none，展开正常文档流，不依赖 UA 的隐藏机制。 */
+.form-adv{border:1px solid var(--border);border-radius:8px}
+.form-adv::details-content{content-visibility:visible;display:block}
+.form-adv:not([open]) .form-adv-body{display:none}
+.form-adv summary{list-style:none;display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-2);user-select:none;background:var(--surface-2);border-radius:7px 7px 0 0}
+.form-adv summary::-webkit-details-marker{display:none}
+.form-adv summary::after{content:"▸";margin-left:auto;color:var(--text-3);transition:transform .15s ease}
+.form-adv[open] summary::after{transform:rotate(90deg)}
+.form-adv[open] summary{border-bottom:1px solid var(--border)}
+.form-adv-count{font-size:10.5px;font-weight:500;color:var(--text-3);background:var(--surface-3);border-radius:99px;padding:1px 8px}
+.form-adv-body{padding:12px 12px 2px;display:grid;gap:14px}
+.form-adv-body .form-field:last-child{margin-bottom:10px}
 /* ---- Toggle / Switch ---- */
 .switch{--sw-w:40px;--sw-h:22px;--sw-knob:18px;width:var(--sw-w);height:var(--sw-h);border-radius:999px;background:var(--surface-3);border:1px solid var(--border);position:relative;cursor:pointer;flex:0 0 auto;-webkit-tap-highlight-color:transparent;transition:background .22s ease,border-color .22s ease,box-shadow .22s ease}
 .switch:hover{border-color:var(--border-strong)}
@@ -182,6 +202,13 @@ tbody tr.clickable:hover{background:var(--surface-2)}
 .switch:active::before{transform:translateY(-50%) scale(.82)}
 .switch:focus-visible{outline:none;box-shadow:0 0 0 3px var(--brand-soft)}
 [data-theme="dark"] .switch.on{box-shadow:0 0 0 3px rgba(129,140,248,.30)}
+/* 三段式开关（组级默认 / 规则继承的三态选项，type:"seg"） */
+.seg{display:inline-flex;flex:0 0 auto;gap:2px;padding:2px;border:1px solid var(--border);border-radius:9px;background:var(--surface-3)}
+.seg-btn{appearance:none;border:0;background:transparent;color:var(--text-2);font:inherit;font-size:12px;line-height:1;padding:6px 12px;border-radius:6px;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:background .18s ease,color .18s ease,box-shadow .18s ease}
+.seg-btn:hover{color:var(--text)}
+.seg-btn.on{background:var(--brand);color:#fff;box-shadow:0 1px 2px rgba(15,23,42,.22)}
+.seg-btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--brand-soft)}
+[data-theme="dark"] .seg-btn.on{box-shadow:0 1px 2px rgba(0,0,0,.4)}
 [data-theme="dark"] .switch::before{box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .drawer-mask{position:fixed;inset:0;background:rgba(15,23,42,.4);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
 .drawer-mask.open{opacity:1;pointer-events:auto}

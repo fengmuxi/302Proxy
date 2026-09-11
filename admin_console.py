@@ -12,13 +12,15 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from aiohttp import web
 
 from config import Config
 from config_store import ConfigStore
 from geo_service import GeoResolver
+from rate_limiter import RateLimiter
+from notifier import NotificationDispatcher
 
 # 模块级日志器，与项目其他模块保持一致（config.py 等使用 "proxy" 作为 logger 名）
 logger = logging.getLogger("proxy")
@@ -67,7 +69,8 @@ _API_DOC_SPECS: Dict[str, Dict[str, Any]] = {
     # —— 路由组 ——
     "list_route_groups": {"tag": "路由配置", "summary": "列出路由组（按路径前缀 + 请求域名分组）"},
     "create_route_group": {"tag": "路由配置", "summary": "新建路由组", "params": [{"name": "path_prefix", "in": "body", "type": "string", "required": True, "desc": "路径前缀"}, {"name": "request_host", "in": "body", "type": "string", "required": True, "desc": "请求域名（空=全局）"}]},
-    "update_route_group": {"tag": "路由配置", "summary": "更新路由组"},
+    "update_route_group": {"tag": "路由配置", "summary": "更新路由组", "params": [{"name": "rule_defaults", "in": "body", "type": "object", "required": False, "desc": "组级规则默认配置（键 ∈ timeout/max_redirects/retry_times/follow_redirects/enable_streaming/strip_prefix/referer_whitelist/referer_policy/ua_blacklist/ua_whitelist；规则可选继承）"}]},
+    "convert_group_rules_inherit": {"tag": "路由配置", "summary": "组默认存量迁移：把显式值等于组默认的规则字段批量转为继承", "params": [{"name": "path_prefix", "in": "body", "type": "string", "required": True, "desc": "路径前缀"}, {"name": "request_host", "in": "body", "type": "string", "required": False, "desc": "请求域名（空=全局）"}, {"name": "fields", "in": "body", "type": "array", "required": False, "desc": "要转换的字段名列表，缺省=全部可继承字段"}]},
     "delete_route_group": {"tag": "路由配置", "summary": "删除路由组"},
     # —— 封禁 ——
     "list_banned_ips": {"tag": "安全与封禁", "summary": "列出封禁名单", "params": [{"name": "limit", "in": "query", "type": "int", "required": False, "desc": "每页条数"}]},
@@ -81,6 +84,7 @@ _API_DOC_SPECS: Dict[str, Dict[str, Any]] = {
     "remove_banned_ip": {"tag": "安全与封禁", "summary": "解封 IP",
                          "params": [{"name": "ip", "in": "path", "type": "string", "required": True, "desc": "IP 地址"}]},
     "extend_banned_ip": {"tag": "安全与封禁", "summary": "延长封禁", "params": [{"name": "ip", "in": "path", "type": "string", "required": True, "desc": "IP"}, {"name": "duration_hours", "in": "body", "type": "number", "required": True, "desc": "延长小时数"}]},
+    "set_banned_ip_permanent": {"tag": "安全与封禁", "summary": "设为永久封禁", "params": [{"name": "ip", "in": "path", "type": "string", "required": True, "desc": "IP 地址"}]},
     "clear_banned_ips": {"tag": "安全与封禁", "summary": "清空全部封禁记录"},
     # —— 日志与审计 ——
     "list_route_logs": {"tag": "日志与审计", "summary": "查询请求转发日志（分页 + 筛选）",
@@ -159,12 +163,14 @@ _API_DOC_USAGE: Dict[str, str] = {
     "delete_api_key": "吊销（删除）密钥。删除后调用立即 401 且不可恢复；需要长期停用时优先用 toggle 而非删除。",
     "list_route_groups": "返回所有路由组（按 路径前缀 + 请求域名 维度）。route_groups 是 rules 的容器，新增规则前先确认所属组。",
     "create_route_group": "新建路由组。path_prefix 决定命中哪些请求，request_host 为空表示全局适用。",
-    "update_route_group": "更新路由组的地区匹配/备注等属性（按 path_prefix + request_host 定位）。改后建议回概览页确认分组状态。",
+    "update_route_group": "更新路由组的地区匹配/备注/组级规则默认等属性（按 path_prefix + request_host 定位）。rule_defaults 里出现的键成为该组规则的默认值，规则字段可选「继承组默认」。改后建议回概览页确认分组状态。",
+    "convert_group_rules_inherit": "存量迁移：把组内显式值恰好等于组级默认的规则字段批量转为「继承组默认」，此后调整组默认即可整体生效。只转换匹配项，不改动其他显式配置。",
     "delete_route_group": "删除整个路由组及其下规则（不可恢复），删除前请先确认无线上流量依赖该前缀。",
     "list_banned_ips": "分页返回封禁名单。注意：封禁只拦截代理转发路径，不影响 /_admin 管理接口。",
     "add_banned_ip": "手动封禁一个 IP 或 CIDR。path_prefix 留空=全局封禁；permanent=false 时需带 duration_seconds。reasons 建议填来源便于审计。",
     "remove_banned_ip": "按 IP 解封。CIDR 网段需原样传回完整网段串。",
     "extend_banned_ip": "延长临时封禁时长（小时），不影响到期后的永久/临时属性。",
+    "set_banned_ip_permanent": "将临时封禁转为永久封禁，转换后该 IP 不再自动过期。",
     "clear_banned_ips": "清空全部封禁记录（不可恢复），谨慎调用。",
     "list_route_logs": "查询请求转发日志。支持 keyword/path_prefix/result_status 等筛选与 limit 分页；result_status=upstream_error 可快速定位上游异常。",
     "delete_route_logs": "删除日志：传 ids 数组删指定条目，或 delete_all=true 清空（不可恢复）。",
@@ -227,6 +233,7 @@ class AdminConsole:
         ban_manager_callback: Callable[[str, Dict], Awaitable[None]] | None = None,
         log_cleanup_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
         log_file_cleanup_callback: Callable[[], Awaitable[Dict[str, Any]]] | None = None,
+        upstream_health_callback: Callable[[], Dict[str, Any]] | None = None,
     ):
         self.config_store = config_store
         self.reload_callback = reload_callback
@@ -236,11 +243,14 @@ class AdminConsole:
         self.ban_manager_callback = ban_manager_callback
         self.log_cleanup_callback = log_cleanup_callback
         self.log_file_cleanup_callback = log_file_cleanup_callback
+        self.upstream_health_callback = upstream_health_callback
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.backup_dir = Path(__file__).resolve().parent / "data" / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         # API 密钥 last_used 节流（内存态，避免每次调用都写库）
         self._api_key_touch_at: Dict[int, float] = {}
+        # P1-2.3：API 密钥级限流（每密钥独立令牌桶，key=key_id）
+        self._api_key_rate_limiter = RateLimiter()
 
     def register(self, app: web.Application) -> None:
         self.app = app
@@ -257,6 +267,7 @@ class AdminConsole:
         app.router.add_get("/_admin/api/keys", self.list_api_keys)
         app.router.add_post("/_admin/api/keys", self.create_api_key)
         app.router.add_post("/_admin/api/keys/{key_id:\d+}/toggle", self.toggle_api_key)
+        app.router.add_put("/_admin/api/keys/{key_id:\d+}", self.update_api_key)
         app.router.add_delete("/_admin/api/keys/{key_id:\d+}", self.delete_api_key)
         app.router.add_get("/_admin/api/bootstrap", self.bootstrap)
         # API 文档自动维护：从路由表汇总全部接口（新增接口自动出现）
@@ -264,6 +275,7 @@ class AdminConsole:
         app.router.add_get("/_admin/api/route-groups", self.list_route_groups)
         app.router.add_post("/_admin/api/route-groups", self.create_route_group)
         app.router.add_put("/_admin/api/route-groups", self.update_route_group)
+        app.router.add_post("/_admin/api/route-groups/inherit-convert", self.convert_group_rules_inherit)
         app.router.add_delete("/_admin/api/route-groups", self.delete_route_group)
         app.router.add_get("/_admin/api/geoip", self.get_geoip)
         app.router.add_put("/_admin/api/geoip", self.update_geoip)
@@ -290,10 +302,26 @@ class AdminConsole:
         app.router.add_delete("/_admin/api/banned-ips/{ip:.+}", self.remove_banned_ip)
         app.router.add_post("/_admin/api/banned-ips/clear", self.clear_banned_ips)
         app.router.add_post("/_admin/api/banned-ips/{ip:.+}/extend", self.extend_banned_ip)
+        app.router.add_post("/_admin/api/banned-ips/{ip:.+}/permanent", self.set_banned_ip_permanent)
         app.router.add_get("/_admin/api/auto-ban", self.get_auto_ban_settings)
         app.router.add_put("/_admin/api/auto-ban", self.update_auto_ban_settings)
         app.router.add_get("/_admin/api/stream-guard", self.get_stream_guard_settings)
         app.router.add_put("/_admin/api/stream-guard", self.update_stream_guard_settings)
+        app.router.add_get("/_admin/api/login-protection", self.get_login_protection_settings)
+        app.router.add_put("/_admin/api/login-protection", self.update_login_protection_settings)
+        app.router.add_get("/_admin/api/audit-logs", self.list_audit_logs)
+        # P2-3.5 配置历史 / 导出导入
+        app.router.add_get("/_admin/api/settings-history/{module}", self.get_settings_history)
+        app.router.add_post("/_admin/api/settings-history/{module}/rollback", self.rollback_settings_history)
+        app.router.add_get("/_admin/api/settings-export/{module}", self.export_settings_module)
+        app.router.add_post("/_admin/api/settings-import/{module}", self.import_settings_module)
+        app.router.add_get("/_admin/api/rate-limit", self.get_rate_limit_settings)
+        app.router.add_put("/_admin/api/rate-limit", self.update_rate_limit_settings)
+        app.router.add_get("/_admin/api/cors", self.get_cors_settings)
+        app.router.add_put("/_admin/api/cors", self.update_cors_settings)
+        app.router.add_get("/_admin/api/notifications", self.get_notifications_settings)
+        app.router.add_put("/_admin/api/notifications", self.update_notifications_settings)
+        app.router.add_post("/_admin/api/notifications/test", self.test_notification)
         app.router.add_get("/_admin/api/signed-url", self.get_signed_url_settings)
         app.router.add_put("/_admin/api/signed-url", self.update_signed_url_settings)
         app.router.add_post("/_admin/api/signed-url/generate", self.generate_signed_url)
@@ -307,6 +335,7 @@ class AdminConsole:
         app.router.add_get("/_admin/api/rules/{rule_id:\\d+}", self.get_rule)
         app.router.add_put("/_admin/api/rules/{rule_id:\\d+}", self.update_rule)
         app.router.add_delete("/_admin/api/rules/{rule_id:\\d+}", self.delete_rule)
+        app.router.add_get("/_admin/api/upstream-health", self.get_upstream_health)
         app.router.add_get("/_admin/api/backup/list", self.list_backups)
         app.router.add_post("/_admin/api/backup/create", self.create_backup)
         app.router.add_get("/_admin/api/backup/download/{filename}", self.download_backup)
@@ -359,6 +388,31 @@ class AdminConsole:
         except Exception as e:
             return self._json({"error": f"获取公钥失败: {str(e)}"}, status=500)
 
+    @staticmethod
+    def _client_ip(request: web.Request) -> str:
+        """登录限流用的客户端 IP。
+
+        优先取前置代理写入的转发头（取最右一跳，与 proxy_core.extract_client_ip
+        的「右侧由己方代理逐跳追加」思路一致），其次 X-Real-IP，最后回落 TCP peer。
+        仅用于登录防爆破的限流键，不参与 IP 黑白名单等安全判定。
+        """
+        forwarded = str(request.headers.get("X-Forwarded-For", "") or "")
+        if forwarded:
+            parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if parts:
+                return parts[-1]
+        real_ip = str(request.headers.get("X-Real-IP", "") or "").strip()
+        if real_ip:
+            return real_ip.split(",")[0].strip()
+        return request.remote or ""
+
+    def _login_locked_response(self, seconds: int) -> web.Response:
+        response = self._json(
+            {"error": f"登录失败次数过多，请 {seconds} 秒后重试。"}, status=429
+        )
+        response.headers["Retry-After"] = str(seconds)
+        return response
+
     async def login(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
         config = self._get_auth_config()
@@ -396,8 +450,24 @@ class AdminConsole:
             else:
                 return self._json({"error": "RSA 密钥未配置"}, status=400)
         
+        client_ip = self._client_ip(request)
+        # 登录防爆破：先查是否处于锁定窗口，再校验凭据
+        locked_for = self.config_store.get_active_lock(client_ip, username)
+        if locked_for > 0:
+            return self._login_locked_response(locked_for)
+
         if username != config.username or password != config.password:
+            # 失败即计数，达阈值返回 429 + Retry-After（失败尝试本身不写审计表，
+            # 避免暴力破解时把审计表灌满；失败明细看 admin_login_attempts）
+            remaining = self.config_store.record_login_failure(client_ip, username)
+            if remaining > 0:
+                return self._login_locked_response(remaining)
             return self._json({"error": "账号或密码错误。"}, status=401)
+
+        # 登录成功：清空该 IP+账号 的失败计数，并记一条审计
+        self.config_store.clear_login_failures(client_ip, username)
+        request["_audit_actor"] = {"type": "session", "id": username}
+        self._record_audit(request, "login", "auth", username, f"登录成功 IP={client_ip}")
 
         response = self._json(
             {
@@ -446,9 +516,54 @@ class AdminConsole:
                 raise ValueError("有效期天数非法")
             if expires_days < 0 or expires_days > 3650:
                 raise ValueError("有效期天数须在 0（永久）~ 3650 之间")
-            created = self.config_store.create_api_key(name, readonly=readonly, expires_days=expires_days)
-            logger.info("签发 API 密钥: name=%s readonly=%s expires_days=%s prefix=%s", name, readonly, expires_days, created["key_prefix"])
+            # P1-2.3 细粒度权限
+            scopes, allowed_ips, rate_limit = self._parse_key_permissions(payload)
+            created = self.config_store.create_api_key(
+                name, readonly=readonly, expires_days=expires_days,
+                scopes=scopes, allowed_ips=allowed_ips, rate_limit=rate_limit,
+            )
+            logger.info("签发 API 密钥: name=%s readonly=%s expires_days=%s scopes=%s rate_limit=%s prefix=%s",
+                        name, readonly, expires_days, scopes or "*", rate_limit, created["key_prefix"])
             return created
+
+        return await self._run_protected(request, operation)
+
+    @staticmethod
+    def _parse_key_permissions(payload: Dict[str, Any]) -> tuple:
+        """解析 scopes / allowed_ips / rate_limit（P1-2.3）。
+
+        scopes 与 allowed_ips 接受逗号分隔字符串或列表，统一归一为逗号分隔串；
+        tag/IP 均做 trim + 去空项；rate_limit 钳制为 [0, 10000]（0=不限）。
+        """
+        def _csv(value) -> str:
+            if isinstance(value, (list, tuple)):
+                parts = [str(v) for v in value]
+            else:
+                parts = str(value or "").replace("，", ",").split(",")
+            return ",".join(p.strip() for p in parts if p.strip())
+
+        scopes = _csv(payload.get("scopes", ""))
+        allowed_ips = _csv(payload.get("allowed_ips", ""))
+        try:
+            rate_limit = int(payload.get("rate_limit", 0) or 0)
+        except (TypeError, ValueError):
+            raise ValueError("速率上限非法")
+        rate_limit = max(0, min(10000, rate_limit))
+        return scopes, allowed_ips, rate_limit
+
+    async def update_api_key(self, request: web.Request) -> web.Response:
+        """更新密钥细粒度权限（P1-2.3）：scopes / allowed_ips / rate_limit。"""
+        payload = await self._read_json(request)
+        key_id = int(request.match_info.get("key_id", "0") or 0)
+
+        def operation():
+            scopes, allowed_ips, rate_limit = self._parse_key_permissions(payload)
+            result = self.config_store.update_api_key_config(
+                key_id, {"scopes": scopes, "allowed_ips": allowed_ips, "rate_limit": rate_limit},
+            )
+            logger.info("API 密钥 %s 权限已更新: scopes=%s allowed_ips=%s rate_limit=%s",
+                        key_id, scopes or "*", allowed_ips or "*", rate_limit)
+            return result
 
         return await self._run_protected(request, operation)
 
@@ -576,6 +691,18 @@ class AdminConsole:
             self.config_store.delete_route_group(path_prefix, request_host)
             await self.reload_callback()
             return {"deleted": True, "path_prefix": path_prefix, "request_host": request_host}
+        return await self._run_protected(request, operation)
+
+    async def convert_group_rules_inherit(self, request: web.Request) -> web.Response:
+        """把组内「显式值 == 组级默认」的规则字段批量转为继承（P2-4.1 存量迁移）。"""
+        payload = await self._read_json(request)
+        async def operation():
+            path_prefix = str(payload.get("path_prefix", "")).strip()
+            request_host = str(payload.get("request_host", "")).strip()
+            fields = payload.get("fields") or None
+            result = self.config_store.convert_matching_rules_to_inherit(path_prefix, request_host, fields)
+            await self.reload_callback()
+            return result
         return await self._run_protected(request, operation)
 
     async def get_geoip(self, request: web.Request) -> web.Response:
@@ -949,6 +1076,145 @@ class AdminConsole:
                 loop.run_until_complete(self.reload_callback())
         return {"message": "单 IP 并发限制已更新", **result}
 
+    async def get_login_protection_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_login_protection_config())
+
+    async def update_login_protection_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self.config_store.update_login_protection_config(payload))
+
+    async def list_audit_logs(self, request: web.Request) -> web.Response:
+        query = request.query
+
+        def operation() -> Dict[str, Any]:
+            return self.config_store.list_audit_logs(
+                {
+                    "keyword": query.get("keyword", ""),
+                    "action": query.get("action", ""),
+                    "target_type": query.get("target_type", ""),
+                    "date_from": query.get("date_from", ""),
+                    "date_to": query.get("date_to", ""),
+                    "page": query.get("page", "1"),
+                    "limit": query.get("limit", "20"),
+                }
+            )
+
+        return await self._run_protected(request, operation)
+
+    async def get_rate_limit_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_rate_limit_config())
+
+    async def update_rate_limit_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_rate_limit_settings(payload))
+
+    def _update_rate_limit_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_rate_limit_config(payload)
+        # 限流参数缓存在 ProxyServer.config.rate_limit（handle_proxy 每请求读取），
+        # 落库后必须触发运行时重载，否则后台改动不生效
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "限流配置已更新", **result}
+
+    async def get_cors_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_cors_config())
+
+    async def update_cors_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._update_cors_settings(payload))
+
+    def _update_cors_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_cors_config(payload)
+        # CORS 配置缓存在 ProxyServer.config.cors，需触发运行时重载
+        if self.reload_callback:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.reload_callback())
+            else:
+                loop.run_until_complete(self.reload_callback())
+        return {"message": "CORS 配置已更新", **result}
+
+    async def get_settings_history(self, request: web.Request) -> web.Response:
+        module = request.match_info["module"]
+        limit = request.query.get("limit", "20")
+        return await self._run_protected(
+            request, lambda: self.config_store.list_settings_history(module, int(limit or 20))
+        )
+
+    async def rollback_settings_history(self, request: web.Request) -> web.Response:
+        module = request.match_info["module"]
+        payload = await self._read_json(request)
+
+        def _rollback() -> Dict[str, Any]:
+            try:
+                history_id = int(payload.get("history_id"))
+            except (TypeError, ValueError):
+                raise ValueError("history_id 非法")
+            result = self.config_store.rollback_settings(module, history_id)
+            if self.reload_callback:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self.reload_callback())
+                else:
+                    loop.run_until_complete(self.reload_callback())
+            return {"message": "已回滚到指定历史版本", **result}
+
+        return await self._run_protected(request, _rollback)
+
+    async def export_settings_module(self, request: web.Request) -> web.Response:
+        module = request.match_info["module"]
+        return await self._run_protected(request, lambda: self.config_store.export_module(module))
+
+    async def import_settings_module(self, request: web.Request) -> web.Response:
+        module = request.match_info["module"]
+        payload = await self._read_json(request)
+
+        def _import() -> Dict[str, Any]:
+            inner = payload.get("payload", payload)
+            result = self.config_store.import_module(module, inner)
+            if self.reload_callback:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self.reload_callback())
+                else:
+                    loop.run_until_complete(self.reload_callback())
+            return {"message": "配置导入成功", **result}
+
+        return await self._run_protected(request, _import)
+
+    # ===== Webhook / IM 告警通知（P1-2.4） =====
+
+    async def get_notifications_settings(self, request: web.Request) -> web.Response:
+        return await self._run_protected(request, lambda: self.config_store.get_notifications_config())
+
+    async def update_notifications_settings(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self.config_store.update_notifications_config(payload))
+
+    async def test_notification(self, request: web.Request) -> web.Response:
+        """向单个 Webhook 渠道发送测试事件（不落库、不影响已保存配置）。"""
+        payload = await self._read_json(request)
+
+        async def operation():
+            channel = {
+                "type": str(payload.get("type", "generic") or "generic"),
+                "name": str(payload.get("name", "") or ""),
+                "enabled": True,
+                "url": str(payload.get("url", "") or ""),
+                "secret": str(payload.get("secret", "") or ""),
+            }
+            dispatcher = NotificationDispatcher()
+            ok, message = await dispatcher.test_channel(channel)
+            return {"ok": ok, "message": message}
+
+        return await self._run_protected(request, operation)
+
     async def get_signed_url_settings(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: self.config_store.get_signed_url_config())
 
@@ -1107,6 +1373,15 @@ class AdminConsole:
             return result
         return await self._run_protected(request, operation)
 
+    async def set_banned_ip_permanent(self, request: web.Request) -> web.Response:
+        ip = request.match_info["ip"]
+        async def operation():
+            result = self.config_store.set_banned_ip_permanent(ip)
+            if self.ban_manager_callback:
+                await self.ban_manager_callback("permanent", {"ip": ip})
+            return result
+        return await self._run_protected(request, operation)
+
     async def clear_banned_ips(self, request: web.Request) -> web.Response:
         await self._read_json(request)
         async def operation():
@@ -1117,7 +1392,19 @@ class AdminConsole:
         return await self._run_protected(request, operation)
 
     async def list_rules(self, request: web.Request) -> web.Response:
-        return await self._run_protected(request, lambda: {"items": self.config_store.list_rules()})
+        def _do():
+            items = self.config_store.list_rules()
+            # P1-2.2：附带各上游健康状态，供前端规则列表渲染徽标
+            health_map = self.upstream_health_callback() if self.upstream_health_callback else {}
+            for it in items:
+                rid = it.get("id")
+                it["health"] = health_map.get(rid) or health_map.get(str(rid)) or {}
+            return {"items": items}
+        return await self._run_protected(request, _do)
+
+    async def get_upstream_health(self, request: web.Request) -> web.Response:
+        """全量上游健康快照（{rule_id: {target: healthy}}）。"""
+        return await self._run_protected(request, lambda: (self.upstream_health_callback() or {}) if self.upstream_health_callback else {})
 
     async def create_rule(self, request: web.Request) -> web.Response:
         payload = await self._read_json(request)
@@ -1512,18 +1799,189 @@ class AdminConsole:
         ).hexdigest()
         return hmac.compare_digest(signature, expected_signature)
 
+    # ===== 管理操作审计（P0-1.3） =====
+    # 写操作路径前缀 → 审计对象类型（顺序敏感：长前缀在前，避免 /logs 误吞 /log-settings）
+    _AUDIT_PATH_TARGETS = (
+        ("/_admin/api/log-settings", "log_settings"),
+        ("/_admin/api/logging-settings", "logging_settings"),
+        ("/_admin/api/log-cleanup", "route_log"),
+        ("/_admin/api/log-file-cleanup", "app_log"),
+        ("/_admin/api/ip-cache-settings", "ip_cache_settings"),
+        ("/_admin/api/dedup-settings", "dedup_settings"),
+        ("/_admin/api/auto-ban", "auto_ban_settings"),
+        ("/_admin/api/stream-guard", "stream_guard_settings"),
+        ("/_admin/api/signed-url", "signed_url_settings"),
+        ("/_admin/api/redirect-signing", "redirect_signing_settings"),
+        ("/_admin/api/route-groups", "route_group"),
+        ("/_admin/api/banned-ips", "banned_ip"),
+        ("/_admin/api/rules", "rule"),
+        ("/_admin/api/geoip", "geoip"),
+        ("/_admin/api/keys", "api_key"),
+        ("/_admin/api/notifications", "notifications_settings"),
+        ("/_admin/api/backup", "backup"),
+        ("/_admin/api/email", "email_settings"),
+        ("/_admin/api/logs", "route_log"),
+    )
+    # 审计动作按 HTTP 方法归类；GET/HEAD/OPTIONS 属读操作，不审计
+    _AUDIT_METHOD_ACTIONS = {"POST": "create", "PUT": "update", "PATCH": "update", "DELETE": "delete"}
+
+    # ===== API 密钥端点 tag 注册表（P1-2.3）=====
+    # 路径前缀 → scope tag；未命中回落 "system"。scopes 为空的密钥不受限（全兼容）。
+    _API_SCOPE_ROUTES: Tuple[Tuple[str, str], ...] = (
+        ("/_admin/api/route-groups", "routing"),
+        ("/_admin/api/upstream-health", "routing"),
+        ("/_admin/api/rules", "routing"),
+        ("/_admin/api/geoip", "geo"),
+        ("/_admin/api/logging-settings", "logs"),
+        ("/_admin/api/log-settings", "logs"),
+        ("/_admin/api/log-file-cleanup", "logs"),
+        ("/_admin/api/log-cleanup", "logs"),
+        ("/_admin/api/app-logs", "logs"),
+        ("/_admin/api/logs", "logs"),
+        ("/_admin/api/hotlink", "security"),
+        ("/_admin/api/banned-ips", "security"),
+        ("/_admin/api/auto-ban", "security"),
+        ("/_admin/api/stream-guard", "security"),
+        ("/_admin/api/login-protection", "security"),
+        ("/_admin/api/audit-logs", "security"),
+        ("/_admin/api/redirect-signing", "signing"),
+        ("/_admin/api/signed-url", "signing"),
+        ("/_admin/api/email", "email"),
+        ("/_admin/api/backup", "backup"),
+        ("/_admin/api/doc", "apidoc"),
+        ("/_admin/api/keys", "apikeys"),
+    )
+
+    @classmethod
+    def _resolve_api_scope_tag(cls, path: str) -> str:
+        for prefix, tag in cls._API_SCOPE_ROUTES:
+            if path.startswith(prefix):
+                return tag
+        return "system"
+
+    @staticmethod
+    def _resolve_audit_target(path: str) -> str:
+        for prefix, target in AdminConsole._AUDIT_PATH_TARGETS:
+            if path.startswith(prefix):
+                return target
+        return ""
+
+    @staticmethod
+    def _resolve_audit_target_id(request: web.Request) -> str:
+        for value in request.match_info.values():
+            if value:
+                return str(value)
+        return ""
+
+    def _session_username(self, request: web.Request) -> str:
+        """从已校验的会话 Cookie 解出登录用户名。"""
+        if not self._is_authenticated(request):
+            return ""
+        config = self._get_auth_config()
+        token = request.cookies.get(config.cookie_name, "") or ""
+        return token.split("|", 1)[0]
+
+    def _record_audit(
+        self,
+        request: web.Request,
+        action: str,
+        target_type: str,
+        target_id: str = "",
+        detail: str = "",
+    ) -> None:
+        """落一条管理操作审计（异步写库，失败绝不阻断业务）。"""
+        actor = request.get("_audit_actor") or {"type": "anonymous", "id": ""}
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(
+                None,
+                self.config_store.insert_audit_log,
+                actor.get("type", ""),
+                actor.get("id", ""),
+                action,
+                target_type,
+                str(target_id or ""),
+                str(detail or "")[:500],
+            )
+        except Exception:  # noqa: BLE001 - 审计失败不影响主流程
+            pass
+
     async def _run_protected(self, request: web.Request, operation, status: int = 200) -> web.Response:
-        if self._is_auth_enabled() and not self._is_authenticated(request):
-            # Cookie 会话无效时回落校验 API 密钥（仅 /_admin/api/*；HTML 页面不走这里）
-            key_row = self._api_key_row(request)
-            if key_row is None:
-                return self._json({"error": "未登录、登录已失效或 API 密钥无效。"}, status=401)
-            if key_row["readonly"] and request.method not in ("GET", "HEAD", "OPTIONS"):
-                return self._json({"error": "只读 API 密钥不允许执行写操作。"}, status=403)
-            if request.path.startswith("/_admin/api/keys"):
-                return self._json({"error": "API 密钥不允许管理 API 密钥，请使用浏览器会话操作。"}, status=403)
-            self._touch_api_key_throttled(int(key_row["id"]))
-        return await self._run(operation, status=status)
+        actor: Dict[str, str] = {"type": "anonymous", "id": ""}
+        if self._is_auth_enabled():
+            if self._is_authenticated(request):
+                actor = {"type": "session", "id": self._session_username(request)}
+            else:
+                # Cookie 会话无效时回落校验 API 密钥（仅 /_admin/api/*；HTML 页面不走这里）
+                key_row = self._api_key_row(request)
+                if key_row is None:
+                    return self._json({"error": "未登录、登录已失效或 API 密钥无效。"}, status=401)
+                if key_row["readonly"] and request.method not in ("GET", "HEAD", "OPTIONS"):
+                    return self._json({"error": "只读 API 密钥不允许执行写操作。"}, status=403)
+                if request.path.startswith("/_admin/api/keys"):
+                    return self._json({"error": "API 密钥不允许管理 API 密钥，请使用浏览器会话操作。"}, status=403)
+                # ===== P1-2.3 细粒度权限：绑定 IP → 端点 scope → 密钥级限流 =====
+                client_ip = self._client_ip(request)
+                allowed_ips = str(key_row.get("allowed_ips", "") or "").strip()
+                if allowed_ips:
+                    allowed = {p.strip() for p in allowed_ips.replace("，", ",").split(",") if p.strip()}
+                    if client_ip not in allowed:
+                        logger.warning("API 密钥 IP 越权拒绝: key=%s ip=%s allowed=%s", key_row.get("name"), client_ip, allowed_ips)
+                        return self._json({"error": f"API 密钥不允许来自 {client_ip} 的访问。"}, status=403)
+                scopes = str(key_row.get("scopes", "") or "").strip()
+                if scopes:
+                    tag = self._resolve_api_scope_tag(request.path)
+                    allowed_scopes = {p.strip() for p in scopes.replace("，", ",").split(",") if p.strip()}
+                    if tag not in allowed_scopes:
+                        logger.warning("API 密钥 scope 越权拒绝: key=%s path=%s tag=%s scopes=%s",
+                                       key_row.get("name"), request.path, tag, scopes)
+                        return self._json({"error": f"API 密钥缺少端点权限（{tag}）。"}, status=403)
+                rate_limit = int(key_row.get("rate_limit", 0) or 0)
+                if rate_limit > 0:
+                    ok, retry_after = self._api_key_rate_limiter.allow(
+                        f"key:{key_row['id']}", float(rate_limit), max(1, rate_limit),
+                    )
+                    if not ok:
+                        resp = self._json({"error": "API 密钥请求频率超限，请稍后再试。"}, status=429)
+                        resp.headers["Retry-After"] = str(int(retry_after) + 1)
+                        return resp
+                self._touch_api_key_throttled(int(key_row["id"]))
+                actor = {"type": "apikey", "id": str(key_row.get("name", "") or "")}
+        request["_audit_actor"] = actor
+
+        # 写操作统一审计：只记方法/路径/对象，不记请求体（避免密码等敏感字段落库）
+        action = self._AUDIT_METHOD_ACTIONS.get(request.method)
+        target_type = self._resolve_audit_target(request.path)
+        if action and target_type:
+            self._record_audit(
+                request,
+                action,
+                target_type,
+                self._resolve_audit_target_id(request),
+                f"{request.method} {request.path}",
+            )
+        resp = await self._run(operation, status=status)
+        # P2-3.5 配置变更历史：settings 模块的写操作成功后自动落快照（失败不影响响应）
+        module = self._resolve_history_module(request.path)
+        if module and resp.status == 200 and request.method in ("POST", "PUT"):
+            try:
+                payload = json.loads(resp.body) if resp.body else {}
+                if isinstance(payload, dict):
+                    self.config_store.record_settings_history(module, payload, actor.get("id", ""))
+            except Exception as exc:
+                logger.debug("配置历史记录失败: %s", exc)
+        return resp
+
+    @staticmethod
+    def _resolve_history_module(path: str) -> str:
+        """从 /_admin/api/<module> 提取设置模块名；非设置模块返回空串。"""
+        prefix = "/_admin/api/"
+        if not path.startswith(prefix):
+            return ""
+        module = path[len(prefix):].strip("/").split("/")[0]
+        if module in ConfigStore._SETTINGS_MODULE_METHODS:
+            return module
+        return ""
 
     async def _run(self, operation, status: int = 200) -> web.Response:
         try:

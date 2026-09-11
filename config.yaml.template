@@ -54,6 +54,14 @@ auto_ban:
   whitelist: ""
   email_on_ban: false
 
+# 主动速率限制（阶段二 P1-2.1）：封禁前的柔性节流，避免误封正常突发。
+# 注意：后台「系统设置」可改，此处仅作默认值；rps 为令牌桶填充速率，burst 为瞬时突发容量。
+rate_limit:
+  enabled: false
+  requests_per_second: 10
+  burst: 20
+  per_ip: true
+
 email:
   enabled: false
   smtp_host: ""

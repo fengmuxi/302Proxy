@@ -32,9 +32,12 @@ class AutoBanMonitor:
         ban_callback: Callable[[str, str], Any],
         email_config: Optional[EmailConfig] = None,
         config_store: Optional[ConfigStore] = None,
+        notify_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
         self.config = config
         self.ban_callback = ban_callback
+        # P1-2.4：Webhook/IM 告警回调（fire-and-forget，由调用方保证不抛异常）
+        self.notify_callback = notify_callback
         self._email_config = email_config
         self._email_notifier: Optional[EmailNotifier] = EmailNotifier(email_config) if email_config else None
         self._config_store = config_store
@@ -202,6 +205,20 @@ class AutoBanMonitor:
                 )
             except Exception as exc:
                 logger.error("自动封禁邮件提醒发送失败: %s", exc)
+        # P1-2.4：Webhook/IM 告警（与邮件独立，失败不影响封禁主流程）
+        if self.notify_callback:
+            try:
+                result = self.notify_callback({
+                    "type": "auto_ban",
+                    "ip": ip,
+                    "reason": reason,
+                    "duration": self.config.ban_duration_seconds,
+                    "source": "auto_ban_monitor",
+                })
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.error("自动封禁 Webhook 告警失败: %s", exc)
 
     async def start_cleanup_loop(self) -> None:
         while True:

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Proxy Control Center</title>
   <link rel="icon" type="image/svg+xml" href="/_admin/static/favicon.svg">
-  <link rel="stylesheet" href="/_admin/static/admin.css?v=2026090202">
+  <link rel="stylesheet" href="/_admin/static/admin.css?v=2026090801">
 </head>
 <body>
 <div class="app">
@@ -22,6 +22,7 @@
       <div class="nav-item" data-page="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>安全与封禁</span><span class="nav-count" id="navCountSecurity">0</span></div>
       <div class="nav-item" data-page="geo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>IP 定位</span></div>
       <div class="nav-item" data-page="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>日志与审计</span></div>
+      <div class="nav-item" data-page="audit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span>审计日志</span></div>
       <div class="nav-group-label">系统运维</div>
       <div class="nav-item" data-page="backup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg><span>备份与恢复</span><span class="nav-count" id="navCountBackup">0</span></div>
       <div class="nav-item" data-page="email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg><span>邮件提醒</span></div>
@@ -46,8 +47,9 @@
     <div class="page" id="page-overview">
       <div class="grid kpi-grid">
         <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--brand)"></span>今日请求</div><div class="kpi-value" id="kpiTotal">—</div><div class="kpi-delta" id="kpiTotalDelta">累计总请求数</div></div>
-        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--info)"></span>302 跟随</div><div class="kpi-value" id="kpiRedirect">—</div><div class="kpi-delta" id="kpiRedirectDelta">命中重定向</div></div>
-        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--danger)"></span>拦截请求</div><div class="kpi-value" id="kpiFailed">—</div><div class="kpi-delta" id="kpiFailedDelta">失败 / 拦截</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--info)"></span>302 跳转</div><div class="kpi-value" id="kpiRedirect">—</div><div class="kpi-delta" id="kpiRedirectDelta">今日 · A 模式客户端直连上游</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:linear-gradient(90deg,var(--brand),var(--info))"></span>本地代理</div><div class="kpi-value" id="kpiStream">—</div><div class="kpi-delta" id="kpiStreamDelta">今日 · B 模式媒体经本机穿流</div></div>
+        <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--danger)"></span>拦截请求</div><div class="kpi-value" id="kpiFailed">—</div><div class="kpi-delta" id="kpiFailedDelta">今日 · 失败 / 拦截</div></div>
         <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:var(--ok)"></span>平均延迟</div><div class="kpi-value" id="kpiLatency">—</div><div class="kpi-delta" id="kpiLatencyDelta">近 24 小时</div></div>
         <div class="card kpi"><div class="kpi-label"><span class="dot" style="background:linear-gradient(90deg,var(--info),var(--ok))"></span>网络吞吐</div><div class="kpi-value" id="kpiNet">—</div><div class="kpi-delta" id="kpiNetDelta">服务器网卡收发速率</div></div>
       </div>
@@ -55,7 +57,7 @@
         <div class="card">
           <div class="panel-head"><div class="panel-title">请求吞吐趋势 · 近 24 小时</div><div class="panel-head-actions"><span class="pill pill-neutral">按小时</span><button class="btn btn-sm" id="ovRefreshBtn">刷新</button></div></div>
           <div class="panel-body" id="trendChart"></div>
-          <div class="chart-legend" style="padding:0 16px 16px;font-size:12px;color:var(--text-2);display:flex;gap:16px"><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--brand)"></span>总请求</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--info)"></span>302 跟随</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--danger)"></span>拦截</span></div>
+          <div class="chart-legend" style="padding:0 16px 16px;font-size:12px;color:var(--text-2);display:flex;gap:16px"><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--brand)"></span>总请求</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--info)"></span>302 跳转</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--ok)"></span>本地代理</span><span style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:var(--danger)"></span>拦截</span></div>
         </div>
         <div class="card">
           <div class="panel-head"><div class="panel-title">服务健康</div><span class="pill pill-ok" id="healthPill">正常</span></div>
@@ -136,7 +138,7 @@
             <div class="pagination" id="banPagination"></div>
             <div class="log-actions" style="margin-top:12px">
               <span class="hint">每页</span>
-              <select id="ban_page_size" class="input inline" style="min-width:auto;max-width:none;width:auto;padding:5px 30px 5px 10px"><option value="10">10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select>
+              <select id="ban_page_size" class="input inline" style="min-width:auto;max-width:none;width:auto;padding:5px 30px 5px 10px"><option value="5" selected>5</option><option value="10">10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select>
               <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="ban_auto_refresh_enabled"> 自动刷新</label>
               <input class="input inline" id="ban_auto_refresh_interval" type="number" min="1" value="5" style="width:70px;padding:5px 8px"> <span class="hint">秒</span>
               <span class="auto-refresh-status" id="ban_auto_refresh_status"></span>
@@ -231,6 +233,7 @@
           <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="route-log-select-all"> 全选</label>
           <button class="btn btn-sm btn-danger" id="route-log-delete-selected-btn">删除选中</button>
           <button class="btn btn-sm" id="route-log-delete-all-btn">清空全部</button>
+          <button class="btn btn-sm" id="route-log-export-btn" title="按当前筛选条件导出全部转发记录（CSV，路径/URL 已解码）">导出 CSV</button>
           <span style="flex:1"></span>
           <button class="btn btn-sm" id="route-log-tools-btn" title="日志保留策略与盗链监控">设置与监控</button>
           <label class="hint" style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="log_auto_refresh_enabled"> 自动刷新</label>
@@ -281,9 +284,77 @@
       </div>
     </div>
 
+    <!-- ===== 审计日志（管理操作） ===== -->
+    <div class="page" id="page-audit" hidden>
+      <div class="page-head">
+        <div><h1 class="page-title">审计日志</h1><p class="page-desc">记录后台所有写操作（规则 / 封禁 / 密钥 / 配置 / 备份等）与登录行为，含操作者、动作与对象，便于追溯「谁在什么时候改了什么」。只读查询不记录。</p></div>
+        <div class="page-actions"><button class="btn btn-sm" id="auditRefreshBtn">刷新</button></div>
+      </div>
+
+      <form class="toolbar" id="auditFilterForm">
+        <span class="filter-tag">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          筛选条件
+        </span>
+        <div class="filter-item">
+          <span class="fi-label">关键词</span>
+          <input class="input" id="auditKeyword" placeholder="操作者 / 对象 / 详情…">
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">动作</span>
+          <select id="auditAction"><option value="">全部</option><option value="create">新增</option><option value="update">修改</option><option value="delete">删除</option><option value="login">登录</option></select>
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">对象类型</span>
+          <select id="auditTargetType">
+            <option value="">全部</option>
+            <option value="rule">转发规则</option>
+            <option value="route_group">路由组</option>
+            <option value="banned_ip">封禁 IP</option>
+            <option value="api_key">API 密钥</option>
+            <option value="backup">备份</option>
+            <option value="email_settings">邮件配置</option>
+            <option value="log_settings">日志设置</option>
+            <option value="logging_settings">运行日志设置</option>
+            <option value="ip_cache_settings">结果缓存</option>
+            <option value="dedup_settings">请求去重</option>
+            <option value="auto_ban_settings">自动封禁</option>
+            <option value="stream_guard_settings">并发限制</option>
+            <option value="signed_url_settings">签名 URL</option>
+            <option value="redirect_signing_settings">302 加签</option>
+            <option value="geoip">IP 定位</option>
+            <option value="route_log">请求日志</option>
+            <option value="app_log">应用日志</option>
+            <option value="auth">登录</option>
+          </select>
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">开始日期</span>
+          <input class="input" id="auditDateFrom" type="datetime-local" style="min-width:180px">
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">结束日期</span>
+          <input class="input" id="auditDateTo" type="datetime-local" style="min-width:180px">
+        </div>
+        <div class="filter-item">
+          <span class="fi-label">每页</span>
+          <select id="auditPageSize"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select>
+        </div>
+        <button class="btn btn-primary btn-sm" type="submit">查询</button>
+        <button class="btn btn-sm" type="button" id="auditResetBtn">重置</button>
+      </form>
+
+      <div class="log-actions">
+        <span class="hint" id="auditTotalCount">共 0 条</span>
+      </div>
+
+      <div id="auditListBody"></div>
+      <div class="pagination" id="auditPagination"></div>
+    </div>
+
     <!-- ===== System ===== -->
     <div class="page" id="page-system" hidden>
-      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">请求结果缓存、请求去重、单 IP 并发限制等运行时配置。备份恢复、邮件提醒与加签防护已独立为单独菜单。</p></div></div>
+      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">请求结果缓存、请求去重、单 IP 并发限制、登录防爆破等运行时配置。备份恢复、邮件提醒与加签防护已独立为单独菜单。</p></div></div>
       <div class="grid cols-2">
         <div class="card">
           <div class="panel-head"><div class="panel-title">请求结果缓存 (ip_result_cache)</div><div class="panel-head-actions"><span class="pill pill-ok" id="ipCachePill">启用</span><button class="btn btn-sm" id="editIpCacheBtn">编辑</button></div></div>
@@ -304,6 +375,58 @@
           <div class="panel-head"><div class="panel-title">单 IP 并发限制 (stream_guard)</div><span class="pill pill-neutral" id="streamGuardPill">未启用</span></div>
           <div class="panel-body" id="streamGuardBody"></div>
           <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <!-- 状态隐藏域同样放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML -->
+          <input type="hidden" id="login_max_attempts" value="5">
+          <input type="hidden" id="login_lockout_minutes" value="15">
+          <input type="hidden" id="login_cooldown_seconds" value="0">
+          <div class="panel-head"><div class="panel-title">登录防爆破 (login_protection)</div><span class="pill pill-neutral" id="loginProtectionPill">未配置</span></div>
+          <div class="panel-body" id="loginProtectionBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editLoginProtectionBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <input type="hidden" id="rate_limit_enabled" value="0">
+          <input type="hidden" id="rate_limit_rps" value="10">
+          <input type="hidden" id="rate_limit_burst" value="20">
+          <input type="hidden" id="rate_limit_per_ip" value="1">
+          <div class="panel-head"><div class="panel-title">主动速率限制 (rate_limit)</div><span class="pill pill-neutral" id="rateLimitPill">未启用</span></div>
+          <div class="panel-body" id="rateLimitBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editRateLimitBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <input type="hidden" id="cors_enabled" value="0">
+          <input type="hidden" id="cors_allowed_origins" value="">
+          <input type="hidden" id="cors_allowed_methods" value="GET,HEAD,OPTIONS">
+          <input type="hidden" id="cors_allow_credentials" value="0">
+          <input type="hidden" id="cors_max_age" value="600">
+          <div class="panel-head"><div class="panel-title">跨域资源共享 (CORS)</div><span class="pill pill-neutral" id="corsPill">未启用</span></div>
+          <div class="panel-body" id="corsBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editCorsBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <input type="hidden" id="settings_history_module" value="rate-limit">
+          <div class="panel-head"><div class="panel-title">配置历史 / 导出导入</div><span class="pill pill-neutral">P2</span></div>
+          <div class="panel-body" id="settingsHistoryBody"></div>
+          <div class="panel-body" style="padding-top:0;display:flex;gap:6px;flex-wrap:wrap">
+            <select class="input" id="settingsModuleSelect" style="max-width:200px">
+              <option value="rate-limit">限流</option>
+              <option value="cors">CORS</option>
+              <option value="notifications">Webhook 通知</option>
+              <option value="signed-url">签名 URL</option>
+              <option value="redirect-signing">302 加签改写</option>
+              <option value="auto-ban">自动封禁</option>
+              <option value="email">邮件告警</option>
+              <option value="ip-cache">IP 结果缓存</option>
+              <option value="dedup">请求去重</option>
+              <option value="stream-guard">单 IP 并发</option>
+              <option value="login-protection">登录防爆破</option>
+              <option value="remote-config">远程配置源</option>
+            </select>
+            <button class="btn btn-sm" id="viewHistoryBtn">查看历史</button>
+            <button class="btn btn-sm" id="exportModuleBtn">导出</button>
+            <button class="btn btn-sm" id="importModuleBtn">导入</button>
+          </div>
         </div>
       </div>
     </div>
@@ -449,6 +572,24 @@
       <div class="card">
         <div class="panel-head"><div class="panel-title">告警阈值</div><span class="pill pill-neutral" id="emailAlertPill">—</span></div>
         <div class="panel-body" id="emailAlertBody"></div>
+      </div>
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">Webhook / IM 告警（P1-2.4）</div><span class="pill pill-neutral" id="notifyPill">未启用</span></div>
+        <input type="hidden" id="notify_enabled" value="0">
+        <div class="panel-body" id="notifyBody"></div>
+        <div class="panel-body" style="padding-top:0">
+          <button class="btn btn-primary btn-sm" id="editNotifyBtn">编辑配置</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">Webhook 测试</div></div>
+        <div class="panel-body" style="font-size:12px;color:var(--text-3);line-height:1.7">按当前已保存的渠道配置逐个发送测试事件；若刚修改尚未保存，请先保存再测试。</div>
+        <div class="panel-body" style="padding-top:0">
+          <button class="btn btn-primary btn-sm" id="testNotifyBtn">发送 Webhook 测试</button>
+          <div id="notifyTestResult" style="margin-top:8px;font-size:12px;line-height:1.7"></div>
+        </div>
       </div>
     </div>
     <div class="grid" style="margin-top:16px">

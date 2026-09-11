@@ -434,6 +434,10 @@ class ProxyRequestHandler:
         # 直接用 id 换取该快照继续转发（免重新规则匹配），规则被删/改不影响已签发链接。
         # 上限与 TTL 见 _signed_cache_prune；进程内缓存，单 worker 足够。
         self._signed_cache: Dict[str, Dict[str, object]] = {}
+        # P1-2.2 上游健康监控（由 ProxyServer 注入；None 表示未启用多上游/健康检查）
+        self.upstream_health: Optional["UpstreamHealthMonitor"] = None
+        # P2-3.3 每规则 SSL 上下文缓存：key=(cert, key, verify_mode)，避免每请求重建
+        self._rule_ssl_cache: Dict[Tuple[str, str, int], Optional[Union[bool, ssl.SSLContext]]] = {}
         self._refresh_redirect_handler()
 
     def _refresh_redirect_handler(self) -> None:
@@ -809,8 +813,20 @@ class ProxyRequestHandler:
         matches = self.find_matching_rules(path, request_host=request_host)
         return matches[0] if matches else None
 
+    def _resolve_target_base(self, rule: ProxyRule) -> str:
+        """多上游场景下的目标基地址选择（P1-2.2）。
+
+        若健康监控可用且规则有多个上游，在健康目标间轮询；否则回落单一 target_url。
+        单上游/未启用监控时等同于旧行为。
+        """
+        if self.upstream_health is not None and rule.rule_id is not None:
+            chosen = self.upstream_health.pick_target(rule.rule_id)
+            if chosen:
+                return chosen
+        return rule.target_url
+
     def build_target_url(self, path: str, rule: ProxyRule, query_string: Optional[str] = None) -> str:
-        parsed_target = urlparse(rule.target_url)
+        parsed_target = urlparse(self._resolve_target_base(rule))
         # 正则改写在 strip_prefix 之前执行，命中的 path 先被 re.sub 改写
         effective_path = path
         if rule.path_rewrite_pattern:
@@ -868,6 +884,61 @@ class ProxyRequestHandler:
         if not self.config.verify_upstream_ssl:
             return False
         return _make_verify_ssl_context(self.config.upstream_ca_bundle)
+
+    def _rule_ssl_mode(self, rule: Optional[ProxyRule]) -> Optional[Union[bool, ssl.SSLContext]]:
+        """按规则解析上游 ssl 参数（P2-3.3）。
+
+        - upstream_verify_ssl=0：强制关闭校验（规则显式允许不安全上游）
+        - upstream_verify_ssl=1：强制校验（即使全局关闭，按全局 CA bundle 构造）
+        - -1 / 其他：继承全局 _ssl_mode()
+        - 配置了 client_cert/client_key 时构造 mTLS 上下文（同样受三态影响：
+          关闭校验时基于信任所有证书的上下文附客户端证书）
+
+        Args:
+            rule: 命中的代理规则；None 时等价于全局 _ssl_mode()。
+
+        Returns:
+            aiohttp session/request 的 ssl 参数：False / SSLContext / None。
+        """
+        if rule is None:
+            return self._ssl_mode()
+        mode = int(rule.upstream_verify_ssl if rule.upstream_verify_ssl is not None else -1)
+        has_mtls = bool(rule.client_cert or rule.client_key)
+        if not has_mtls and mode not in (0, 1):
+            return self._ssl_mode()
+        cache_key = (rule.client_cert or "", rule.client_key or "", mode)
+        if cache_key in self._rule_ssl_cache:
+            return self._rule_ssl_cache[cache_key]
+        ctx: Optional[Union[bool, ssl.SSLContext]]
+        if mode == 0:
+            # 关闭校验：ssl=False（有 mTLS 证书时也不能用 False，需自签上下文；
+            # aiohttp 对 False 与客户端证书互斥，此时退化为不校验的上下文）
+            if has_mtls:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                try:
+                    ctx.load_cert_chain(rule.client_cert, rule.client_key or None)
+                except (ssl.SSLError, FileNotFoundError, OSError) as exc:
+                    logger.warning("规则 %s mTLS 证书加载失败，回落关闭校验: %s", rule.rule_id, exc)
+                    ctx = False
+            else:
+                ctx = False
+        else:
+            base = _make_verify_ssl_context(self.config.upstream_ca_bundle)
+            if base is None:
+                ctx = None
+            elif has_mtls:
+                try:
+                    base.load_cert_chain(rule.client_cert, rule.client_key or None)
+                    ctx = base
+                except (ssl.SSLError, FileNotFoundError, OSError) as exc:
+                    logger.warning("规则 %s mTLS 证书加载失败，回落默认校验: %s", rule.rule_id, exc)
+                    ctx = base
+            else:
+                ctx = base
+        self._rule_ssl_cache[cache_key] = ctx
+        return ctx
 
     def _should_stream_by_content(self, response_headers: Dict[str, str], status: int) -> bool:
         """标准模式下按响应头判断是否应升级为流式。
@@ -1876,10 +1947,14 @@ class ProxyRequestHandler:
         client_ip = route_decision.client_ip or client_host
 
         session = await self.get_stream_session()
-        ssl_mode = self._ssl_mode()
+        ssl_mode = self._rule_ssl_mode(rule)
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+        # P2-3.3 每规则自定义请求头：最后注入，优先级高于同名转发头
+        _injected = rule.injected_headers()
+        if _injected:
+            request_headers.update(_injected)
 
         # 缓存命中路径与正常路径的流式续传都需要 redirect_handler，提前构造
         redirect_handler = RedirectHandler(
@@ -1887,7 +1962,7 @@ class ProxyRequestHandler:
             timeout=rule.timeout,
             stream_timeout=self.config.streaming.stream_timeout,
             follow_redirects=(False if force_external_redirect else rule.follow_redirects),
-            ssl=self._ssl_mode(),
+            ssl=self._rule_ssl_mode(rule),
             session_provider=self.get_stream_session,
         )
 
@@ -2351,10 +2426,14 @@ class ProxyRequestHandler:
         client_ip = route_decision.client_ip or client_host
 
         session = await self.get_session()
-        ssl_mode = self._ssl_mode()
+        ssl_mode = self._rule_ssl_mode(rule)
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+        # P2-3.3 每规则自定义请求头：最后注入，优先级高于同名转发头
+        _injected = rule.injected_headers()
+        if _injected:
+            request_headers.update(_injected)
 
         if self.ip_cache:
             cached = await self.ip_cache.get(client_ip, target_url)
@@ -2397,7 +2476,7 @@ class ProxyRequestHandler:
             max_redirects=rule.max_redirects,
             timeout=rule.timeout,
             follow_redirects=(False if force_external_redirect else rule.follow_redirects),
-            ssl=self._ssl_mode(),
+            ssl=self._rule_ssl_mode(rule),
             session_provider=self.get_session,
         )
 

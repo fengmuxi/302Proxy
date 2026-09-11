@@ -189,6 +189,15 @@ function fieldRow(f, values) {
   if (f.type === "note") {
     return `<div class="form-note">${esc(f.text)}</div>`;
   }
+  // 三段式开关（segmented control）：三个互斥选项内联平铺，替代三态下拉，
+  // 取值存 data-seg（字符串，与 select 同约定："" / "1" / "0" / "inherit" 等）
+  if (f.type === "seg") {
+    const cur = String(raw == null ? "" : raw);
+    const btns = (f.options || []).map((o) =>
+      `<button type="button" class="seg-btn${String(o.value) === cur ? " on" : ""}" data-val="${esc(o.value)}">${esc(o.label)}</button>`
+    ).join("");
+    return `<div class="form-field switch-row"><div class="fr-text"><label>${esc(f.label)}</label>${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ""}</div><div class="seg" data-fkey="${esc(f.key)}" data-seg="${esc(cur)}" role="radiogroup">${btns}</div></div>`;
+  }
   if (f.type === "switch") {
     return `<div class="form-field switch-row"><div class="fr-text"><label>${esc(f.label)}</label>${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ""}</div><div class="switch ${raw ? "on" : ""}" data-fkey="${esc(f.key)}" role="switch" tabindex="0"></div></div>`;
   }
@@ -206,14 +215,39 @@ function fieldRow(f, values) {
 }
 
 export function openFormModal(opts) {
-  const { title, sub, schema, values = {}, onSave, size, validate } = opts;
+  const { title, sub, schema, values = {}, onSave, size, validate, autoClose = true } = opts;
   const modalEl = document.getElementById("modal");
   const mask = document.getElementById("modalMask");
   if (!modalEl || !mask) return;
   modalEl.style.width = size ? `min(${size}px,100%)` : "";
+  // 分组渲染：无 group 的字段留在主区；带 group 的收进 <details> 折叠组（高级选项）
+  // 收起的 details 内容仍在 DOM，data-fkey 收集 / dependsOn 联动均不受影响
+  const mainFields = [];
+  const groups = [];
+  schema.forEach((f) => {
+    if (!f.group) { mainFields.push(f); return; }
+    let g = groups.find((x) => x.name === f.group);
+    if (!g) { g = { name: f.group, fields: [], open: !!f.groupOpen }; groups.push(g); }
+    else if (f.groupOpen) g.open = true;
+    g.fields.push(f);
+  });
+  // 脏值智能展开：组内有文本/文本域已填值，或「默认关闭的开关」被打开时自动展开，
+  // 编辑已配置过高级项的规则时无需逐组翻找；switch 声明 default:true 的不视为脏。
+  // 字段可声明 groupOpen:true 强制该组默认展开（其余组仍按脏值判定）。
+  const groupDirty = (g) => g.fields.some((f) => {
+    const raw = (values && values[f.key] != null) ? values[f.key] : (f.default != null ? f.default : "");
+    if (f.type === "switch") return Boolean(raw) && !f.default;
+    if (f.type === "text" || f.type === "textarea" || f.type === "json") return String(raw == null ? "" : raw).trim() !== "";
+    return false;
+  });
+  const groupsHtml = groups.map((g) => `
+    <details class="form-adv"${g.open || groupDirty(g) ? " open" : ""}>
+      <summary>${escapeHtml(g.name)}<span class="form-adv-count">${g.fields.length} 项</span></summary>
+      <div class="form-adv-body">${g.fields.map((f) => fieldRow(f, values)).join("")}</div>
+    </details>`).join("");
   modalEl.innerHTML = `
     <div class="modal-head"><div><div class="modal-title">${escapeHtml(title)}</div>${sub ? `<div class="modal-sub">${escapeHtml(sub)}</div>` : ""}</div><button class="icon-btn" id="modalClose">✕</button></div>
-    <div class="modal-body">${schema.map((f) => fieldRow(f, values)).join("")}</div>
+    <div class="modal-body">${mainFields.map((f) => fieldRow(f, values)).join("")}${groupsHtml}</div>
     <div class="modal-foot"><button class="btn" id="modalCancel">取消</button><button class="btn btn-primary" id="modalSave">保存</button></div>`;
   // 防累积：innerHTML 重建后，上一轮弹窗的下拉弹层已成孤儿（其 select 已断连），立即清掉
   document.querySelectorAll(".cs-pop").forEach((p) => {
@@ -223,6 +257,16 @@ export function openFormModal(opts) {
     const toggle = () => s.classList.toggle("on");
     s.addEventListener("click", toggle);
     s.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+  });
+  // 三段式开关：点击选项即选中（data-seg 记录当前值，保存时读取）
+  modalEl.querySelectorAll(".seg[data-fkey]").forEach((s) => {
+    s.addEventListener("click", (e) => {
+      const btn = e.target.closest(".seg-btn");
+      if (!btn || !s.contains(btn)) return;
+      s.dataset.seg = btn.dataset.val;
+      s.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("on", b === btn));
+      if (typeof applyDeps === "function") applyDeps();
+    });
   });
   // 弹窗内 select 统一升级为自定义下拉（展开面板可脱离 modal 裁剪）
   modalEl.querySelectorAll(".modal-body select[data-fkey]").forEach((s) => upgradeSelect(s));
@@ -236,7 +280,8 @@ export function openFormModal(opts) {
     depends.forEach((f) => {
       const dep = modalEl.querySelector(`[data-fkey="${f.dependsOn.field}"]`);
       if (!dep) return;
-      const val = dep.tagName === "SELECT" ? dep.value : dep.value;
+      // seg（三段式开关）值存 data-seg，其余取 element.value
+      const val = dep.classList.contains("seg") ? dep.dataset.seg : dep.value;
       const visible = String(val) === String(f.dependsOn.value);
       const row = document.getElementById(`form-field-${f.key}`);
       if (row) row.style.display = visible ? "" : "none";
@@ -255,7 +300,8 @@ export function openFormModal(opts) {
     const out = {};
     modalEl.querySelectorAll("[data-fkey]").forEach((x) => {
       const k = x.dataset.fkey;
-      if (x.classList.contains("switch")) out[k] = x.classList.contains("on");
+      if (x.classList.contains("seg")) out[k] = x.dataset.seg;
+      else if (x.classList.contains("switch")) out[k] = x.classList.contains("on");
       else if (x.tagName === "SELECT") out[k] = x.value;
       else if (x.type === "number") out[k] = x.value === "" ? null : Number(x.value);
       else out[k] = x.value;
@@ -265,7 +311,9 @@ export function openFormModal(opts) {
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "保存中…"; }
     try {
       await onSave(out);
-      closeModal();
+      // autoClose=false：保存成功后不自动关窗，由 onSave 接管后续展示
+      // （如 API 密钥签发的「明文仅此一次」弹窗——先关再开会被这里覆盖）
+      if (autoClose) closeModal();
     } catch (e) {
       showToast(e && e.message ? e.message : "保存失败", true);
     } finally {
@@ -373,17 +421,26 @@ export function upgradeSelect(sel) {
   pop._sel = sel;
   buildPopOptions(sel, pop);
 
-  // pop 挂 body + fixed 定位：不受 modal/drawer 的 overflow 裁剪与 transform 影响
-  const placePop = () => {
+  // 下拉定位策略：
+  // - modal / drawer 内使用 fixed + body 挂载，避免被 modal-body / drawer-body 的 overflow 裁剪；
+  // - 普通页面内使用 absolute 挂 .cs wrapper，根随触发器，解决某些场景下 fixed 触发器
+  //   getBoundingClientRect() 与视觉位置不一致导致的错位（如封禁名单表格数据变化后）。
+  const inModal = !!sel.closest(".modal-body");
+  const inDrawer = !!sel.closest(".drawer-body");
+  const useFixed = inModal || inDrawer;
+
+  const placeFixed = () => {
     const r = trig.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    pop.style.position = "fixed";
+    pop.style.top = "auto";
+    pop.style.bottom = "auto";
+    pop.style.left = "auto";
     pop.style.minWidth = r.width + "px";
-    // 临时清掉 max-height 读 scrollHeight（offsetHeight 受 max-height 钳制）
     const saved = pop.style.maxHeight;
     pop.style.maxHeight = "none";
     const natural = pop.scrollHeight;
     pop.style.maxHeight = saved;
-    // 按视口可用空间动态设上限：能完整放下则撑开自然高度，否则滚动
-    // cap 放 480 留够 11~12 项 + padding，避免最后一行被行高舍入裁掉
     const margin = 8;
     const gap = 6;
     const cap = 480;
@@ -400,6 +457,36 @@ export function upgradeSelect(sel) {
     }
     pop.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - pop.offsetWidth - margin)) + "px";
   };
+
+  const placeAbsolute = () => {
+    const wrapR = wrap.getBoundingClientRect();
+    if (wrapR.width === 0 || wrapR.height === 0) return;
+    pop.style.position = "absolute";
+    pop.style.left = "0";
+    pop.style.minWidth = "100%";
+    const saved = pop.style.maxHeight;
+    pop.style.maxHeight = "none";
+    const natural = pop.scrollHeight;
+    pop.style.maxHeight = saved;
+    const container = wrap.closest(".page") || wrap.closest(".drawer-body") || wrap.closest(".modal-body") || document.body;
+    const cr = container.getBoundingClientRect();
+    const gap = 6;
+    const cap = 480;
+    const spaceBelow = Math.max(0, cr.bottom - wrapR.bottom - gap);
+    const spaceAbove = Math.max(0, wrapR.top - cr.top - gap);
+    const fitBelow = natural + gap <= spaceBelow;
+    const fitAbove = natural + gap <= spaceAbove;
+    if (fitBelow || (!fitAbove && spaceBelow >= spaceAbove)) {
+      pop.style.top = "calc(100% + " + gap + "px)";
+      pop.style.bottom = "auto";
+      pop.style.maxHeight = Math.min(cap, spaceBelow) + "px";
+    } else {
+      pop.style.top = "auto";
+      pop.style.bottom = "calc(100% + " + gap + "px)";
+      pop.style.maxHeight = Math.min(cap, spaceAbove) + "px";
+    }
+  };
+
   trig.addEventListener("click", (e) => {
     e.stopPropagation();
     const open = pop.classList.contains("open");
@@ -407,20 +494,51 @@ export function upgradeSelect(sel) {
     if (!open) {
       pop.classList.add("open");
       trig.classList.add("open");
-      placePop();
+      if (useFixed) {
+        placeFixed();
+      } else {
+        placeAbsolute();
+      }
     }
   });
   wrap.appendChild(trig);
   sel.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none";
   sel.parentNode.insertBefore(wrap, sel);
-  document.body.appendChild(pop);
+  // 原生 select 必须挪进 wrap（.cs 为 position:relative）作为其包含块：
+  // 若留在原位，absolute 的包含块是文档根，.page/.app 的 overflow 裁剪对它失效，
+  // 其文档坐标（如系统设置页底部的模块筛选）会把根层可滚动区域撑大 → 整页下拉出空白
+  wrap.appendChild(sel);
+  if (useFixed) {
+    document.body.appendChild(pop);
+  } else {
+    // 普通页面：弹层跟随 .cs wrapper，根随触发器；初始化先给默认 inline 样式避免 CSS 默认 top/left 闪烁。
+    pop.style.position = "absolute";
+    pop.style.left = "0";
+    pop.style.top = "calc(100% + 6px)";
+    pop.style.bottom = "auto";
+    wrap.appendChild(pop);
+  }
   sel._csTrig = trig;
   sel._csPop = pop;
 
   if (!_popScrollBound) {
     _popScrollBound = true;
-    document.addEventListener("scroll", closeSelectPops, true);
+    // scroll 事件不冒泡，用捕获阶段才能收到任意内部元素的滚动。
+    // 但必须放过下拉弹层自身的滚动：否则滚轮/拖动滚动条时弹层被立刻关掉，等于无法滚动选择。
+    document.addEventListener("scroll", (e) => {
+      const t = e.target;
+      if (t && t.nodeType === 1 && t.closest && t.closest(".cs-pop")) return;
+      // 仅关闭 fixed 弹层；absolute 弹层随内容滚动，保持对齐，不关闭
+      closeFixedSelectPops();
+    }, true);
     window.addEventListener("resize", closeSelectPops);
+    // 点击下拉外部收起：mousedown 早于 click，且要跳过 trigger 本身，
+    // 否则会把 trigger 的「再点一次收起」变成先关后开（看起来点了没反应）。
+    document.addEventListener("mousedown", (e) => {
+      const t = e.target;
+      if (t && t.closest && (t.closest(".cs-pop") || t.closest(".cs-trigger"))) return;
+      closeSelectPops();
+    });
   }
 }
 
@@ -433,6 +551,18 @@ export function syncSelect(sel) {
 export function closeSelectPops() {
   document.querySelectorAll(".cs-pop.open").forEach((p) => p.classList.remove("open"));
   document.querySelectorAll(".cs-trigger.open").forEach((t) => t.classList.remove("open"));
+}
+
+// 仅关闭 fixed 弹层（modal / drawer 内挂在 body 上的）。普通页面 absolute 弹层根随
+// .cs wrapper，会随页面滚动一起移动、始终保持与触发器的相对位置，因此滚动时不应被关闭。
+export function closeFixedSelectPops() {
+  document.querySelectorAll(".cs-pop.open").forEach((p) => {
+    if (getComputedStyle(p).position === "fixed") {
+      p.classList.remove("open");
+      const trig = p._sel ? p._sel._csTrig : null;
+      if (trig) trig.classList.remove("open");
+    }
+  });
 }
 
 export function renderChips(chipbarEl, toolbarEl) {

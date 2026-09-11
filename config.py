@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import os
 import re
@@ -34,6 +35,7 @@ class RequestIDFilter(logging.Filter):
 
 
 DEFAULT_DB_PATH = "data/proxy_config.db"
+logger = logging.getLogger("proxy")
 SIZE_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)?$", re.IGNORECASE)
 REGION_SPLIT_PATTERN = re.compile(r"[,，]")
 IP_SPLIT_PATTERN = re.compile(r"[,，]")
@@ -92,6 +94,26 @@ def normalize_region_filter_value(value: Any) -> str:
     return str(value).strip()
 
 
+# ===== 规则继承（P2-4.1）：组级默认 + 规则三态 =====
+# 可被「组级默认 + 规则继承」覆盖的 forward_rules 字段及类型
+GROUP_RULE_DEFAULT_FIELDS: Dict[str, str] = {
+    "timeout": "int",
+    "max_redirects": "int",
+    "retry_times": "int",
+    "follow_redirects": "bool",
+    "enable_streaming": "bool",
+    "strip_prefix": "bool",
+    "referer_whitelist": "str",
+    "referer_policy": "str",
+    "ua_blacklist": "str",
+    "ua_whitelist": "str",
+}
+# 哨兵值：数值/开关列存 -1 = 继承组默认；字符串列留空 = 继承组默认。
+RULE_INHERIT_SENTINEL_INT = -1
+# 字符串列的「显式停用」哨兵：组设置了默认、但单条规则要强制停用该检查时填 "-"。
+RULE_EXPLICIT_OFF_SENTINEL = "-"
+
+
 @dataclass
 class ProxyRule:
     path_prefix: str
@@ -133,6 +155,100 @@ class ProxyRule:
     # 为空 = 未启用；启用后空 UA 一并拦截（否则不发 UA 即可绕过白名单）
     ua_whitelist: str = ""
 
+    # 多上游 + 健康检查（P1-2.2）：
+    # target_urls 为 JSON 数组字符串（额外上游地址）；为空则仅回落到 target_url。
+    # health_check_* 控制主动探针：health_check_path 非空 → HTTP GET 探测，
+    # 为空 → 对 target 的 host:port 做 TCP 建连探测。
+    target_urls: str = ""
+    health_check_enabled: bool = False
+    health_check_path: str = ""
+    health_check_interval: int = 30
+    health_check_timeout: int = 5
+
+    # CORS 规则级覆盖（P2-3.2）：逗号分隔允许来源；空 = 继承全局 cors.allowed_origins。
+    # 仅覆盖来源列表，methods/credentials/max_age 仍取全局配置。
+    cors_origins: str = ""
+
+    # 每规则自定义请求头 + 上游 TLS 精细化（P2-3.3）：
+    # inject_request_headers 为 JSON 对象串 {"Header": "value"}，转发前注入（覆盖同名转发头）
+    inject_request_headers: str = ""
+    # 上游 TLS 校验三态：-1 继承全局 verify_upstream_ssl；0 关闭校验；1 强制校验
+    upstream_verify_ssl: int = -1
+    # mTLS 客户端证书（PEM 路径），非空时上游连接附带客户端证书
+    client_cert: str = ""
+    client_key: str = ""
+
+    # 组级默认继承（P2-4.1）：逗号分隔的字段名，标记该字段为「继承组默认」。
+    # 数值/开关字段的哨兵是 -1，字符串字段的哨兵是 ""；两处信息保持一致。
+    inherit_fields: str = ""
+
+    def inherit_set(self) -> set:
+        return {part.strip() for part in (self.inherit_fields or "").split(",") if part.strip()}
+
+    def injected_headers(self) -> Dict[str, str]:
+        """解析 inject_request_headers JSON 串为注入头字典。
+
+        非法 JSON / 非对象 / 值不可字符串化时记警告并返回空 dict，
+        保证配置写坏不阻断转发。
+        """
+        raw = (self.inject_request_headers or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("规则 %s 的 inject_request_headers 解析失败，忽略注入", self.rule_id)
+            return {}
+        if not isinstance(parsed, dict):
+            logger.warning("规则 %s 的 inject_request_headers 不是对象，忽略注入", self.rule_id)
+            return {}
+        out: Dict[str, str] = {}
+        for k, v in parsed.items():
+            k = str(k).strip()
+            if not k:
+                continue
+            out[k] = v if isinstance(v, str) else str(v)
+        return out
+
+    def normalized_target_urls(self) -> List[str]:
+        """返回去重后的有效上游地址列表。
+
+        target_urls 解析为空或非法时回落单一 target_url；保证至少返回一个元素
+        （即便为空串，便于上层在未配置多上游时退化为原始单目标行为）。
+        """
+        out: List[str] = []
+        raw = (self.target_urls or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    for u in parsed:
+                        u = str(u).strip()
+                        if u:
+                            out.append(u)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("规则 %s 的 target_urls 解析失败，回落 target_url", self.rule_id)
+        if not out and self.target_url.strip():
+            out.append(self.target_url.strip())
+        # 去重保序
+        seen: set = set()
+        deduped: List[str] = []
+        for u in out:
+            if u not in seen:
+                seen.add(u)
+                deduped.append(u)
+        return deduped
+
+    def all_targets(self) -> List[str]:
+        """target_urls 与 target_url 合并后的完整上游列表（含原始单一目标）。"""
+        out: List[str] = []
+        if self.target_url.strip():
+            out.append(self.target_url.strip())
+        for u in self.normalized_target_urls():
+            if u not in out:
+                out.append(u)
+        return out
+
     def normalized_regions(self) -> List[str]:
         raw_regions = normalize_region_filter_value(self.region_filters)
         regions: List[str] = []
@@ -173,24 +289,51 @@ class ProxyRule:
         return regions
 
     def normalized_referer_whitelist(self) -> List[str]:
-        """Referer 白名单：逗号分隔域名，统一小写便于匹配；条目形如 example.com 或 *.example.com。"""
+        """Referer 白名单：逗号分隔域名，统一小写便于匹配；条目形如 example.com 或 *.example.com。
+
+        "-"（RULE_EXPLICIT_OFF_SENTINEL）= 显式停用（组有默认但本规则强制关闭）→ 空列表。
+        """
         raw = normalize_region_filter_value(self.referer_whitelist)
-        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
+        if raw.strip() == RULE_EXPLICIT_OFF_SENTINEL:
+            return []
+        return [
+            part.strip().lower()
+            for part in IP_SPLIT_PATTERN.split(raw)
+            if part.strip() and part.strip() != RULE_EXPLICIT_OFF_SENTINEL
+        ]
 
     def normalized_referer_policy(self) -> str:
         """空 Referer 策略守卫：非法值一律回退 allow，避免脏数据把本地播放器全拦掉。"""
         policy = str(self.referer_policy or "").strip().lower()
         return policy if policy in ("allow", "deny") else "allow"
 
+    def stored_referer_policy(self) -> str:
+        """写入 DB 的 referer_policy：继承哨兵("")原样保留，其余归一化为 allow/deny。"""
+        if "referer_policy" in self.inherit_set():
+            return ""
+        return self.normalized_referer_policy()
+
     def normalized_ua_blacklist(self) -> List[str]:
-        """UA 黑名单：逗号分隔子串，统一小写便于匹配。"""
+        """UA 黑名单：逗号分隔子串，统一小写便于匹配；"-" = 显式停用。"""
         raw = normalize_region_filter_value(self.ua_blacklist)
-        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
+        if raw.strip() == RULE_EXPLICIT_OFF_SENTINEL:
+            return []
+        return [
+            part.strip().lower()
+            for part in IP_SPLIT_PATTERN.split(raw)
+            if part.strip() and part.strip() != RULE_EXPLICIT_OFF_SENTINEL
+        ]
 
     def normalized_ua_whitelist(self) -> List[str]:
-        """UA 白名单：逗号分隔子串，统一小写便于匹配；空列表 = 未启用校验。"""
+        """UA 白名单：逗号分隔子串，统一小写便于匹配；空列表 = 未启用校验；"-" = 显式停用。"""
         raw = normalize_region_filter_value(self.ua_whitelist)
-        return [part.strip().lower() for part in IP_SPLIT_PATTERN.split(raw) if part.strip()]
+        if raw.strip() == RULE_EXPLICIT_OFF_SENTINEL:
+            return []
+        return [
+            part.strip().lower()
+            for part in IP_SPLIT_PATTERN.split(raw)
+            if part.strip() and part.strip() != RULE_EXPLICIT_OFF_SENTINEL
+        ]
 
 
 @dataclass
@@ -278,6 +421,39 @@ class AutoBanConfig:
 
 
 @dataclass
+class RateLimitConfig:
+    """主动速率限制（阶段二 P1-2.1）：封禁前的柔性节流，避免误封正常突发。
+
+    - enabled: 总开关
+    - requests_per_second: 单 key 允许的平均速率（令牌桶填充速率）
+    - burst: 允许瞬时突发的令牌数（令牌桶容量）
+    - per_ip: True 按客户端 IP 独立限流；False 全局共享一个桶
+    """
+
+    enabled: bool = False
+    requests_per_second: float = 10.0
+    burst: int = 20
+    per_ip: bool = True
+
+
+@dataclass
+class CorsConfig:
+    """跨域资源共享（P2-3.2）：只作用于代理路径（非 /_admin），管理接口一律不允许跨域。
+
+    - allowed_origins: 逗号分隔的允许来源，"*" 表示全部（此时不允许同时开 credentials）
+    - allowed_methods: 预检响应 Access-Control-Allow-Methods
+    - allow_credentials: 是否允许携带凭据（Cookie/Authorization）
+    - max_age: 预检结果缓存秒数
+    """
+
+    enabled: bool = False
+    allowed_origins: str = ""
+    allowed_methods: str = "GET,HEAD,OPTIONS"
+    allow_credentials: bool = False
+    max_age: int = 600
+
+
+@dataclass
 class EmailConfig:
     enabled: bool = False
     smtp_host: str = ""
@@ -292,6 +468,19 @@ class EmailConfig:
     alert_max_requests: int = 80
     alert_max_404: int = 15
     alert_cooldown_minutes: int = 30
+
+
+@dataclass
+class NotificationsConfig:
+    """Webhook / IM 告警通道（P1-2.4）。
+
+    channels 为字典列表，每项 {type, name, enabled, url, secret}：
+      type ∈ email(占位，邮件仍走 EmailConfig)/generic/feishu/dingtalk/slack；
+      secret 为飞书/钉钉签名密钥（generic/slack 可空）。
+    存储为 system_settings.notifications_config JSON 串（见 config_store）。
+    """
+    enabled: bool = False
+    channels: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -419,6 +608,9 @@ class RouteGroupConfig:
     ip_blacklist: str = ""
     region_whitelist: str = ""
     region_blacklist: str = ""
+    # 组级规则默认配置（P2-4.1 规则继承）：JSON 对象，键 ∈ GROUP_RULE_DEFAULT_FIELDS。
+    # 未出现的键 = 组未设置默认，规则该字段的「继承」回落全局/内建默认。
+    rule_defaults: Dict[str, Any] = field(default_factory=dict)
 
     def normalized_access_ip_whitelist(self) -> List[str]:
         raw_ips = normalize_region_filter_value(self.access_ip_whitelist)
@@ -489,7 +681,10 @@ class Config:
     ip_result_cache: IpResultCacheConfig = field(default_factory=IpResultCacheConfig)
     request_dedup: RequestDedupConfig = field(default_factory=RequestDedupConfig)
     auto_ban: AutoBanConfig = field(default_factory=AutoBanConfig)
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    cors: CorsConfig = field(default_factory=CorsConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     signed_url: SignedUrlConfig = field(default_factory=SignedUrlConfig)
     signed_redirect: SignedRedirectConfig = field(default_factory=SignedRedirectConfig)
     # 记录配置文件中**显式出现**的顶层段键（仅 from_yaml 解析真实文件时填充；
@@ -552,6 +747,7 @@ class Config:
             "remote_config",
             "ip_result_cache",
             "auto_ban",
+            "rate_limit",
             "email",
         ):
             if _key in data and not isinstance(data[_key], dict):

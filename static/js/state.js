@@ -20,6 +20,8 @@ export const state = {
   logCurrentPage: 1,
   logTotalPages: 1,
   logPageSize: 10,
+  auditCurrentPage: 1,
+  auditTotalPages: 1,
   banCurrentPage: 1,
   banTotalPages: 1,
   banPageSize: 20,

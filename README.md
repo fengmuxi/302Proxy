@@ -20,45 +20,62 @@
 
 - **自动处理302重定向**: 透明地跟随所有类型的HTTP重定向（301, 302, 303, 307, 308）
 - **高性能异步架构**: 基于aiohttp构建，支持高并发请求处理
-- **大媒体文件流式传输**: 支持视频、音频等大文件的流式代理，内存占用低
-- **灵活的代理规则**: 支持基于路径前缀的代理规则配置
-- **完整的请求/响应头处理**: 正确过滤和转发HTTP头
-- **Range请求支持**: 支持断点续传和分段下载
-- **SSL/TLS支持**: 可选的HTTPS代理支持
-- **重试机制**: 自动重试失败的请求
-- **统计监控**: 内置请求统计和健康检查端点
-- **可配置超时**: 支持全局和每规则的超时设置
-- **自动封禁监控**: 滑动窗口检测异常请求，自动封禁恶意IP
-- **邮件提醒**: 异常请求和IP封禁独立HTML邮件模板
+- **大媒体文件流式传输**: 支持视频、音频等大文件的流式代理，内存占用低，支持断点续传（Range）
+- **灵活的代理规则**: 基于 `path_prefix` + `request_host` 分组转发，支持默认线路回退
+- **完整的请求/响应头处理**: 正确过滤与转发HTTP头；每规则可注入自定义请求头
+- **SSL/TLS支持**: 可选的HTTPS代理；每规则可配置上游TLS校验 / mTLS 客户端证书
+- **重试与超时**: 自动重试失败的请求；支持全局和每规则的超时设置
+- **上游健康检查 + 多目标负载均衡**: 多 `target_urls` + 健康探针，故障时自动切流
+- **访问控制链**: 路由组级 + 规则级 IP/地区黑白名单、Referer 白名单（盗链防护）、UA 黑/白名单
+- **签名 URL / 302 加签改写**: 全局开关；A 模式回显 CDN（零带宽）/ B 模式内部代理穿流双模式，IP 绑定防冒领
+- **API 密钥**: read-only 布尔、scope / IP / 速率细粒度权限、哈希存储、调用计数、读写鉴权分离
+- **安全加固**: 后台登录防爆破（失败锁定 + 退避）、管理操作审计日志、CORS（全局 + 规则级）
+- **自动封禁监控**: 滑动窗口检测异常请求，支持IP白名单和邮件/Webhook 告警 + 一键封禁链接
+- **通知渠道**: 邮件（SMTP）+ Webhook/IM（飞书/钉钉/Slack/Generic，支持加签）
+- **主动速率限制**: per-IP / per-rule 令牌桶，超限返回 429 + Retry-After
+- **可观测性**: 内置 `/_stats` `/_health`，Prometheus `/metrics` 指标导出（可选依赖）
+- **配置版本管理**: 单模块配置历史、导出/导入、一键回滚
+- **组级默认 + 规则继承**: 10 字段三段式（显式 / 继承组 / 停用），存量切换可批量转继承
+- **后台管理**: 本地 SQLite 配置中心、简易登录、11+ 管理页面、自动维护的 API 文档页
 - **日志轮转**: 按日期自动轮转应用日志
+- **Docker部署**: 支持容器化部署，一键构建推送镜像
 
 ## 项目结构
 
 ```
 nginx302_proxy/
-├── main.py                      # 主程序入口
-├── config.py                    # 配置管理模块
-├── config_store.py              # 配置存储模块（SQLite）
-├── proxy_core.py                # 代理核心逻辑
-├── admin_console.py             # 后台管理控制台
-├── auto_ban_monitor.py          # 自动封禁监控
+├── main.py                      # 主程序入口、路由注册、中间件
+├── config.py                    # 数据模型、配置解析
+├── config_store.py              # SQLite 存储（CRUD、迁移、配置历史）
+├── proxy_core.py                # 代理核心：路由选择、URL 构造、访问控制
+├── admin_console.py             # 后台 API、登录鉴权、审计埋点
+├── signed_url.py                # 签名 URL / 302 加签改写（A/B 双模式）
+├── rate_limiter.py              # 主动速率限制（令牌桶）
+├── upstream_health.py           # 上游健康检查 + 多目标故障转移
+├── notifier.py                  # 通知分发：邮件 + Webhook/IM
+├── metrics.py                   # Prometheus 指标导出（可选依赖）
+├── auto_ban_monitor.py          # 自动封禁滑动窗口监控
+├── ip_ban_manager.py            # IP 封禁管理
+├── ip_result_cache.py           # 重定向结果缓存
+├── request_dedup.py             # 请求去重缓存
+├── geo_service.py               # IP 定位（在线 + 离线 MMDB）
+├── offline_geoip_sync.py        # 离线 IP 库定时同步
 ├── email_notifier.py            # 邮件通知模块
-├── email_templates.py           # 邮件HTML模板
-├── ip_ban_manager.py            # IP封禁管理
-├── geo_service.py               # IP 定位服务
-├── offline_geoip_sync.py        # 离线 IP 库同步
+├── email_templates.py           # 邮件 HTML 模板
 ├── config.yaml.template         # 配置文件模版
 ├── requirements.txt             # 项目依赖
-├── Dockerfile                   # Docker镜像构建
-├── docker-compose.yml           # 本地Docker配置
-├── docker-compose.server.yml    # 服务器端Docker配置
-├── deploy.bat                   # Windows部署脚本
-├── data/                        # 数据目录（SQLite数据库）
+├── Dockerfile                   # Docker 镜像构建
+├── docker-compose.yml           # Docker 部署配置
+├── deploy/
+│   └── nginx_frontend_proxy.conf  # 前置 nginx 反代样例
+├── data/                        # 数据目录（SQLite 数据库）
 ├── log/                         # 日志目录
+├── migrations/                  # yoyo 数据库迁移（仅全新库执行）
 └── static/                      # 前端资源
     ├── admin.html               # 后台页面
     ├── admin.css                # 后台样式
-    └── admin.js                 # 后台脚本
+    ├── admin.js                 # 后台主脚本
+    └── js/                      # ESM 前端模块
 ```
 
 ## 安装部署
@@ -71,10 +88,7 @@ nginx302_proxy/
 
 #### 本地构建并推送
 ```bash
-# 使用部署脚本（Windows）
-deploy.bat
-
-# 或手动构建
+# 手动构建并推送
 docker build -t registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest .
 docker push registry.cn-hangzhou.aliyuncs.com/fengmuxi-docker-images/302_proxy:latest
 ```
@@ -88,10 +102,7 @@ cd /opt/302_proxy
 # 复制配置文件
 cp /path/to/config.yaml .
 
-# 使用服务器端docker-compose
-cp docker-compose.server.yml docker-compose.yml
-
-# 启动服务
+# 启动服务（使用仓库内 docker-compose.yml）
 docker-compose up -d
 
 # 后续更新
@@ -454,51 +465,9 @@ GET /_stats
 - `X-Original-URL`: 原始请求URL
 - `X-Final-URL`: 最终目标URL
 
-## 运行测试
+## 测试说明
 
-### 单元测试
-
-#### 安装测试依赖
-
-```bash
-pip install -r tests/requirements.txt
-```
-
-#### 运行所有测试
-
-```bash
-pytest tests/ -v
-```
-
-### 运行特定测试文件
-
-```bash
-pytest tests/test_proxy.py -v
-pytest tests/test_integration.py -v
-pytest tests/test_performance.py -v
-```
-
-### 测试覆盖范围
-
-- **test_proxy.py**: 核心代理逻辑单元测试
-  - 配置解析测试
-  - 重定向处理测试
-  - 流式传输测试
-  - 请求头过滤测试
-  - URL构建测试
-
-- **test_integration.py**: 集成测试
-  - 端到端代理请求测试
-  - 健康检查和统计端点测试
-  - 各种重定向场景测试
-  - 流式传输集成测试
-
-- **test_performance.py**: 性能测试
-  - 并发请求测试
-  - 统计模块线程安全测试
-  - 高负载场景测试
-  - 流式传输性能测试
-  - 内存效率测试
+本项目**不单独维护自动化测试套件**。仓库根目录下的临时调试脚本（如历史上的 `_diagnostics/` 目录）仅用于本地开发期验证特定链路（签名加签、自动封禁、请求去重、流式缓存等），按需手动运行（`PYTHONPATH=. venv/Scripts/python.exe <脚本>`），不纳入版本库、不接入 CI，也不保证随代码演进持续维护。生产变更以人工验证 + 后台日志/审计页核对为准。
 
 ## 性能优化建议
 
@@ -575,6 +544,30 @@ MIT 许可证
 欢迎提交 Issue 和 Pull Request。
 
 ## 更新日志
+
+> 维护者视角的实现状态、关键不变量与提交拆分见 [`DEVELOPMENT_STATUS.md`](./docs/DEVELOPMENT_STATUS.md)。
+
+### v5.4.0
+- **组级默认 + 规则继承**：规则 10 个字段支持「显式 / 继承组默认 / 显式停用」三段式；组可配置规则默认，存量切换可批量转继承
+- **三段式开关 UI**：组级默认与规则表单的下拉改为内联分段开关（segmented control）
+- **修复系统设置页整页下拉空白**：修正自定义下拉原生 select 的包含块，消除整页双层滚动
+
+### v5.3.0
+- **CORS 处理**：全局 + 规则级来源覆盖，预检 OPTIONS 直接 204
+- **每规则自定义请求头 + 上游 TLS**：支持注入请求头、每规则上游 TLS 校验开关与 mTLS 客户端证书
+- **Prometheus 指标导出**：新增 `/metrics`（请求数 / 延迟 / 字节 / 流式并发），可选依赖，缺库不阻断
+- **配置版本历史 / 导出导入 / 回滚**：单模块配置历史落库、JSON 导出导入、一键回滚
+
+### v5.2.0
+- **主动速率限制**：per-IP / per-rule 令牌桶，超限返回 429 + Retry-After（封禁前的柔性降级）
+- **上游健康检查 + 多目标负载均衡**：规则支持多 `target_urls` + 健康探针，故障自动切流
+- **API Key 细粒度权限**：scope（端点标签）/ 绑定 IP / 速率限制
+- **Webhook / IM 告警**：邮件之外新增飞书 / 钉钉 / Slack / Generic Webhook（支持加签）
+
+### v5.1.0
+- **后台登录防爆破**：失败计数 + 按 IP / 账号锁定 + 指数退避，锁定期间正确密码也拒
+- **管理操作审计日志**：规则 / 封禁 / 密钥 / 设置等写操作留 who/when 轨迹，新增审计页
+- **测试策略调整**：不单独维护自动化测试套件，临时脚本本地验证（详见 `docs/DEVELOPMENT_STATUS.md`）
 
 ### v5.0.0
 - **新增自动封禁监控**：基于滑动窗口检测异常请求，支持IP白名单

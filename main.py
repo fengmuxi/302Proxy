@@ -42,10 +42,47 @@ from offline_geoip_sync import OfflineGeoIPSyncService
 from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
 from ip_result_cache import IpResultCache
 from ip_ban_manager import IpBanManager
+from rate_limiter import RateLimiter
+from upstream_health import UpstreamHealthMonitor
+# P2-3.4 Prometheus 指标（可选依赖，prometheus_client 缺失时模块内部 no-op 降级）
+import metrics
+from notifier import NotificationDispatcher
 from request_dedup import RequestDedup, DedupConfig
 from signed_url import verify_signed_url, strip_signature_params, verify_signed_resource, decode_resource_id
 
 logger = logging.getLogger('proxy')
+
+
+def build_cors_headers(cfg, origin: str, rule_origins: str = "") -> Optional[Dict[str, str]]:
+    """计算 CORS 响应头（P2-3.2）。
+
+    Args:
+        cfg: CorsConfig 全局配置（methods/credentials 取全局，origins 可被规则覆盖）。
+        origin: 请求 Origin 头，空则视为非跨域请求返回 None。
+        rule_origins: 规则级允许来源覆盖；空串 = 继承 cfg.allowed_origins。
+
+    Returns:
+        允许该来源时返回头字典（供流式响应构造时合并 / 中间件兜底注入）；
+        不允许或非跨域返回 None。
+
+    Raises:
+        无（非法输入一律按不允许处理）。
+    """
+    if not origin:
+        return None
+    origins = (rule_origins or "").strip() or cfg.allowed_origins or ""
+    items = [o.strip() for o in origins.split(",") if o.strip()]
+    if "*" not in items and origin not in items:
+        return None
+    headers: Dict[str, str] = {
+        "Access-Control-Allow-Origin": "*" if "*" in items else origin,
+        "Access-Control-Allow-Methods": cfg.allowed_methods or "GET,HEAD,OPTIONS",
+        # 多值来源时必须回显 Vary，防止中间层/浏览器缓存串源
+        "Vary": "Origin",
+    }
+    if cfg.allow_credentials:
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return headers
 
 
 def format_bytes(bytes_value: int) -> str:
@@ -163,13 +200,22 @@ class ProxyServer:
             )
         )
         self.ip_ban_manager = IpBanManager()
+        # 主动速率限制（P1-2.1）：进程内令牌桶，封禁前的柔性节流
+        self.rate_limiter = RateLimiter()
+        # Webhook/IM 告警（P1-2.4）：须在 AutoBanMonitor 之前创建（注入 notify_callback）
+        self.notification_dispatcher = NotificationDispatcher(config.notifications)
         self.auto_ban_monitor = AutoBanMonitor(
             config=config.auto_ban,
             ban_callback=self._auto_ban_ip,
             email_config=config.email,
             config_store=self.config_store,
+            notify_callback=self.notification_dispatcher.dispatch_bg,
         )
         self.request_handler = ProxyRequestHandler(config, geo_resolver=self.geo_resolver, ip_cache=self.ip_result_cache, ip_ban_manager=self.ip_ban_manager)
+        # 上游健康检查 + 多目标选择（P1-2.2）
+        self.upstream_health = UpstreamHealthMonitor()
+        self.request_handler.upstream_health = self.upstream_health
+        self.upstream_health.update_rules(config.proxy_rules)
         self.geo_resolver.set_session_provider(self.request_handler.get_session)
         self.stats = ProxyStats()
         # 单 IP 流式并发计数器（HOTLINK_PROTECTION.md 3.2）：内存态，进程单 worker 无需跨进程共享
@@ -187,6 +233,7 @@ class ProxyServer:
             ban_manager_callback=self._sync_ban_manager,
             log_cleanup_callback=self._cleanup_log_files,
             log_file_cleanup_callback=self._cleanup_log_files_on_disk,
+            upstream_health_callback=self.upstream_health.get_all_health,
         )
         self.app = web.Application(client_max_size=config.streaming.max_request_body_size)
         self._setup_routes()
@@ -196,6 +243,8 @@ class ProxyServer:
     
     def _setup_routes(self):
         self.app.router.add_get('/_health', self.health_check)
+        # Prometheus 指标端点（P2-3.4）：必须注册在 catch-all handle_proxy 之前
+        self.app.router.add_get('/metrics', self.handle_metrics)
         self.app.router.add_get('/json/version', self.docker_version)
         self.app.router.add_get('/_admin/api/stats', self.get_stats)
         self.app.router.add_get('/_admin/api/net-throughput', self.get_net_throughput)
@@ -254,6 +303,47 @@ class ProxyServer:
 
     def _setup_middleware(self):
         @web.middleware
+        async def cors_middleware(request: web.Request, handler):
+            """CORS 处理（P2-3.2）：只作用于代理路径（非 /_admin）。
+
+            - 预检 OPTIONS（带 Access-Control-Request-Method）直接 204，不进 handle_proxy
+              （否则 OPTIONS 会被当代理请求转发/判 404，还会占用去重与限流配额）
+            - 实际请求：handler 之前算好 CORS 头存进 request["_cors_headers"]，
+              由 handle_proxy 在构造流式响应时合并（流式响应在 handler 内 prepare，
+              返回后再改头无效）；返回的普通 Response（如 302 外发、403 页）若尚未
+              prepare 则在此兜底注入
+            """
+            if request.path.startswith("/_") or not self.config.cors.enabled:
+                return await handler(request)
+
+            origin = request.headers.get("Origin", "")
+            cfg = self.config.cors
+
+            # 预检：此时还没进 handle_proxy（拿不到规则），只用全局配置判定
+            if request.method == "OPTIONS" and "Access-Control-Request-Method" in request.headers:
+                headers = build_cors_headers(cfg, origin)
+                if headers is None:
+                    return web.Response(status=403, text="CORS preflight rejected")
+                resp = web.Response(status=204)
+                for k, v in headers.items():
+                    resp.headers[k] = v
+                resp.headers["Access-Control-Max-Age"] = str(max(0, cfg.max_age))
+                resp.headers["Access-Control-Allow-Headers"] = request.headers.get(
+                    "Access-Control-Request-Headers", "Range, If-Range"
+                )
+                return resp
+
+            # 实际请求：先按全局配置算（规则级覆盖由 handle_proxy 重建此键）
+            request["_cors_headers"] = build_cors_headers(cfg, origin)
+            response = await handler(request)
+            headers = request.get("_cors_headers")
+            # prepared=True 的流式响应头已发出（handle_proxy 内已合并），跳过
+            if headers and not getattr(response, "prepared", False):
+                for k, v in headers.items():
+                    response.headers[k] = v
+            return response
+
+        @web.middleware
         async def logging_middleware(request: web.Request, handler):
             request_id = generate_request_id()
             token = set_request_id(request_id)
@@ -267,6 +357,13 @@ class ProxyServer:
             try:
                 response = await handler(request)
                 duration_ms = (time.perf_counter() - start_time) * 1000
+                # Prometheus 指标（P2-3.4）：只统计代理路径，管理/内部接口不计
+                if not request.path.startswith("/_"):
+                    metrics.record_request(
+                        request.method, response.status,
+                        request.get("_cache_status") or self.request_handler.get_last_cache_status() or "BYPASS",
+                        duration_ms / 1000.0,
+                    )
                 # 链路摘要：handle_proxy 沿途把关键节点写进 request["_chain"]，
                 # 这里合成一行，配合格式里的 request_id 即可完整还原单个请求的路径
                 chain = request.get("_chain")
@@ -302,6 +399,7 @@ class ProxyServer:
                 _ = token
         
         self.app.middlewares.append(logging_middleware)
+        self.app.middlewares.append(cors_middleware)
 
     async def reload_runtime_config(self) -> None:
         self.config = self.config_store.load_runtime_config()
@@ -331,6 +429,8 @@ class ProxyServer:
             logger.info("请求去重配置已更新: enabled=%s window=%.1fs max=%d", dedup_cfg.enabled, dedup_cfg.window_seconds, dedup_cfg.max_cache_entries)
         self.auto_ban_monitor.update_config(self.config.auto_ban)
         self.auto_ban_monitor.update_email_config(self.config.email)
+        self.upstream_health.update_rules(self.config.proxy_rules)
+        self.notification_dispatcher.update_config(self.config.notifications)
 
     async def sync_offline_geoip_now(self) -> Dict[str, Any]:
         return await self.offline_geoip_sync_service.sync_now(force=True)
@@ -360,6 +460,12 @@ class ProxyServer:
                 duration_seconds=duration_seconds, permanent=permanent,
                 path_prefix=path_prefix,
             )
+            # P1-2.4：手动封禁 Webhook 告警
+            self.notification_dispatcher.dispatch_bg({
+                "type": "manual_ban", "ip": ip, "reason": reason,
+                "duration": duration_seconds if not permanent else 0,
+                "source": str(banned_by or "admin"),
+            })
         elif action == "unban":
             ip = payload.get("ip", "")
             await self.ip_ban_manager.unban_ip(ip)
@@ -963,6 +1069,14 @@ class ProxyServer:
                     request,
                     f"路由:{route_decision.match_strategy}[{route_decision.rule.name}]",
                 )
+                # CORS 规则级覆盖（P2-3.2）：非空才重建 CORS 头（覆盖全局配置）
+                if route_decision.rule.cors_origins.strip():
+                    request["_cors_rule_origins"] = route_decision.rule.cors_origins.strip()
+                    request["_cors_headers"] = build_cors_headers(
+                        self.config.cors,
+                        request.headers.get("Origin", ""),
+                        route_decision.rule.cors_origins,
+                    )
                 if route_decision.blocked:
                     self._chain_step(request, f"拦截:{route_decision.block_reason}")
             else:
@@ -1015,6 +1129,34 @@ class ProxyServer:
                         error_message=ban_reason,
                     )
                     return await self._render_403_page(ban_reason)
+
+            # ===== 主动速率限制（P1-2.1）：封禁前先柔性节流，避免误封正常突发 =====
+            rl_cfg = self.config.rate_limit
+            if rl_cfg.enabled and rl_cfg.requests_per_second > 0:
+                client_ip = route_decision.client_ip if route_decision else client_host
+                rl_key = client_ip if rl_cfg.per_ip else "__global_rate_limit__"
+                ok, retry_after = self.rate_limiter.allow(rl_key, rl_cfg.requests_per_second, rl_cfg.burst)
+                if not ok:
+                    self._chain_step(request, "限流:429")
+                    logger.warning(
+                        "主动限流触发 429: IP=%s per_ip=%s rps=%s burst=%s 建议等待=%.1fs",
+                        client_ip, rl_cfg.per_ip, rl_cfg.requests_per_second, rl_cfg.burst, retry_after,
+                    )
+                    await self._record_route_log(
+                        request,
+                        route_decision=route_decision,
+                        upstream_status=429,
+                        cache_status="RATE_LIMITED",
+                        transport_mode="none",
+                        error_message="请求频率超过限速阈值",
+                    )
+                    resp = web.Response(
+                        status=429,
+                        text="请求过于频繁，请稍后再试",
+                        content_type="text/plain",
+                    )
+                    resp.headers["Retry-After"] = str(int(retry_after) + 1)
+                    return resp
 
             target_url = route_decision.target_url if route_decision else None
             use_streaming_mode = bool(
@@ -1281,6 +1423,12 @@ class ProxyServer:
             response_headers['X-Redirect-Count'] = str(redirect_info.redirect_count)
         
         headers_for_response = dict(response_headers)
+        # CORS（P2-3.2）：流式响应在下方 prepare 后头就发出去了，中间件事后改无效，
+        # 必须在构造时合并（cors_middleware 已按全局/规则覆盖算好存进 request）
+        _cors_headers = request.get("_cors_headers")
+        if _cors_headers:
+            for _ck, _cv in _cors_headers.items():
+                headers_for_response.setdefault(_ck, _cv)
         # 上游虚报 Content-Length 会让 aiohttp 在写完时抛 ContentLengthError；
         # 除 206（分片长度由 Content-Range 严格界定、播放器必需）外一律交给 chunked
         if streaming_response.status != 206:
@@ -1295,6 +1443,8 @@ class ProxyServer:
         
         bytes_transferred = 0
         write_timeout = self.config.streaming.write_timeout
+        # Prometheus 指标（P2-3.4）：流式并发瞬时值
+        metrics.streaming_enter()
         # 上游错误响应体摘录（>=400 时抓取前 512B）：路由日志 error_message 为空时
         # 用它标明「这个 4xx/5xx 是上游真实返回的、内容是什么」，否则透传的 500 与
         # 本服务合成的 500 在日志页无法区分（本次排查 127.0.0.1:13366 的痛点）。
@@ -1311,6 +1461,8 @@ class ProxyServer:
                     else:
                         await response.write(chunk)
                     bytes_transferred += len(chunk)
+                    # Prometheus 指标（P2-3.4）：转发字节数累计
+                    metrics.record_bytes(len(chunk))
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"写入客户端超时({write_timeout}s)，断开慢速客户端，已传输 {format_bytes(bytes_transferred)}"
@@ -1379,6 +1531,21 @@ class ProxyServer:
                 'rule_count': len(self.config.proxy_rules)
             }, ensure_ascii=False).encode()
         ))
+
+    async def handle_metrics(self, request: web.Request) -> web.Response:
+        """Prometheus text exposition 端点（P2-3.4）。
+
+        依赖缺失时返回 503 并给出安装提示，而非 404/500——方便运维
+        直接用 curl 排查「为什么抓不到指标」。
+        """
+        body, content_type = metrics.exposition()
+        if body is None:
+            return web.Response(
+                status=503,
+                text="prometheus_client 未安装，指标导出未启用（pip install prometheus_client 后重启生效）",
+                content_type="text/plain",
+            )
+        return web.Response(status=200, body=body, headers={"Content-Type": content_type})
     
     async def docker_version(self, request: web.Request) -> web.Response:
         return self._add_security_headers(web.Response(
@@ -1748,6 +1915,7 @@ class ProxyServer:
             f"启动时清理过期日志数量: {pruned_logs.get('deleted_count', 0)}"
         )
         self.offline_geoip_sync_service.start()
+        self.upstream_health.start()
         
         logger.info(f"流式传输已启用: {self.config.streaming.enabled}")
         if self.config.streaming.enabled:
@@ -1910,6 +2078,7 @@ class ProxyServer:
             self._log_cleanup_task = None
         await self.request_handler.close()
         await self.offline_geoip_sync_service.stop()
+        self.upstream_health.stop()
         await self.geo_resolver.close()
         logger.info("代理服务器已停止")
     
