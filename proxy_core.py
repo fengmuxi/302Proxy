@@ -10,7 +10,7 @@ import socket
 import ssl
 import time
 from aiohttp.http_exceptions import ContentLengthError, TransferEncodingError
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urljoin, urlparse
 
@@ -247,6 +247,16 @@ class RouteDecision:
     # 黑白名单拒绝标记：命中黑名单或不在白名单时为 True，由 handle_proxy 返回 403
     blocked: bool = False
     block_reason: str = ""
+    # OpenList 等需要额外请求头的上游：解析时携带，B 模式拉流合并进上游请求
+    upstream_headers: Dict[str, str] = field(default_factory=dict)
+    # 上游类型（'http' / 'openlist'）：路由日志据此区分上游，并在日志页展示「上游」字段
+    upstream_type: str = "http"
+    # OpenList 连接留痕：命中的连接 id / 名称，以及 OpenList 侧挂载路径。
+    # 多连接场景下「这条日志走的是哪台服务器 / 哪个账号」全靠这三项，
+    # 不再需要反查规则表（规则事后可能被改绑或删除）。
+    openlist_connection_id: int = 0
+    openlist_connection_name: str = ""
+    openlist_path: str = ""
 
 
 @dataclass
@@ -1951,6 +1961,10 @@ class ProxyRequestHandler:
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+        # OpenList 等需额外请求头的上游：解析时携带（如网盘要求的 Referer/UA）。
+        # 先合并，保证规则自定义请求头（下方 _injected）仍可覆盖同名项。
+        if route_decision.upstream_headers:
+            request_headers.update(route_decision.upstream_headers)
         # P2-3.3 每规则自定义请求头：最后注入，优先级高于同名转发头
         _injected = rule.injected_headers()
         if _injected:
@@ -2430,6 +2444,10 @@ class ProxyRequestHandler:
 
         request_headers = self.filter_headers(headers, is_request=True)
         request_headers = self.add_forward_headers(request_headers, client_ip, scheme)
+        # OpenList 等需额外请求头的上游：解析时携带（如网盘要求的 Referer/UA）。
+        # 先合并，保证规则自定义请求头（下方 _injected）仍可覆盖同名项。
+        if route_decision.upstream_headers:
+            request_headers.update(route_decision.upstream_headers)
         # P2-3.3 每规则自定义请求头：最后注入，优先级高于同名转发头
         _injected = rule.injected_headers()
         if _injected:

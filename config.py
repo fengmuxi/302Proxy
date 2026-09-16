@@ -178,12 +178,27 @@ class ProxyRule:
     client_cert: str = ""
     client_key: str = ""
 
+    # OpenList 上游适配：upstream_type = 'http'(默认，行为与旧版完全一致) | 'openlist'。
+    # 当为 openlist 时，请求路径剥离 path_prefix 后拼上 openlist_path_prefix，
+    # 再调 OpenList /api/fs/link 换取短期加签直链，用于 A 模式 302 / B 模式流式代理。
+    upstream_type: str = "http"
+    openlist_path_prefix: str = ""   # 映射到 OpenList 的挂载根，如 /MyDrive（空=根）
+    openlist_password: str = ""      # 受密码保护的目录密码（/api/fs/link 的 password）
+    openlist_connection_id: int = 0  # 绑定的 OpenList 连接 id（0=未绑定；openlist 规则必须绑定，否则 502）
+
     # 组级默认继承（P2-4.1）：逗号分隔的字段名，标记该字段为「继承组默认」。
     # 数值/开关字段的哨兵是 -1，字符串字段的哨兵是 ""；两处信息保持一致。
     inherit_fields: str = ""
 
     def inherit_set(self) -> set:
         return {part.strip() for part in (self.inherit_fields or "").split(",") if part.strip()}
+
+    def normalized_upstream_type(self) -> str:
+        """上游类型守卫：仅 'openlist' 进入 OpenList 适配分支，其余一律回退 'http'。
+
+        保证脏数据 / 旧规则（无该列时为空串）行为与旧版完全一致。
+        """
+        return "openlist" if str(self.upstream_type or "").strip().lower() == "openlist" else "http"
 
     def injected_headers(self) -> Dict[str, str]:
         """解析 inject_request_headers JSON 串为注入头字典。
@@ -468,6 +483,11 @@ class EmailConfig:
     alert_max_requests: int = 80
     alert_max_404: int = 15
     alert_cooldown_minutes: int = 30
+
+
+# 注：旧版「全局单实例 OpenList 连接」(OpenListConfig / Config.openlist) 已移除。
+# 所有 OpenList 连接统一存于 config_store 的 openlist_connections 表，
+# 旧配置在首次启动时由 ConfigStore._migrate_legacy_openlist_connection 自动迁移为一条连接。
 
 
 @dataclass

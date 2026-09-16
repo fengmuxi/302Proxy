@@ -92,7 +92,8 @@ _API_DOC_SPECS: Dict[str, Dict[str, Any]] = {
                                    {"name": "limit", "in": "query", "type": "int", "required": False, "desc": "每页条数"},
                                    {"name": "keyword", "in": "query", "type": "string", "required": False, "desc": "关键词"},
                                    {"name": "path_prefix", "in": "query", "type": "string", "required": False, "desc": "路径前缀"},
-                                   {"name": "result_status", "in": "query", "type": "string", "required": False, "desc": "结果状态"}]},
+                                   {"name": "result_status", "in": "query", "type": "string", "required": False, "desc": "结果状态"},
+                                   {"name": "upstream_type", "in": "query", "type": "string", "required": False, "desc": "上游类型：http / openlist"}]},
     "delete_route_logs": {"tag": "日志与审计", "summary": "删除日志",
                           "params": [{"name": "ids", "in": "body", "type": "array", "required": False, "desc": "指定 ID 列表"}, {"name": "delete_all", "in": "body", "type": "bool", "required": False, "desc": "清空全部"}]},
     "get_hotlink_stats": {"tag": "日志与审计", "summary": "盗链监控统计", "params": [{"name": "hours", "in": "query", "type": "int", "required": False, "desc": "统计窗口（小时）"}]},
@@ -129,6 +130,13 @@ _API_DOC_SPECS: Dict[str, Dict[str, Any]] = {
     "get_email_settings": {"tag": "邮件提醒", "summary": "SMTP 邮件配置"},
     "update_email_settings": {"tag": "邮件提醒", "summary": "更新 SMTP 配置"},
     "test_email": {"tag": "邮件提醒", "summary": "发送测试邮件"},
+    # —— OpenList 上游 ——
+    "list_openlist_connections": {"tag": "OpenList 上游", "summary": "列出 OpenList 连接"},
+    "create_openlist_connection": {"tag": "OpenList 上游", "summary": "新增 OpenList 连接"},
+    "get_openlist_connection": {"tag": "OpenList 上游", "summary": "查看 OpenList 连接详情"},
+    "update_openlist_connection": {"tag": "OpenList 上游", "summary": "更新 OpenList 连接"},
+    "delete_openlist_connection": {"tag": "OpenList 上游", "summary": "删除 OpenList 连接"},
+    "test_openlist_connection": {"tag": "OpenList 上游", "summary": "测试指定 OpenList 连接"},
     # —— 备份与恢复 ——
     "list_backups": {"tag": "备份与恢复", "summary": "备份列表"},
     "create_backup": {"tag": "备份与恢复", "summary": "创建备份快照"},
@@ -172,7 +180,7 @@ _API_DOC_USAGE: Dict[str, str] = {
     "extend_banned_ip": "延长临时封禁时长（小时），不影响到期后的永久/临时属性。",
     "set_banned_ip_permanent": "将临时封禁转为永久封禁，转换后该 IP 不再自动过期。",
     "clear_banned_ips": "清空全部封禁记录（不可恢复），谨慎调用。",
-    "list_route_logs": "查询请求转发日志。支持 keyword/path_prefix/result_status 等筛选与 limit 分页；result_status=upstream_error 可快速定位上游异常。",
+    "list_route_logs": "查询请求转发日志。支持 keyword/path_prefix/result_status/upstream_type 等筛选与 limit 分页；result_status=upstream_error 可快速定位上游异常，result_status=openlist_error 定位 OpenList 解析失败，upstream_type=openlist 只看走 OpenList 上游的请求。",
     "delete_route_logs": "删除日志：传 ids 数组删指定条目，或 delete_all=true 清空（不可恢复）。",
     "get_hotlink_stats": "盗链监控统计。hours 指定统计窗口，用于发现异常 Referer 来源 IP。",
     "get_route_log_settings": "查看日志保留策略（按天数/条数）。",
@@ -204,6 +212,12 @@ _API_DOC_USAGE: Dict[str, str] = {
     "get_email_settings": "查看 SMTP 邮件提醒配置（地址脱敏）。",
     "update_email_settings": "更新 SMTP 配置；改后点「发送测试邮件」验证。",
     "test_email": "发送一封测试邮件到配置收件人，验证 SMTP 连通。",
+    "list_openlist_connections": "列出全部 OpenList 连接（不含任何令牌明文；auth_mode 区分账号密码/直接令牌两种鉴权方式）。",
+    "create_openlist_connection": "新增一个 OpenList 连接；base_url 必填。auth_mode=password（默认，用 username/password 登录换令牌）或 token（直接使用令牌，此时 manual_token 必填）。",
+    "get_openlist_connection": "查看单个 OpenList 连接详情（不含任何令牌明文，仅返回 has_token / has_manual_token / credential_ready）。",
+    "update_openlist_connection": "更新 OpenList 连接（支持局部更新）；地址/鉴权方式/账号/密码变化时清空登录令牌缓存，manual_token 留空表示不修改。",
+    "delete_openlist_connection": "删除 OpenList 连接；被转发规则引用时拒绝删除。",
+    "test_openlist_connection": "按连接的鉴权方式自检：password 登录一次验证凭据，token 用令牌探测接口（401/403 即令牌无效，不会回落到账号密码登录）。",
     "list_backups": "列出服务端备份快照（含文件名/大小/时间）。",
     "create_backup": "生成一份当前配置数据快照，重大变更前建议先备份。",
     "download_backup": "下载指定备份文件到本地。",
@@ -266,9 +280,9 @@ class AdminConsole:
         # API 密钥管理（仅浏览器会话可操作，API 密钥自身不可管理密钥——防权限自增殖）
         app.router.add_get("/_admin/api/keys", self.list_api_keys)
         app.router.add_post("/_admin/api/keys", self.create_api_key)
-        app.router.add_post("/_admin/api/keys/{key_id:\d+}/toggle", self.toggle_api_key)
-        app.router.add_put("/_admin/api/keys/{key_id:\d+}", self.update_api_key)
-        app.router.add_delete("/_admin/api/keys/{key_id:\d+}", self.delete_api_key)
+        app.router.add_post("/_admin/api/keys/{key_id:\\d+}/toggle", self.toggle_api_key)
+        app.router.add_put("/_admin/api/keys/{key_id:\\d+}", self.update_api_key)
+        app.router.add_delete("/_admin/api/keys/{key_id:\\d+}", self.delete_api_key)
         app.router.add_get("/_admin/api/bootstrap", self.bootstrap)
         # API 文档自动维护：从路由表汇总全部接口（新增接口自动出现）
         app.router.add_get("/_admin/api/doc", self.api_doc_catalog)
@@ -330,6 +344,13 @@ class AdminConsole:
         app.router.add_get("/_admin/api/email", self.get_email_settings)
         app.router.add_put("/_admin/api/email", self.update_email_settings)
         app.router.add_post("/_admin/api/email/test", self.test_email)
+        # OpenList：连接注册表（CRUD + 单连接测试）；旧「全局默认连接」接口已下线
+        app.router.add_get("/_admin/api/openlist/connections", self.list_openlist_connections)
+        app.router.add_post("/_admin/api/openlist/connections", self.create_openlist_connection)
+        app.router.add_get("/_admin/api/openlist/connections/{conn_id:\\d+}", self.get_openlist_connection)
+        app.router.add_put("/_admin/api/openlist/connections/{conn_id:\\d+}", self.update_openlist_connection)
+        app.router.add_delete("/_admin/api/openlist/connections/{conn_id:\\d+}", self.delete_openlist_connection)
+        app.router.add_post("/_admin/api/openlist/connections/{conn_id:\\d+}/test", self.test_openlist_connection)
         app.router.add_get("/_admin/api/rules", self.list_rules)
         app.router.add_post("/_admin/api/rules", self.create_rule)
         app.router.add_get("/_admin/api/rules/{rule_id:\\d+}", self.get_rule)
@@ -815,6 +836,8 @@ class AdminConsole:
             "rule_request_host": request.query.get("rule_request_host", ""),
             "match_strategy": request.query.get("match_strategy", ""),
             "result_status": request.query.get("result_status", ""),
+            # 上游类型筛选：'' 全部 / 'http' / 'openlist'（config_store 内做白名单化）
+            "upstream_type": request.query.get("upstream_type", ""),
             "referer": request.query.get("referer", ""),
             "date_from": request.query.get("date_from", ""),
             "date_to": request.query.get("date_to", ""),
@@ -1334,6 +1357,144 @@ class AdminConsole:
         
         return {"success": success, "message": message}
 
+    # ---- OpenList：连接注册表 ----
+
+    def _reset_openlist_clients(self) -> None:
+        """连接信息变更后清空进程内客户端缓存，强制下次请求重新登录。"""
+        try:
+            from openlist_client import reset_clients
+            reset_clients()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("清空 OpenList 客户端缓存失败: %s", exc)
+
+    @staticmethod
+    def _openlist_conn_id(request: web.Request) -> int:
+        return int(request.match_info["conn_id"])
+
+    async def list_openlist_connections(self, request: web.Request) -> web.Response:
+        return await self._run_protected(
+            request, lambda: {"items": self.config_store.list_openlist_connections()}
+        )
+
+    async def create_openlist_connection(self, request: web.Request) -> web.Response:
+        payload = await self._read_json(request)
+        return await self._run_protected(request, lambda: self._create_openlist_connection(payload))
+
+    def _create_openlist_connection(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.create_openlist_connection(payload)
+        self._reset_openlist_clients()
+        return {"message": "OpenList 连接已创建", "connection": result}
+
+    async def get_openlist_connection(self, request: web.Request) -> web.Response:
+        conn_id = self._openlist_conn_id(request)
+        return await self._run_protected(
+            request, lambda: self.config_store.get_openlist_connection(conn_id) or {}
+        )
+
+    async def update_openlist_connection(self, request: web.Request) -> web.Response:
+        conn_id = self._openlist_conn_id(request)
+        payload = await self._read_json(request)
+        return await self._run_protected(
+            request, lambda: self._update_openlist_connection(conn_id, payload)
+        )
+
+    def _update_openlist_connection(self, conn_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.config_store.update_openlist_connection(conn_id, payload)
+        self._reset_openlist_clients()
+        return {"message": "OpenList 连接已更新", "connection": result}
+
+    async def delete_openlist_connection(self, request: web.Request) -> web.Response:
+        conn_id = self._openlist_conn_id(request)
+        return await self._run_protected(request, lambda: self._delete_openlist_connection(conn_id))
+
+    def _delete_openlist_connection(self, conn_id: int) -> Dict[str, Any]:
+        self.config_store.delete_openlist_connection(conn_id)
+        self._reset_openlist_clients()
+        return {"message": "OpenList 连接已删除"}
+
+    async def test_openlist_connection(self, request: web.Request) -> web.Response:
+        conn_id = self._openlist_conn_id(request)
+        try:
+            payload = await self._read_json(request)
+        except Exception:  # noqa: BLE001 - body 允许为空
+            payload = {}
+        return await self._run_protected(
+            request, lambda: self._test_openlist_connection(conn_id, payload)
+        )
+
+    async def _test_openlist_connection(self, conn_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """按连接的鉴权方式做一次连通性/凭据自检（可被 payload 覆盖地址与凭据）。
+
+        - password 模式：用账号密码调 /api/auth/login，验证地址与凭据可用；
+        - token 模式：用配置的令牌探测 /api/fs/link，401/403 即令牌无效（**不回落登录**）。
+        payload 允许带上 auth_mode / manual_token，便于「填了还没保存就先测一下」。
+        """
+        import aiohttp
+
+        from openlist_client import AUTH_MODE_TOKEN, OpenListAuthError, OpenListClient
+
+        conn = self.config_store.get_openlist_connection(conn_id, include_token=True)
+        if not conn:
+            logger.warning("OpenList 连接测试失败: id=%s 连接不存在", conn_id)
+            return {"success": False, "message": "OpenList 连接不存在"}
+        base_url = str(payload.get("base_url") or conn.get("base_url") or "").strip().rstrip("/")
+        auth_mode = str(payload.get("auth_mode") or conn.get("auth_mode") or "password").strip().lower()
+        if auth_mode not in ("password", AUTH_MODE_TOKEN):
+            auth_mode = "password"
+        if payload.get("username") is not None:
+            username = str(payload.get("username") or "").strip()
+        else:
+            username = str(conn.get("username") or "").strip()
+        password = str(payload.get("password") or conn.get("password") or "")
+        manual_token = str(payload.get("manual_token") or conn.get("manual_token") or "")
+        conn_name = str(conn.get("name") or "") or "(未命名)"
+        if not base_url:
+            logger.warning("OpenList 连接测试失败: id=%s name=%s 未填写基地址", conn_id, conn_name)
+            return {"success": False, "message": "请先填写 OpenList 基地址"}
+        client = OpenListClient(
+            base_url,
+            username,
+            password,
+            auth_mode=auth_mode,
+            manual_token=manual_token,
+            timeout=10,
+        )
+        session = aiohttp.ClientSession()
+        try:
+            if auth_mode == AUTH_MODE_TOKEN:
+                detail = await client.verify_token(session)
+                # 测试结果进服务端日志：后台点完「测试」若失败，运维在应用日志里也能追溯
+                # （此前只回显在前端，关掉弹窗就没了痕迹）。令牌本身绝不入日志。
+                logger.info(
+                    "OpenList 连接测试成功: id=%s name=%s 鉴权=token base_url=%s",
+                    conn_id, conn_name, base_url,
+                )
+                return {"success": True, "message": f"连接成功，{detail}"}
+            await client.login(session)
+            logger.info(
+                "OpenList 连接测试成功: id=%s name=%s 鉴权=password base_url=%s 账号=%s",
+                conn_id, conn_name, base_url, username or "(空)",
+            )
+            return {"success": True, "message": "连接成功，登录凭据有效"}
+        except OpenListAuthError as exc:
+            logger.warning(
+                "OpenList 连接测试失败: id=%s name=%s 鉴权=%s base_url=%s %s 原因=%s",
+                conn_id, conn_name, auth_mode, base_url,
+                # token 模式下没有账号，打印「账号=(空)」会误导成配置缺失，改为提示令牌已配置
+                ("令牌=已配置" if auth_mode == AUTH_MODE_TOKEN
+                 else f"账号={username or '(空)'}"),
+                exc,
+            )
+            return {"success": False, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - 网络/解析等一律给出可读提示
+            logger.warning(
+                "OpenList 连接测试异常: id=%s name=%s 鉴权=%s base_url=%s 原因=%s",
+                conn_id, conn_name, auth_mode, base_url, exc,
+            )
+            return {"success": False, "message": f"连接失败: {exc}"}
+        finally:
+            await session.close()
+
     async def list_banned_ips(self, request: web.Request) -> web.Response:
         return await self._run_protected(request, lambda: {"items": self.config_store.list_banned_ips()})
 
@@ -1820,6 +1981,7 @@ class AdminConsole:
         ("/_admin/api/notifications", "notifications_settings"),
         ("/_admin/api/backup", "backup"),
         ("/_admin/api/email", "email_settings"),
+        ("/_admin/api/openlist/connections", "openlist_connections"),
         ("/_admin/api/logs", "route_log"),
     )
     # 审计动作按 HTTP 方法归类；GET/HEAD/OPTIONS 属读操作，不审计
@@ -1847,6 +2009,7 @@ class AdminConsole:
         ("/_admin/api/redirect-signing", "signing"),
         ("/_admin/api/signed-url", "signing"),
         ("/_admin/api/email", "email"),
+        ("/_admin/api/openlist", "openlist"),
         ("/_admin/api/backup", "backup"),
         ("/_admin/api/doc", "apidoc"),
         ("/_admin/api/keys", "apikeys"),

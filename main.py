@@ -33,13 +33,14 @@ import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from config import Config, load_config, setup_logging, normalize_request_host, prune_app_log_files, set_request_id, get_request_id, generate_request_id
+from config import Config, ProxyRule, load_config, setup_logging, normalize_request_host, prune_app_log_files, set_request_id, get_request_id, generate_request_id
 from admin_console import AdminConsole
 from auto_ban_monitor import AutoBanMonitor
 from config_store import ConfigStore
 from geo_service import GeoResolver
 from offline_geoip_sync import OfflineGeoIPSyncService
-from proxy_core import ProxyRequestHandler, ProxyStats, StreamingResponse
+from openlist_client import OpenListError, get_client
+from proxy_core import ProxyRequestHandler, ProxyStats, RouteDecision, StreamingResponse
 from ip_result_cache import IpResultCache
 from ip_ban_manager import IpBanManager
 from rate_limiter import RateLimiter
@@ -663,6 +664,12 @@ class ProxyServer:
             charset="utf-8",
         )
 
+    async def _render_502_page(self, reason: str = "") -> web.Response:
+        """渲染 502 上游解析失败页面（复用 500 页样式，状态码改为 502）。"""
+        response = await self._render_500_page(reason)
+        response.set_status(502)
+        return response
+
     def _fallback_500_html(self, reason: str = "") -> str:
         """生成回退的 500 HTML"""
         import html
@@ -747,7 +754,7 @@ class ProxyServer:
             return redirect_info.redirect_url
         return ""
 
-    def _build_route_log_payload(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "") -> Dict[str, Any]:
+    def _build_route_log_payload(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "", result_status: str = "") -> Dict[str, Any]:
         """构建路由日志载荷（纯 CPU，不含 I/O）。"""
         geo_location = route_decision.geo_location if route_decision else None
         geo_source = geo_location.source if geo_location else ""
@@ -830,7 +837,7 @@ class ProxyServer:
             "redirect_location": logged_redirect_location,
             "transport_mode": transport_mode,
             "operation_duration_ms": self._request_duration_ms(request),
-            "result_status": self._infer_route_log_result_status(
+            "result_status": result_status or self._infer_route_log_result_status(
                 route_decision=route_decision,
                 upstream_status=upstream_status,
                 cache_status=cache_status,
@@ -841,6 +848,28 @@ class ProxyServer:
             # 归零后与普通代理请求无法区分，这里把链路口志一并落库，供日志页展示完整链路
             # （如「签名重入:通过 → 签名重入:缓存命中(内部代理) → 代理:200」）。
             "chain": " → ".join(request.get("_chain", []) or [])[-800:],
+            # 上游类型与 OpenList 连接留痕：'http' 为默认；openlist 规则额外记录命中的
+            # 连接身份（id/名称）与 OpenList 侧挂载路径，支撑「多服务器/多账号」排障。
+            "upstream_type": (
+                str(getattr(route_decision, "upstream_type", "") or "http")
+                if route_decision
+                else "http"
+            ),
+            "openlist_connection_id": (
+                int(getattr(route_decision, "openlist_connection_id", 0) or 0)
+                if route_decision
+                else 0
+            ),
+            "openlist_connection_name": (
+                str(getattr(route_decision, "openlist_connection_name", "") or "")
+                if route_decision
+                else ""
+            ),
+            "openlist_path": (
+                str(getattr(route_decision, "openlist_path", "") or "")
+                if route_decision
+                else ""
+            ),
             # 盗链监控数据源（HOTLINK_PROTECTION.md 阶段 1）：Referer / UA 用于识别
             # 外部网页引用，bytes_transferred 由流式通道在落库前写入 request 上下文。
             "referer": (request.headers.get("Referer", "") or ""),
@@ -850,11 +879,13 @@ class ProxyServer:
         }
         return payload
 
-    async def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "") -> None:
+    async def _record_route_log(self, request: web.Request, *, route_decision=None, upstream_status: int = 0, cache_status: str = "", redirect_info=None, transport_mode: str = "", error_message: str = "", redirect_location: str = "", result_status: str = "") -> None:
         """记录路由日志。
 
         insert_route_log 内部是同步 sqlite3 写盘，此前直接在事件循环里执行，
         每个请求都要阻塞整站一次；这里改为丢进线程池，落盘失败只记日志不影响代理。
+        result_status 显式传入时优先于自动推断（如 OpenList 解析失败要落 openlist_error，
+        不能被 error_message 一律判成 proxy_error）。
         """
         try:
             payload = self._build_route_log_payload(
@@ -866,6 +897,7 @@ class ProxyServer:
                 transport_mode=transport_mode,
                 error_message=error_message,
                 redirect_location=redirect_location,
+                result_status=result_status,
             )
         except Exception as exc:
             logger.warning("构建路由日志失败: %s", exc)
@@ -985,6 +1017,183 @@ class ProxyServer:
             request["_signed_route_decision"] = decision
             self._chain_step(request, "签名重入:缓存命中(内部代理)")
         return await self.handle_proxy(request)
+
+    # ===== OpenList 上游适配（upstream_type=openlist）=====
+
+    @staticmethod
+    def _openlist_conn_label(conn_id: int, conn_name: str) -> str:
+        """日志 / 链路里标识 OpenList 连接：优先连接名，其次 #id，都没有则「未绑定」。
+
+        多连接排障全靠这个标签，所以不允许返回空串——否则会产出
+        `OpenList:解析[ → /path]` 这种读不通、也无法定位上游的日志。
+        """
+        name = str(conn_name or "").strip()
+        if name:
+            return name
+        cid = int(conn_id or 0)
+        return f"#{cid}" if cid > 0 else "未绑定"
+
+    @staticmethod
+    def _openlist_relative_path(rule: ProxyRule, path_decoded: str) -> str:
+        """把代理请求路径映射为 OpenList 挂载路径。
+
+        始终剥离规则自身的 path_prefix（那是代理的路由前缀，不属于 OpenList 命名空间），
+        再前置规则的 openlist_path_prefix。path_rewrite 与 build_target_url 保持一致，
+        先于剥离执行，便于复用既有改写配置。
+        """
+        effective_path = path_decoded or "/"
+        if rule.path_rewrite_pattern:
+            try:
+                effective_path = re.sub(
+                    rule.path_rewrite_pattern, rule.path_rewrite_replacement or "", effective_path
+                )
+            except re.error:
+                logger.warning("规则 %s 的正则改写模式无效（OpenList 路径映射，忽略）", rule.rule_id)
+        prefix = rule.path_prefix or ""
+        if prefix and effective_path.startswith(prefix):
+            effective_path = effective_path[len(prefix):]
+        if not effective_path.startswith("/"):
+            effective_path = "/" + effective_path
+        return effective_path
+
+    def _persist_connection_token(self, conn_id: int, token: str) -> None:
+        """指定连接的登录 token 回写 DB，失败仅告警不影响转发。"""
+        try:
+            self.config_store.store_openlist_connection_token(conn_id, token)
+        except Exception as exc:  # noqa: BLE001 - 回写失败不影响请求链路
+            logger.warning("OpenList 连接 token 回写失败 (id=%s): %s", conn_id, exc)
+
+    def _resolve_openlist_connection(self, rule: ProxyRule):
+        """解析规则绑定的 OpenList 连接，返回 (cfg, persist_cb)。
+
+        cfg: dict(base_url/auth_mode/username/password/token/manual_token/connection_id/connection_name)
+        persist_cb: 接收新 token 的回调，写回该连接（仅 password 模式会触发）。
+        已无「全局默认连接」：openlist 规则必须显式绑定一个连接，否则报错（→ 502）。
+
+        cfg 里额外带上连接身份（id/名称），供路由日志留痕——多连接排障时
+        「这条请求打到了哪台 OpenList」必须能从日志直接读出，不必反查规则表。
+
+        Raises:
+            OpenListError: 未绑定连接、或绑定的连接不存在 / 已禁用 / 缺必要配置。
+        """
+        conn_id = int(getattr(rule, "openlist_connection_id", 0) or 0)
+        if conn_id <= 0:
+            raise OpenListError("规则未绑定 OpenList 连接（请在规则中选择连接）")
+        conn = self.config_store.get_openlist_connection(conn_id, include_token=True)
+        if not conn:
+            raise OpenListError(f"绑定的 OpenList 连接不存在（id={conn_id}）")
+        if not conn.get("enabled", True):
+            raise OpenListError(f"绑定的 OpenList 连接已禁用（id={conn_id}）")
+        auth_mode = str(conn.get("auth_mode") or "password").strip().lower()
+        if auth_mode not in ("password", "token"):
+            auth_mode = "password"
+        cfg = {
+            "base_url": conn.get("base_url", "") or "",
+            "auth_mode": auth_mode,
+            "username": conn.get("username", "") or "",
+            "password": conn.get("password", "") or "",
+            "token": conn.get("token", "") or "",
+            "manual_token": conn.get("manual_token", "") or "",
+            "connection_id": conn_id,
+            "connection_name": str(conn.get("name", "") or ""),
+        }
+        # 默认参数固化 conn_id，避免闭包捕获后续变化
+        persist_cb = (lambda tok, _cid=conn_id: self._persist_connection_token(_cid, tok))
+        return cfg, persist_cb
+
+    async def _resolve_openlist_route(
+        self,
+        request: web.Request,
+        route_decision: RouteDecision,
+        path_decoded: str,
+        query_string: str,
+    ) -> Optional[RouteDecision]:
+        """按规则把请求路径换为 OpenList 加签直链；失败返回 None（已落路由日志）。
+
+        成功返回替换后的 RouteDecision：target_url=直链，upstream_headers=需携带请求头。
+        对 302 加签重入同样生效——重入快照携带原规则，此处重新解析，避免复用过期签名链接。
+        """
+        rule = route_decision.rule
+        openlist_path = ""
+        # 连接身份先按规则上存的 id 兜底：即使解析在「取连接」阶段就失败
+        # （未绑定 / 连接不存在 / 已禁用），日志也能指出规则配的是哪个 id。
+        conn_id = int(getattr(rule, "openlist_connection_id", 0) or 0)
+        conn_name = ""
+        try:
+            cfg, persist_cb = self._resolve_openlist_connection(rule)
+            conn_id = int(cfg.get("connection_id") or 0)
+            conn_name = str(cfg.get("connection_name") or "")
+            if not cfg["base_url"]:
+                raise OpenListError("该连接未配置 OpenList 基地址（后台 → OpenList 上游）")
+            if cfg.get("auth_mode") == "token" and not (cfg.get("manual_token") or "").strip():
+                raise OpenListError("该连接鉴权方式为「直接使用令牌」但未配置令牌（后台 → OpenList 上游）")
+            relative = self._openlist_relative_path(rule, path_decoded)
+            openlist_path = f"{(rule.openlist_path_prefix or '').rstrip('/')}{relative}"
+            session = await self.request_handler.get_session()
+            client = get_client(
+                cfg["base_url"],
+                cfg["username"],
+                cfg["password"],
+                auth_mode=cfg.get("auth_mode") or "password",
+                token=cfg["token"],
+                manual_token=cfg.get("manual_token") or "",
+                timeout=float(rule.timeout or 30),
+                on_token_refreshed=persist_cb,
+            )
+            url, upstream_headers = await client.get_link(
+                session, openlist_path, rule.openlist_password
+            )
+            if query_string:
+                # 保留播放器附加 query（如 Range 之外的业务参数）；直链已有 ?sign= 时用 & 拼接
+                url = f"{url}{'&' if '?' in url else '?'}{query_string}"
+            # 链路节点带上连接身份：多连接下「解析成功但回源不对」时能一眼看出打到了哪个上游
+            self._chain_step(request, f"OpenList:解析[{self._openlist_conn_label(conn_id, conn_name)} → {openlist_path}]")
+            # 取链结果必须落 INFO：OpenList 文件直链带签名且有时效，排障需要知道
+            # 「当时实际拿到/签发的是哪条链接」，而 DEBUG 在默认日志级别下不可见。
+            # 直链不截断——截断后的签名串既无法复现问题，也看不出真实目标主机；
+            # 路由日志 target_url 落的是同一条链接，两处可互相对照。
+            logger.info(
+                "OpenList 取链成功: 连接=%s(id=%s) 鉴权=%s OpenList路径=%s 直链=%s",
+                self._openlist_conn_label(conn_id, conn_name),
+                conn_id,
+                cfg.get("auth_mode") or "password",
+                openlist_path,
+                url,
+            )
+            return replace(
+                route_decision,
+                target_url=url,
+                upstream_headers=dict(upstream_headers or {}),
+                upstream_type="openlist",
+                openlist_connection_id=conn_id,
+                openlist_connection_name=conn_name,
+                openlist_path=openlist_path,
+            )
+        except OpenListError as exc:
+            conn_label = self._openlist_conn_label(conn_id, conn_name)
+            logger.warning(
+                "OpenList 解析失败: 连接=%s id=%s IP=%s 路径=%s 原因=%s",
+                conn_label, conn_id, route_decision.client_ip,
+                openlist_path or path_decoded, exc,
+            )
+            self._chain_step(request, f"OpenList:失败[{conn_label}]")
+            await self._record_route_log(
+                request,
+                # 失败也要留痕：把上游类型与连接身份挂到决策上再落库，
+                # result_status 用专用值 openlist_error，便于日志页直接筛「OpenList 异常」。
+                route_decision=replace(
+                    route_decision,
+                    upstream_type="openlist",
+                    openlist_connection_id=conn_id,
+                    openlist_connection_name=conn_name,
+                    openlist_path=openlist_path,
+                ),
+                upstream_status=502,
+                transport_mode="none",
+                result_status="openlist_error",
+                error_message=str(exc),
+            )
+            return None
 
     async def handle_proxy(self, request: web.Request) -> web.StreamResponse:
         route_decision = None
@@ -1158,6 +1367,16 @@ class ProxyServer:
                     resp.headers["Retry-After"] = str(int(retry_after) + 1)
                     return resp
 
+            # ===== OpenList 上游适配：把请求路径换为上游加签直链 =====
+            # 位置考究：早于 target_url 取值、晚于 302 加签快照加载 —— 首次请求与 /_signed
+            # 重入（saved_decision 携带原规则）都会在此重新解析，绝不复用已过期的签名链接。
+            if route_decision and route_decision.rule.normalized_upstream_type() == "openlist":
+                route_decision = await self._resolve_openlist_route(
+                    request, route_decision, path_decoded, query_string
+                )
+                if route_decision is None:
+                    return await self._render_502_page("OpenList 上游解析失败")
+
             target_url = route_decision.target_url if route_decision else None
             use_streaming_mode = bool(
                 route_decision and route_decision.rule.enable_streaming and self.config.streaming.enabled
@@ -1204,7 +1423,17 @@ class ProxyServer:
             # 首次代理请求：强制不下发内部跟随，把上游 3xx 改签为 302 返回客户端
             # （无论规则 follow_redirects 取值，都走「生成签名链接」流程）；
             # 仅 /_signed 重入（B 模式内部代理穿流）才允许内部跟随。
-            force_external_redirect = not (request.get("_signed_reentry") or saved_decision is not None)
+            #
+            # 必须受「302 加签改写」总开关约束：加签关闭时压根不会生成签名链接，
+            # 再强制 follow_redirects=False 就只剩副作用——规则里明确勾了「跟随重定向」
+            # 也会被原样透传上游 302（并顺带把上游裸链泄漏给客户端）。
+            # 故加签关闭时交还给 rule.follow_redirects 决定：True→内部跟随后回内容，
+            # False→按裸链语义透传 302。与 REQUEST_FLOW.md「加签关闭时行为不变」一致。
+            _signed_rewrite_on = bool(self.config.signed_redirect.enabled)
+            _is_signed_internal = bool(
+                request.get("_signed_reentry") or saved_decision is not None
+            )
+            force_external_redirect = _signed_rewrite_on and not _is_signed_internal
 
             # 直接转发请求到上游服务器
             if use_streaming_mode:

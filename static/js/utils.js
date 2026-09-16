@@ -187,6 +187,7 @@ export const RESULT_STATUS_LABELS = {
   forwarded_client_error: "上游 4xx",
   upstream_error: "上游异常",
   proxy_error: "代理异常",
+  openlist_error: "OpenList 异常",
   no_route: "未匹配路由",
   hotlink_blocked: "盗链拦截",
   ua_blocked: "UA 拦截",
@@ -198,6 +199,9 @@ export const CACHE_STATUS_LABELS = {
   HIT_REDIRECT: "缓存命中(重定向)",
   HIT_STREAMING: "缓存命中(流式)",
   BANNED: "已封禁",
+  // 旧值兼容：OpenList 早期版本曾把解析失败塞进 cache_status，现改用
+  // result_status=openlist_error。保留标签仅为让历史日志显示中文而非裸英文码。
+  OPENLIST_ERROR: "OpenList 异常",
 };
 
 export const MATCH_DETAIL_LABELS = {

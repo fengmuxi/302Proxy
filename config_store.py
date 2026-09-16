@@ -137,6 +137,11 @@ class ConfigStore:
         ("cors_allow_credentials", "INTEGER NOT NULL DEFAULT 0"),
         ("cors_max_age", "INTEGER NOT NULL DEFAULT 600"),
         ("notifications_config", "TEXT NOT NULL DEFAULT ''"),
+        # OpenList 上游适配（全局连接配置）
+        ("openlist_base_url", "TEXT NOT NULL DEFAULT ''"),
+        ("openlist_username", "TEXT NOT NULL DEFAULT ''"),
+        ("openlist_password", "TEXT NOT NULL DEFAULT ''"),
+        ("openlist_token", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # route_logs 的演进列（017 引入）：旧库 base schema（CREATE TABLE IF NOT EXISTS）
@@ -146,6 +151,12 @@ class ConfigStore:
         ("user_agent", "TEXT NOT NULL DEFAULT ''"),
         ("bytes_transferred", "INTEGER NOT NULL DEFAULT 0"),
         ("chain", "TEXT NOT NULL DEFAULT ''"),
+        # OpenList 上游链路留痕：区分 http/openlist，并记录命中的连接身份与 OpenList 侧路径，
+        # 排障时无需翻规则表即可知道「这条日志走的是哪台服务器/哪个账号」。
+        ("upstream_type", "TEXT NOT NULL DEFAULT 'http'"),
+        ("openlist_connection_id", "INTEGER NOT NULL DEFAULT 0"),
+        ("openlist_connection_name", "TEXT NOT NULL DEFAULT ''"),
+        ("openlist_path", "TEXT NOT NULL DEFAULT ''"),
     )
 
     # forward_rules 的演进列（018/019/022 引入）：Referer 防盗链 + UA 黑白名单
@@ -167,6 +178,12 @@ class ConfigStore:
         ("upstream_verify_ssl", "INTEGER NOT NULL DEFAULT -1"),
         ("client_cert", "TEXT NOT NULL DEFAULT ''"),
         ("client_key", "TEXT NOT NULL DEFAULT ''"),
+        # OpenList 上游适配
+        ("upstream_type", "TEXT NOT NULL DEFAULT 'http'"),
+        ("openlist_path_prefix", "TEXT NOT NULL DEFAULT ''"),
+        ("openlist_password", "TEXT NOT NULL DEFAULT ''"),
+        # OpenList 多上游：绑定的连接 id（0=用全局默认连接 system_settings.openlist_*）
+        ("openlist_connection_id", "INTEGER NOT NULL DEFAULT 0"),
     )
 
     # api_keys 的演进列（031 引入）：P1-2.3 细粒度权限
@@ -265,6 +282,10 @@ class ConfigStore:
                     follow_redirects INTEGER NOT NULL,
                     trust_forward_headers INTEGER NOT NULL,
                     database_path TEXT NOT NULL,
+                    openlist_base_url TEXT NOT NULL DEFAULT '',
+                    openlist_username TEXT NOT NULL DEFAULT '',
+                    openlist_password TEXT NOT NULL DEFAULT '',
+                    openlist_token TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
 
@@ -410,6 +431,11 @@ class ConfigStore:
                     result_status TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
                     chain TEXT NOT NULL DEFAULT '',
+                    -- 上游类型与 OpenList 连接留痕（'http' 为默认；openlist 规则记录连接身份）
+                    upstream_type TEXT NOT NULL DEFAULT 'http',
+                    openlist_connection_id INTEGER NOT NULL DEFAULT 0,
+                    openlist_connection_name TEXT NOT NULL DEFAULT '',
+                    openlist_path TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
 
@@ -477,7 +503,30 @@ class ConfigStore:
                     inject_request_headers TEXT NOT NULL DEFAULT '',
                     upstream_verify_ssl INTEGER NOT NULL DEFAULT -1,
                     client_cert TEXT NOT NULL DEFAULT '',
-                    client_key TEXT NOT NULL DEFAULT ''
+                    client_key TEXT NOT NULL DEFAULT '',
+                    upstream_type TEXT NOT NULL DEFAULT 'http',
+                    openlist_path_prefix TEXT NOT NULL DEFAULT '',
+                    openlist_password TEXT NOT NULL DEFAULT '',
+                    openlist_connection_id INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS openlist_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT '',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    -- 鉴权方式：'password'=账号密码登录换取令牌（默认，兼容存量）；
+                    --           'token'   =直接使用用户配置的令牌请求接口，不登录。
+                    auth_mode TEXT NOT NULL DEFAULT 'password',
+                    username TEXT NOT NULL DEFAULT '',
+                    password TEXT NOT NULL DEFAULT '',
+                    -- token：password 模式下的「登录令牌缓存」（登录成功回写，可被刷新覆盖）；
+                    -- manual_token：token 模式下用户手工配置的令牌，只由后台表单写入，绝不被自动覆盖。
+                    -- 两者分开存储，避免自动登录把用户配置的令牌冲掉、也避免切模式时误用旧缓存。
+                    token TEXT NOT NULL DEFAULT '',
+                    manual_token TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_forward_rules_path_prefix
@@ -627,6 +676,31 @@ class ConfigStore:
                 self._ensure_column(connection, "api_keys", column_name, definition)
             # route_groups 演进列（034 引入）：组级规则默认配置（规则继承 P2-4.1）
             self._ensure_column(connection, "route_groups", "rule_defaults", "TEXT NOT NULL DEFAULT '{}'")
+            # OpenList 多上游（连接注册表）：新表整体创建即可幂等（LEGACY 元组只补列、不建表）
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS openlist_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL DEFAULT '',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    auth_mode TEXT NOT NULL DEFAULT 'password',
+                    username TEXT NOT NULL DEFAULT '',
+                    password TEXT NOT NULL DEFAULT '',
+                    token TEXT NOT NULL DEFAULT '',
+                    manual_token TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            # openlist_connections 演进列（双鉴权模式）：本表由上方 CREATE 建出，
+            # 但**更早的版本已经建过**该表，CREATE TABLE IF NOT EXISTS 不会补列，
+            # 因此必须在此幂等 ALTER（与 LEGACY_* 元组同理）。
+            self._ensure_column(connection, "openlist_connections", "auth_mode", "TEXT NOT NULL DEFAULT 'password'")
+            self._ensure_column(connection, "openlist_connections", "manual_token", "TEXT NOT NULL DEFAULT ''")
+            # 旧版全局默认连接 → 连接注册表（幂等；须在上面的建表/补列之后）
+            self._migrate_legacy_openlist_connection(connection)
 
     def _ensure_security_keys(self, connection: sqlite3.Connection) -> None:
         """确保旧数据库也有 session_secret 和 rsa_private_key"""
@@ -978,8 +1052,9 @@ class ConfigStore:
                 target_urls, health_check_enabled, health_check_path, health_check_interval, health_check_timeout,
                 cors_origins,
                 inject_request_headers, upstream_verify_ssl, client_cert, client_key,
+                upstream_type, openlist_path_prefix, openlist_password, openlist_connection_id,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source,
@@ -1020,6 +1095,10 @@ class ConfigStore:
                 int(rule.upstream_verify_ssl),
                 rule.client_cert or "",
                 rule.client_key or "",
+                rule.normalized_upstream_type(),
+                rule.openlist_path_prefix or "",
+                rule.openlist_password or "",
+                int(rule.openlist_connection_id or 0),
                 now,
                 now,
             ),
@@ -1749,9 +1828,10 @@ class ConfigStore:
                     geo_source, geo_summary, geo_country, geo_region, geo_city,
                     configured_ip_whitelist, matched_ip_whitelist, configured_regions, matched_region, match_strategy, match_detail,
                     upstream_status, cache_status, redirect_count, transport_mode,
-                    operation_duration_ms, result_status, error_message, referer, user_agent, bytes_transferred, chain, created_at
+                    operation_duration_ms, result_status, error_message, referer, user_agent, bytes_transferred, chain,
+                    upstream_type, openlist_connection_id, openlist_connection_name, openlist_path, created_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1792,6 +1872,11 @@ class ConfigStore:
                     str(payload.get("user_agent", "")).strip(),
                     int(payload.get("bytes_transferred", 0) or 0),
                     str(payload.get("chain", "")).strip(),
+                    # 上游类型白名单化（与 _payload_to_rule 同款写法）：非 openlist 一律落 'http'
+                    "openlist" if str(payload.get("upstream_type", "") or "").strip().lower() == "openlist" else "http",
+                    int(payload.get("openlist_connection_id", 0) or 0),
+                    str(payload.get("openlist_connection_name", "")).strip(),
+                    str(payload.get("openlist_path", "")).strip(),
                     created_at,
                 ),
             )
@@ -1826,10 +1911,10 @@ class ConfigStore:
                 "request_path LIKE ? OR request_host LIKE ? OR rule_request_host LIKE ? OR "
                 "path_prefix LIKE ? OR rule_name LIKE ? OR target_url LIKE ? OR redirect_location LIKE ? OR "
                 "geo_summary LIKE ? OR matched_region LIKE ? OR client_ip LIKE ? OR original_client_ip LIKE ? OR "
-                "chain LIKE ?"
+                "chain LIKE ? OR openlist_connection_name LIKE ? OR openlist_path LIKE ?"
                 ")"
             )
-            params.extend([like_value] * 12)
+            params.extend([like_value] * 14)
 
         path_prefix = str(filters.get("path_prefix", "")).strip()
         if path_prefix:
@@ -1863,6 +1948,14 @@ class ConfigStore:
         if result_status:
             clauses.append("result_status = ?")
             params.append(result_status)
+
+        # 上游类型筛选（'http' / 'openlist'）：快速定位「走 OpenList 的全部请求」。
+        # 白名单化，避免拼进 SQL 的取值不可控。
+        raw_upstream_type = str(filters.get("upstream_type", "")).strip().lower()
+        upstream_type = "openlist" if raw_upstream_type == "openlist" else ("http" if raw_upstream_type == "http" else "")
+        if upstream_type:
+            clauses.append("upstream_type = ?")
+            params.append(upstream_type)
 
         referer = str(filters.get("referer", "")).strip()
         if referer:
@@ -1913,6 +2006,7 @@ class ConfigStore:
                 "rule_request_host": raw_rule_request_host,
                 "match_strategy": match_strategy,
                 "result_status": result_status,
+                "upstream_type": upstream_type,
                 "referer": referer,
                 "date_from": date_from,
                 "date_to": date_to,
@@ -3265,6 +3359,281 @@ class ConfigStore:
             )
         return self.get_email_config()
 
+    # ===== OpenList 多上游：连接注册表 =====
+    # 语义：forward_rules.openlist_connection_id 必须指向本表一行（0/空 = 未绑定，运行时 502）。
+    # 旧版「全局默认连接」(system_settings.openlist_*) 已废弃：首次启动由
+    # _migrate_legacy_openlist_connection 迁移为一条普通连接并清空原列值。
+    # （system_settings.openlist_* 四列保留仅为兼容旧库 schema，运行期不再读取）
+    _OPENLIST_CONN_COLS = (
+        "id, name, base_url, auth_mode, username, password, token, manual_token, "
+        "enabled, created_at, updated_at"
+    )
+
+    # 鉴权方式白名单：'password' 账号密码登录 / 'token' 直接使用配置的令牌
+    OPENLIST_AUTH_PASSWORD = "password"
+    OPENLIST_AUTH_TOKEN = "token"
+
+    @classmethod
+    def _normalize_openlist_auth_mode(cls, value: Any) -> str:
+        """鉴权方式归一化：非白名单取值一律回落 'password'（存量默认，行为不变）。"""
+        mode = str(value or "").strip().lower()
+        return cls.OPENLIST_AUTH_TOKEN if mode == cls.OPENLIST_AUTH_TOKEN else cls.OPENLIST_AUTH_PASSWORD
+
+    @staticmethod
+    def normalize_openlist_token(value: Any) -> str:
+        """令牌归一化：去空白、容忍用户连 'Bearer ' 前缀一起粘进来。
+
+        不校验长度/形态——不同 OpenList 版本令牌格式不一，交给上游判定。
+        """
+        token = str(value or "").strip().strip('"').strip("'").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        return token
+
+    @classmethod
+    def _serialize_openlist_connection(cls, row: sqlite3.Row, include_token: bool = False) -> Dict[str, Any]:
+        keys = row.keys()
+        auth_mode = cls._normalize_openlist_auth_mode(
+            row["auth_mode"] if "auth_mode" in keys else cls.OPENLIST_AUTH_PASSWORD
+        )
+        login_token = (row["token"] or "") if "token" in keys else ""
+        manual_token = (row["manual_token"] or "") if "manual_token" in keys else ""
+        data = {
+            "id": int(row["id"]),
+            "name": row["name"] or "",
+            "base_url": row["base_url"] or "",
+            "auth_mode": auth_mode,
+            "username": row["username"] or "",
+            "enabled": bool(row["enabled"]),
+            # 凭据就绪状态按模式区分：password 看登录缓存；token 看手工配置的令牌。
+            # 一律只回传布尔，绝不把任何一种令牌明文发给前端。
+            "has_token": bool(login_token),
+            "has_manual_token": bool(manual_token),
+            "credential_ready": bool(manual_token) if auth_mode == cls.OPENLIST_AUTH_TOKEN else bool(login_token),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if include_token:
+            data["token"] = login_token
+            data["manual_token"] = manual_token
+        return data
+
+    def list_openlist_connections(self) -> List[Dict[str, Any]]:
+        """列出全部 OpenList 连接（不含任何令牌明文，password 供后台表单回填）。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {self._OPENLIST_CONN_COLS} FROM openlist_connections ORDER BY id ASC"
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = self._serialize_openlist_connection(row)
+            item["password"] = row["password"] or ""
+            result.append(item)
+        return result
+
+    def get_openlist_connection(self, conn_id: int, include_token: bool = False) -> Optional[Dict[str, Any]]:
+        """按 id 取单个连接；include_token=True 时含令牌（仅供服务端解析器调用）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {self._OPENLIST_CONN_COLS} FROM openlist_connections WHERE id = ?",
+                (int(conn_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        data = self._serialize_openlist_connection(row, include_token=include_token)
+        data["password"] = row["password"] or ""
+        return data
+
+    def create_openlist_connection(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """新增连接；base_url 必填，name 留空时以 base_url 兜底。
+
+        auth_mode='token'（直接使用令牌）时 manual_token 必填——否则该连接无法鉴权，
+        配置出来就是一条必然 502 的规则，不如在这里直接拒绝。
+        """
+        name = str(payload.get("name", "") or "").strip()
+        base_url = str(payload.get("base_url", "") or "").strip().rstrip("/")
+        auth_mode = self._normalize_openlist_auth_mode(payload.get("auth_mode"))
+        username = str(payload.get("username", "") or "").strip()
+        password = str(payload.get("password", "") or "")
+        manual_token = self.normalize_openlist_token(payload.get("manual_token"))
+        enabled = coerce_bool(payload.get("enabled"), True)
+        if not base_url:
+            raise ValueError("OpenList 基地址不能为空")
+        if auth_mode == self.OPENLIST_AUTH_TOKEN and not manual_token:
+            raise ValueError("鉴权方式为「直接使用令牌」时必须填写 OpenList 令牌")
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO openlist_connections "
+                "(name, base_url, auth_mode, username, password, token, manual_token, enabled, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
+                (name or base_url, base_url, auth_mode, username, password, manual_token, int(enabled), now, now),
+            )
+            conn_id = int(cursor.lastrowid)
+        return self.get_openlist_connection(conn_id)
+
+    def update_openlist_connection(self, conn_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新连接（支持局部更新：未提供的键保留现值）。
+
+        令牌处理：
+        - auth_mode='password'：manual_token 不参与鉴权，保留原值（便于切回 token 模式）；
+          仅当 base_url / auth_mode / username / password 真正变化时清空登录令牌缓存
+          （改个名字或启停开关不应被迫重新登录）。
+        - auth_mode='token'：manual_token 留空表示不修改；本模式不使用登录缓存，
+          故一律把 token 清空，避免残留的登录令牌在切模式后被误用。
+        - password 留空表示不修改。
+        """
+        current = self.get_openlist_connection(conn_id, include_token=True)
+        if current is None:
+            raise ValueError("OpenList 连接不存在")
+        current_mode = self._normalize_openlist_auth_mode(current.get("auth_mode"))
+
+        if "base_url" in payload:
+            base_url = str(payload.get("base_url") or "").strip().rstrip("/")
+        else:
+            base_url = current.get("base_url", "") or ""
+        if not base_url:
+            raise ValueError("OpenList 基地址不能为空")
+
+        auth_mode = (
+            self._normalize_openlist_auth_mode(payload.get("auth_mode"))
+            if "auth_mode" in payload else current_mode
+        )
+        name = (str(payload.get("name") or "").strip() if "name" in payload
+                else (current.get("name") or "")) or current.get("name") or base_url
+        username = (str(payload.get("username") or "").strip() if "username" in payload
+                    else (current.get("username") or ""))
+        enabled = coerce_bool(payload.get("enabled"), bool(current.get("enabled", True)))
+        password = str(payload.get("password") or "") if "password" in payload else ""
+        if not password:
+            # 未提供则保留原密码
+            password = current.get("password", "") or ""
+
+        # manual_token：未提供（或提供为空）保留原值
+        manual_token = current.get("manual_token", "") or ""
+        if "manual_token" in payload:
+            provided = self.normalize_openlist_token(payload.get("manual_token"))
+            if provided:
+                manual_token = provided
+        if auth_mode == self.OPENLIST_AUTH_TOKEN and not manual_token:
+            raise ValueError("鉴权方式为「直接使用令牌」时必须填写 OpenList 令牌")
+
+        identity_changed = (
+            base_url != (current.get("base_url") or "")
+            or auth_mode != current_mode
+            or username != (current.get("username") or "")
+            or password != (current.get("password") or "")
+        )
+        # token 模式不消费登录缓存，直接清空；否则按身份变更决定是否保留
+        if auth_mode == self.OPENLIST_AUTH_TOKEN:
+            token_value = ""
+        else:
+            token_value = "" if identity_changed else (current.get("token") or "")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE openlist_connections SET name = ?, base_url = ?, auth_mode = ?, "
+                "username = ?, password = ?, token = ?, manual_token = ?, enabled = ?, updated_at = ? "
+                "WHERE id = ?",
+                (name, base_url, auth_mode, username, password, token_value, manual_token,
+                 int(enabled), now, int(conn_id)),
+            )
+        return self.get_openlist_connection(conn_id)
+
+    def delete_openlist_connection(self, conn_id: int) -> Dict[str, Any]:
+        """删除连接；被任何转发规则引用时拒绝（防止规则悬空指向不存在的连接）。"""
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT id FROM openlist_connections WHERE id = ?", (int(conn_id),)
+            ).fetchone()
+            if exists is None:
+                raise ValueError("OpenList 连接不存在")
+            refs = connection.execute(
+                "SELECT COUNT(*) FROM forward_rules WHERE openlist_connection_id = ?",
+                (int(conn_id),),
+            ).fetchone()[0]
+            if refs:
+                raise ValueError(f"该连接被 {int(refs)} 条转发规则引用，请先改绑或删除相关规则")
+            connection.execute("DELETE FROM openlist_connections WHERE id = ?", (int(conn_id),))
+        return {"deleted": int(conn_id)}
+
+    def store_openlist_connection_token(self, conn_id: int, token: str) -> None:
+        """登录成功后按连接回写缓存 token（失败仅告警，不阻断请求链路）。"""
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE openlist_connections SET token = ? WHERE id = ?",
+                    (str(token or ""), int(conn_id)),
+                )
+        except (sqlite3.Error, TypeError, ValueError) as exc:  # pragma: no cover
+            logger.warning("OpenList 连接 token 回写失败 (id=%s): %s", conn_id, exc)
+
+    def _migrate_legacy_openlist_connection(self, connection: sqlite3.Connection) -> None:
+        """把旧版「全局默认连接」(system_settings.openlist_*) 迁移为连接注册表的一行。
+
+        幂等守卫：仅当 openlist_connections 为空 **且** 全局 base_url 非空时执行。
+        迁移动作：
+          1. 用全局 base_url/username/password/token 建一条连接（名「系统默认连接」）；
+             鉴权方式按时序智能判定：只填了令牌、没填账号密码 → 'token'（直接使用令牌）；
+             否则 → 'password'，旧令牌作为登录缓存带入。
+          2. 把 upstream_type='openlist' 且 connection_id=0 的规则改绑到该连接；
+          3. 清空 system_settings.openlist_*（列保留，仅清值）。
+        执行后连接表非空且全局值为空，重启不会重复迁移。
+        """
+        try:
+            row = connection.execute(
+                "SELECT openlist_base_url, openlist_username, openlist_password, openlist_token "
+                "FROM system_settings WHERE id = 1"
+            ).fetchone()
+            base_url = ((row["openlist_base_url"] if row else "") or "").strip()
+            if not base_url:
+                return
+            if connection.execute("SELECT COUNT(*) FROM openlist_connections").fetchone()[0]:
+                return
+            legacy_username = ((row["openlist_username"] if row else "") or "").strip()
+            legacy_password = (row["openlist_password"] if row else "") or ""
+            legacy_token = self.normalize_openlist_token(row["openlist_token"] if row else "")
+            # 只有令牌没有账号密码 → 旧配置本就在用令牌直连，按 token 模式迁移；
+            # 有账号密码 → 旧配置靠登录，令牌视为可复用的登录缓存。
+            if legacy_token and not legacy_username and not legacy_password:
+                auth_mode, manual_token, login_token = self.OPENLIST_AUTH_TOKEN, legacy_token, ""
+            else:
+                auth_mode, manual_token, login_token = self.OPENLIST_AUTH_PASSWORD, "", legacy_token
+            now = utc_now()
+            cursor = connection.execute(
+                "INSERT INTO openlist_connections "
+                "(name, base_url, auth_mode, username, password, token, manual_token, enabled, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (
+                    "系统默认连接",
+                    base_url.rstrip("/"),
+                    auth_mode,
+                    legacy_username,
+                    legacy_password,
+                    login_token,
+                    manual_token,
+                    now,
+                    now,
+                ),
+            )
+            conn_id = int(cursor.lastrowid)
+            rebound = connection.execute(
+                "UPDATE forward_rules SET openlist_connection_id = ? "
+                "WHERE upstream_type = 'openlist' "
+                "AND (openlist_connection_id IS NULL OR openlist_connection_id = 0)",
+                (conn_id,),
+            ).rowcount
+            connection.execute(
+                "UPDATE system_settings SET openlist_base_url = '', openlist_username = '', "
+                "openlist_password = '', openlist_token = '' WHERE id = 1"
+            )
+            logger.info(
+                "OpenList 旧默认连接已迁移为连接 #%s（鉴权方式=%s），改绑 openlist 规则 %s 条",
+                conn_id, auth_mode, rebound,
+            )
+        except sqlite3.Error as exc:  # pragma: no cover - 迁移失败不应阻断启动
+            logger.warning("OpenList 旧默认连接迁移失败（忽略）: %s", exc)
+
     def list_rules(self) -> List[Dict[str, Any]]:
         config = self.load_runtime_config()
         return [self.serialize_rule(rule) for rule in config.proxy_rules]
@@ -3566,6 +3935,7 @@ class ConfigStore:
                     target_urls = ?, health_check_enabled = ?, health_check_path = ?, health_check_interval = ?, health_check_timeout = ?,
                     cors_origins = ?,
                     inject_request_headers = ?, upstream_verify_ssl = ?, client_cert = ?, client_key = ?,
+                    upstream_type = ?, openlist_path_prefix = ?, openlist_password = ?, openlist_connection_id = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
@@ -3608,6 +3978,10 @@ class ConfigStore:
                     int(rule.upstream_verify_ssl),
                     rule.client_cert or "",
                     rule.client_key or "",
+                    rule.normalized_upstream_type(),
+                    rule.openlist_path_prefix or "",
+                    rule.openlist_password or "",
+                    int(rule.openlist_connection_id or 0),
                     now,
                     rule_id,
                 ),
@@ -4078,6 +4452,11 @@ class ConfigStore:
             "upstream_verify_ssl": rule.upstream_verify_ssl,
             "client_cert": rule.client_cert,
             "client_key": rule.client_key,
+            # OpenList 上游适配
+            "upstream_type": rule.normalized_upstream_type(),
+            "openlist_path_prefix": rule.openlist_path_prefix,
+            "openlist_password": rule.openlist_password,
+            "openlist_connection_id": int(rule.openlist_connection_id or 0),
             # 组级继承（P2-4.1）：标记「继承组默认」的字段名列表；
             # 其余字段输出的是有效值（组默认已合入），供占位提示与抽屉展示
             "inherit_fields": [f for f in rule.inherit_set() if f in GROUP_RULE_DEFAULT_FIELDS],
@@ -4115,6 +4494,9 @@ class ConfigStore:
     def serialize_route_log(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
             "id": row["id"],
+            # request_id：与应用日志行（middleware 的 `%s %s %d ...` 前缀）同源，
+            # 是对齐「应用日志 ↔ 转发日志」的唯一凭据；此前只入库未序列化，前端拿不到。
+            "request_id": row["request_id"] if "request_id" in row.keys() else "",
             "request_method": row["request_method"],
             "request_path": row["request_path"],
             "request_query_string": row["request_query_string"],
@@ -4154,6 +4536,19 @@ class ConfigStore:
             "bytes_transferred": int(row["bytes_transferred"] or 0) if "bytes_transferred" in row.keys() else 0,
             # 请求链路节点（迁移 025）：「签名重入:通过 → 签名重入:缓存命中(内部代理) → 代理:200」
             "chain": row["chain"] if "chain" in row.keys() else "",
+            # OpenList 上游留痕：upstream_type 区分 http/openlist；openlist_* 记录命中的连接
+            # 身份与 OpenList 侧挂载路径（与代理侧 request_path 不是一回事）。
+            # 用 row.keys() 守卫兼容尚未补列的旧库。
+            "upstream_type": row["upstream_type"] if "upstream_type" in row.keys() else "http",
+            "openlist_connection_id": (
+                int(row["openlist_connection_id"] or 0)
+                if "openlist_connection_id" in row.keys()
+                else 0
+            ),
+            "openlist_connection_name": (
+                row["openlist_connection_name"] if "openlist_connection_name" in row.keys() else ""
+            ),
+            "openlist_path": row["openlist_path"] if "openlist_path" in row.keys() else "",
             "created_at": row["created_at"],
         }
 
@@ -4237,6 +4632,11 @@ class ConfigStore:
             upstream_verify_ssl=int(row["upstream_verify_ssl"]) if "upstream_verify_ssl" in row.keys() else -1,
             client_cert=row["client_cert"] if "client_cert" in row.keys() else "",
             client_key=row["client_key"] if "client_key" in row.keys() else "",
+            # OpenList 上游适配（row.keys() 守卫兼容未补列的旧库）
+            upstream_type=row["upstream_type"] if "upstream_type" in row.keys() else "http",
+            openlist_path_prefix=row["openlist_path_prefix"] if "openlist_path_prefix" in row.keys() else "",
+            openlist_password=row["openlist_password"] if "openlist_password" in row.keys() else "",
+            openlist_connection_id=row["openlist_connection_id"] if "openlist_connection_id" in row.keys() else 0,
             inherit_fields=",".join(inherit),
         )
 
@@ -4318,6 +4718,11 @@ class ConfigStore:
             upstream_verify_ssl=max(-1, min(1, int(payload.get("upstream_verify_ssl", -1) if payload.get("upstream_verify_ssl", -1) is not None else -1))),
             client_cert=str(payload.get("client_cert", "") or "").strip(),
             client_key=str(payload.get("client_key", "") or "").strip(),
+            # OpenList 上游适配：类型守卫（仅 openlist 生效）+ 挂载路径前缀 + 目录密码
+            upstream_type=("openlist" if str(payload.get("upstream_type", "") or "").strip().lower() == "openlist" else "http"),
+            openlist_path_prefix=str(payload.get("openlist_path_prefix", "") or "").strip(),
+            openlist_password=str(payload.get("openlist_password", "") or ""),
+            openlist_connection_id=int(payload.get("openlist_connection_id", 0) or 0),
             inherit_fields=",".join(sorted(inherit_marks)),
         )
 

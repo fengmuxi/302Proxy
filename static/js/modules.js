@@ -53,7 +53,7 @@ function formatTtl(sec) {
 
 // ============ 页面激活 / 导航 ============
 
-const VALID_PAGES = ["overview", "routing", "security", "geo", "logs", "audit", "system", "backup", "email", "signing", "apidoc", "apikeys"];
+const VALID_PAGES = ["overview", "routing", "security", "ban", "performance", "integration", "openlist", "geo", "logs", "audit", "system", "backup", "email", "signing", "apidoc", "apikeys"];
 
 export function setActivePage(page) {
   state.activeModule = page;
@@ -65,7 +65,8 @@ export function setActivePage(page) {
   });
   const crumb = document.getElementById("breadcrumb");
   const labels = {
-    overview: "系统概览", routing: "路由配置", security: "安全与封禁",
+    overview: "系统概览", routing: "路由配置", security: "访问防护", ban: "封禁管理",
+    performance: "性能优化", integration: "集成对接", openlist: "OpenList 上游",
     geo: "IP 定位", logs: "日志与审计", audit: "审计日志", system: "系统设置",
     backup: "备份与恢复", email: "邮件提醒", signing: "加签防护", apidoc: "API 文档", apikeys: "API 密钥",
   };
@@ -93,8 +94,15 @@ export function activatePage(page) {
       break;
     case "routing":
       refreshRouting();
+      // 规则表单的「OpenList 连接」下拉需要连接清单，进路由页即预热缓存
+      loadOpenlistConnections();
       break;
     case "security":
+      loadStreamGuardSettings();
+      loadLoginProtectionSettings();
+      loadRateLimitSettings();
+      break;
+    case "ban":
       loadBannedIpList();
       loadAutoBanSettings();
       loadAutoBanStats();
@@ -116,15 +124,19 @@ export function activatePage(page) {
       loadAuditLogs().catch((e) => showToast(e.message, true));
       break;
     case "system":
+      loadSettingsHistory();
+      break;
+    case "performance":
       loadIpCacheSettings();
       loadIpCacheStats();
       loadDedupSettings();
       loadDedupStats();
-      loadStreamGuardSettings();
-      loadLoginProtectionSettings();
-      loadRateLimitSettings();
+      break;
+    case "integration":
       loadCorsSettings();
-      loadSettingsHistory();
+      break;
+    case "openlist":
+      loadOpenlistConnections();
       break;
     case "signing":
       // 签名 URL / 302 加签改写两张功能卡已独立为「加签防护」页
@@ -183,7 +195,7 @@ export async function loadDashboard() {
   const groups = data.route_groups || [];
   const rules = data.rules || [];
   setText("navCountRouting", String(groups.length));
-  setText("navCountSecurity", String(state.bannedIps.length));
+  setText("navCountBan", String(state.bannedIps.length));
 
   renderRules(rules);
   renderRouteGroups(groups);
@@ -1018,6 +1030,14 @@ const RULE_SCHEMA = [
   ], group: "上游 TLS 与请求注入" },
   { key: "client_cert", label: "mTLS 客户端证书（PEM 路径）", type: "text", placeholder: "/path/client.crt（留空不启用）", group: "上游 TLS 与请求注入" },
   { key: "client_key", label: "mTLS 私钥（PEM 路径）", type: "text", placeholder: "/path/client.key", group: "上游 TLS 与请求注入" },
+  // —— OpenList 上游：请求路径剥离本组前缀后调 /api/fs/link 换加签直链 ——
+  { key: "upstream_type", label: "上游类型", type: "select", default: "http", options: [
+    { value: "http", label: "HTTP 直连（默认，行为不变）" },
+    { value: "openlist", label: "OpenList（换取加签直链）" },
+  ], hint: "选 OpenList 后：路径剥离本组前缀→前置下面挂载前缀→调 OpenList 接口换直链；此时上面的「目标地址」仅作标识，转发不再使用", group: "OpenList 上游" },
+  { key: "openlist_path_prefix", label: "OpenList 挂载路径前缀", type: "text", placeholder: "/MyDrive（留空=根）", hint: "代理路径前缀不进入 OpenList 命名空间，会先被剥离", dependsOn: { field: "upstream_type", value: "openlist" }, group: "OpenList 上游" },
+  { key: "openlist_password", label: "目录密码", type: "password", placeholder: "受密码保护的目录留空则不填", hint: "OpenList /api/fs/link 的 password（受保护目录才需要）", dependsOn: { field: "upstream_type", value: "openlist" }, group: "OpenList 上游" },
+  { key: "openlist_connection_id", label: "OpenList 连接", type: "select", default: "", options: [{ value: "", label: "请选择连接…" }], hint: "选择该规则回源使用的 OpenList 实例（在「OpenList 上游」页维护）；OpenList 规则必须绑定连接，否则请求返回 502", dependsOn: { field: "upstream_type", value: "openlist" }, group: "OpenList 上游" },
   { key: "notes", label: "备注", type: "text", group: "其他" },
   { key: "enabled", label: "启用", type: "switch" },
 ];
@@ -1051,9 +1071,14 @@ export function openRuleModal(rule, presetGroup = null) {
     if (idx >= 0) selectedIndex = idx;
   }
 
+  // 「OpenList 连接」下拉选项来自连接清单：spread 出新对象，避免污染 RULE_SCHEMA 常量
+  const connOptions = [
+    { value: "", label: OPENLIST_CONNECTIONS.length ? "请选择连接…" : "（暂无连接，请先在「OpenList 上游」新增）" },
+    ...OPENLIST_CONNECTIONS.map((c) => ({ value: String(c.id), label: c.name || c.base_url })),
+  ];
   const schema = [
     { key: "route_group", label: "所属路由组", type: "select", required: true, options: groupOptions.map((o, i) => ({ value: String(i), label: o.label })) },
-    ...RULE_SCHEMA,
+    ...RULE_SCHEMA.map((f) => (f.key === "openlist_connection_id" ? { ...f, options: connOptions } : f)),
   ];
 
   // 组级继承三态：编辑时按规则 inherit_fields 还原；新建默认全部「继承组默认」，
@@ -1091,6 +1116,10 @@ export function openRuleModal(rule, presetGroup = null) {
     upstream_verify_ssl: Number(rule.upstream_verify_ssl ?? -1),
     client_cert: rule.client_cert || "",
     client_key: rule.client_key || "",
+    upstream_type: rule.upstream_type || "http",
+    openlist_path_prefix: rule.openlist_path_prefix || "",
+    openlist_password: rule.openlist_password || "",
+    openlist_connection_id: rule.openlist_connection_id ? String(rule.openlist_connection_id) : "",
     notes: rule.notes || "", enabled: Boolean(rule.enabled), is_default: Boolean(rule.is_default),
   } : {
     route_group: String(selectedIndex),
@@ -1102,6 +1131,7 @@ export function openRuleModal(rule, presetGroup = null) {
     referer_whitelist: "", referer_policy: "", ua_blacklist: "", ua_whitelist: "",
     target_urls: "", health_check_enabled: false, health_check_path: "",
     health_check_interval: 30, health_check_timeout: 5, cors_origins: "",
+    upstream_type: "http", openlist_path_prefix: "", openlist_password: "", openlist_connection_id: "",
     enabled: true, is_default: false,
   };
 
@@ -1114,6 +1144,9 @@ export function openRuleModal(rule, presetGroup = null) {
       if (!String(out.name || "").trim()) return "规则名称不能为空";
       if (out.route_group === "" || out.route_group == null) return "请选择所属路由组";
       if (!String(out.target_url || "").trim()) return "目标地址不能为空";
+      if (out.upstream_type === "openlist" && !String(out.openlist_connection_id || "").trim()) {
+        return "请选择 OpenList 连接（可先在「OpenList 上游」页新增）";
+      }
       return null;
     },
     onSave: async (out) => {
@@ -1146,6 +1179,10 @@ export function openRuleModal(rule, presetGroup = null) {
         upstream_verify_ssl: Number(out.upstream_verify_ssl ?? -1),
         client_cert: out.client_cert || "",
         client_key: out.client_key || "",
+        upstream_type: out.upstream_type || "http",
+        openlist_path_prefix: out.openlist_path_prefix || "",
+        openlist_password: out.openlist_password || "",
+        openlist_connection_id: Number(out.openlist_connection_id ?? 0),
         priority: Number(out.priority ?? 0),
         timeout: Number(out.timeout ?? 30),
         max_redirects: Number(out.max_redirects ?? 10), retry_times: Number(out.retry_times ?? 3),
@@ -1231,6 +1268,9 @@ export function openRuleDrawer(ruleId) {
       ${kv("流式转发", bool(rule.enable_streaming) + inhw("enable_streaming"))}
       ${kv("正则模式", cell(rule.path_rewrite_pattern))}
       ${kv("正则替换", cell(rule.path_rewrite_replacement))}
+      ${kv("上游类型", rule.upstream_type === "openlist" ? '<span class="pill pill-brand">OpenList</span>' : "HTTP 直连")}
+      ${rule.upstream_type === "openlist" ? kv("OpenList 挂载前缀", cell(rule.openlist_path_prefix || "（根）")) : ""}
+      ${rule.upstream_type === "openlist" ? kv("OpenList 连接", cell(openlistConnectionLabel(rule.openlist_connection_id))) : ""}
       <div class="section-h" style="margin-top:16px">访问控制</div>
       ${kv("IP 白名单(路由)", cell(rule.ip_whitelist))}
       ${kv("地区条件", cell(rule.region_filters))}
@@ -1656,6 +1696,17 @@ export function renderRouteLogs(payload) {
     const resultKindBadge = [301, 302, 303, 307, 308].includes(upstream) || log.redirect_location
       ? '<span class="pill pill-warn">重定向结果</span>'
       : (upstream > 0 ? '<span class="pill pill-ok">代理转发</span>' : "");
+    // 上游类型（http / openlist）：OpenList 规则额外展示命中的连接与 OpenList 侧路径。
+    // 多连接排障时「这条请求打到了哪台 OpenList / 哪个账号」直接可读，无需再翻规则表。
+    const isOpenlist = String(log.upstream_type || "http") === "openlist";
+    const openlistConn = log.openlist_connection_name
+      || (Number(log.openlist_connection_id || 0) > 0 ? `#${log.openlist_connection_id}` : "");
+    const upstreamBadge = isOpenlist
+      ? `<span class="pill pill-info" title="上游类型: openlist">OpenList${openlistConn ? ` · ${esc(openlistConn)}` : ""}</span>`
+      : "";
+    const openlistField = isOpenlist
+      ? `<div class="route-log-field"><span class="route-log-field-label">OpenList</span><div class="route-log-field-value"><strong>${esc(openlistConn || "未绑定")}</strong>${log.openlist_path ? `<span class="route-log-target-url" title="${esc(log.openlist_path)}">${esc(log.openlist_path)}</span>` : ""}<span class="hint">连接 ID: ${esc(String(log.openlist_connection_id || 0))}</span></div></div>`
+      : "";
     const card = document.createElement("article");
     card.className = "route-log-item";
     card.innerHTML = `
@@ -1663,7 +1714,7 @@ export function renderRouteLogs(payload) {
         <div class="route-log-item-check"><input class="route-log-checkbox" data-id="${log.id}" type="checkbox"></div>
         <div class="route-log-item-body">
           <div class="route-log-item-header">
-            <div class="route-log-item-time"><strong>${esc(formatDateTime(log.created_at))}</strong><span class="route-log-duration">${esc(`${log.operation_duration_ms || 0} ms`)}</span></div>
+            <div class="route-log-item-time"><strong>${esc(formatDateTime(log.created_at))}</strong><span class="route-log-duration">${esc(`${log.operation_duration_ms || 0} ms`)}</span>${log.request_id ? `<span class="hint" title="请求 ID：与应用日志行首对齐，可跨日志互查">ID ${esc(log.request_id)}</span>` : ""}</div>
             <div class="route-log-item-actions">${banButtonHtml}<button class="btn btn-sm btn-danger" data-action="delete-route-log" data-id="${log.id}">删除</button></div>
           </div>
           <div class="route-log-item-fields">
@@ -1674,7 +1725,8 @@ export function renderRouteLogs(payload) {
             <div class="route-log-field"><span class="route-log-field-label">地区</span><div class="route-log-field-value"><strong>${esc(log.geo_summary || "-")}</strong><span class="hint">命中: ${esc(log.matched_region || "-")}</span><span class="hint">源: ${esc(log.geo_source || "-")}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">匹配</span><div class="route-log-field-value"><strong>${esc(formatMatchStrategy(log.match_strategy))}</strong><span class="hint">${esc(formatMatchDetail(log.match_detail))}</span></div></div>
             <div class="route-log-field"><span class="route-log-field-label">302地址</span><div class="route-log-field-value"><strong class="route-log-target-url" title="${esc(decodeUrlDisplay(log.redirect_location))}">${esc(decodeUrlDisplay(log.redirect_location || "-"))}</strong></div></div>
-            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${isSignedReentry ? '<span class="pill pill-info">签名重入</span>' : ""}${resultKindBadge}<strong class="route-log-target-url" title="${esc(decodeUrlDisplay(log.target_url))}">${esc(decodeUrlDisplay(log.target_url || "-"))}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            <div class="route-log-field"><span class="route-log-field-label">转发结果</span><div class="route-log-field-value">${upstreamBadge}${isSignedReentry ? '<span class="pill pill-info">签名重入</span>' : ""}${resultKindBadge}<strong class="route-log-target-url" title="${esc(decodeUrlDisplay(log.target_url))}">${esc(decodeUrlDisplay(log.target_url || "-"))}</strong><span class="hint">上游: ${esc(String(log.upstream_status || 0))}</span><span class="cache-status-badge ${cacheStatusInfo.cls}">${esc(cacheStatusInfo.text)}</span><span class="hint">结果: ${esc(formatResultStatus(log.result_status))}</span></div></div>
+            ${openlistField}
             <div class="route-log-field"><span class="route-log-field-label">链路</span><div class="route-log-field-value">${chainText ? `<span class="route-log-chain" title="${esc(chainText)}">${esc(chainText)}</span>` : "-"}</div></div>
             ${log.error_message ? `<div class="route-log-field"><span class="route-log-field-label">错误</span><div class="route-log-field-value"><span class="route-log-error" title="${esc(log.error_message)}">${esc(log.error_message)}</span></div></div>` : ""}
             <div class="route-log-field"><span class="route-log-field-label">IP</span><div class="route-log-field-value"><span>原始: ${esc(log.original_client_ip || "-")}</span><span>匹配: ${esc(log.client_ip || "-")}</span></div></div>
@@ -1695,6 +1747,7 @@ export function collectRouteLogFilters() {
     rule_request_host: normalizeRequestHost(getValue("log_rule_request_host").trim()),
     match_strategy: getValue("log_match_strategy"),
     result_status: getValue("log_result_status"),
+    upstream_type: getValue("log_upstream_type"),
     referer: getValue("log_referer").trim(),
     date_from: toIsoDateTime(getValue("log_date_from")),
     date_to: toIsoDateTime(getValue("log_date_to")),
@@ -1745,6 +1798,7 @@ function csvCell(v) {
 
 const ROUTE_LOG_CSV_COLUMNS = [
   ["id", "ID"],
+  ["request_id", "请求ID"],
   ["created_at", "时间"],
   ["request_method", "方法"],
   ["request_path", "请求路径", true],
@@ -1761,6 +1815,10 @@ const ROUTE_LOG_CSV_COLUMNS = [
   ["target_url", "转发目标", true],
   ["upstream_status", "上游状态"],
   ["cache_status", "缓存状态"],
+  ["upstream_type", "上游类型"],
+  ["openlist_connection_id", "OpenList连接ID"],
+  ["openlist_connection_name", "OpenList连接"],
+  ["openlist_path", "OpenList路径"],
   ["result_status", "结果"],
   ["operation_duration_ms", "耗时(ms)"],
   ["original_client_ip", "原始IP"],
@@ -3279,6 +3337,152 @@ export async function testEmail() {
   } catch (e) { showToast(e.message, true); }
 }
 
+// ============ OpenList 上游 ============
+
+// 连接清单缓存：规则表单的「OpenList 连接」下拉与规则详情抽屉共用。
+// 进入「路由」或「OpenList 上游」页时刷新。
+let OPENLIST_CONNECTIONS = [];
+
+// 规则详情用：把连接 id 翻成可读名称
+export function openlistConnectionLabel(connId) {
+  const id = Number(connId || 0);
+  if (!id) return "未绑定";
+  const c = OPENLIST_CONNECTIONS.find((x) => Number(x.id) === id);
+  return c ? (c.name || c.base_url) : `#${id}（已不存在）`;
+}
+
+// 加载连接清单并渲染表格（同时刷新 OPENLIST_CONNECTIONS 供规则表单使用）
+export async function loadOpenlistConnections() {
+  const box = document.getElementById("openlistConnList");
+  try {
+    const data = await apiFetch("/_admin/api/openlist/connections");
+    OPENLIST_CONNECTIONS = (data && data.items) || [];
+  } catch (_) {
+    OPENLIST_CONNECTIONS = [];
+  }
+  if (!box) return;
+  if (!OPENLIST_CONNECTIONS.length) {
+    box.innerHTML = '<tr><td colspan="5" class="empty" style="padding:26px 0">暂无连接，点击「新增连接」添加 OpenList 实例。</td></tr>';
+    return;
+  }
+  box.innerHTML = OPENLIST_CONNECTIONS.map((c) => {
+    const statusBadge = c.enabled
+      ? '<span class="pill pill-ok">已启用</span>'
+      : '<span class="pill pill-danger">已停用</span>';
+    // 两种鉴权方式的「凭据就绪」判据不同：账号密码看登录令牌缓存，直接令牌看手工配置的令牌。
+    const isTokenMode = String(c.auth_mode || "password") === "token";
+    const modeBadge = isTokenMode
+      ? '<span class="pill pill-info" title="鉴权方式：直接使用令牌">直接令牌</span>'
+      : '<span class="pill pill-neutral" title="鉴权方式：账号密码登录换取令牌">账号密码</span>';
+    const tokenBadge = isTokenMode
+      ? (c.has_manual_token
+        ? '<span class="pill pill-ok">已配置令牌</span>'
+        : '<span class="pill pill-danger">未配置令牌</span>')
+      : (c.has_token
+        ? '<span class="pill pill-neutral">已缓存令牌</span>'
+        : '<span class="pill pill-warn">未登录</span>');
+    return `
+    <tr>
+      <td><strong>${esc(c.name || c.base_url)}</strong></td>
+      <td><code class="mono">${esc(c.base_url)}</code></td>
+      <td>${isTokenMode ? '<span class="hint">（令牌模式，不使用账号）</span>' : esc(c.username || "（匿名）")}</td>
+      <td>${statusBadge}${modeBadge}${tokenBadge}</td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn btn-sm" data-action="test-openlist-conn" data-id="${c.id}">测试</button>
+        <button class="btn btn-sm" data-action="edit-openlist-conn" data-id="${c.id}">编辑</button>
+        <button class="btn btn-sm btn-danger" data-action="delete-openlist-conn" data-id="${c.id}" data-name="${esc(c.name || c.base_url)}">删除</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+}
+
+// 新增（connId 省略）或编辑连接。
+// 鉴权方式二选一：账号密码登录（等价旧行为）或直接使用令牌（不登录、不碰账号密码）。
+// 两个模式的字段用 dependsOn 联动显隐；隐藏字段仍会被表单收集，故 payload 按模式筛选。
+export function openOpenlistConnection(connId) {
+  const editing = Number(connId || 0) > 0;
+  const conn = editing ? (OPENLIST_CONNECTIONS.find((x) => Number(x.id) === Number(connId)) || {}) : {};
+  // 编辑时令牌不回传明文（安全约定），仅用它判断「已配置」，留空即沿用。
+  const hasManualToken = conn.has_manual_token === true;
+  openFormModal({
+    title: editing ? `编辑 OpenList 连接 #${connId}` : "新增 OpenList 连接",
+    size: 640,
+    schema: [
+      { key: "name", label: "连接名称", type: "text", placeholder: "如 家庭 NAS / 云盘 A（留空用地址兜底）" },
+      { key: "base_url", label: "OpenList 基地址", type: "text", placeholder: "https://openlist.example.com", hint: "不含结尾斜杠；两种鉴权方式都用它调用 OpenList 接口" },
+      { key: "auth_mode", label: "鉴权方式", type: "select", default: "password", options: [
+        { value: "password", label: "账号密码登录（自动换取令牌）" },
+        { value: "token", label: "直接使用令牌（不登录）" },
+      ], hint: "「直接使用令牌」不保存也不使用账号密码，适合 OpenList 关闭了密码登录、或只发放长期令牌的场景" },
+      { key: "username", label: "登录账号", type: "text", placeholder: "admin", hint: "OpenList 管理员或子账号", dependsOn: { field: "auth_mode", value: "password" } },
+      { key: "password", label: "登录密码", type: "password", hint: "留空表示不修改", dependsOn: { field: "auth_mode", value: "password" } },
+      { key: "manual_token", label: "OpenList 令牌", type: "password", placeholder: hasManualToken ? "已配置，留空表示不修改" : "openlist-xxxxxxxx",
+        hint: "在 OpenList 后台「个人设置 → 令牌」获取；可连 Bearer 前缀一起粘贴，系统会自动去掉",
+        dependsOn: { field: "auth_mode", value: "token" } },
+      { key: "enabled", label: "启用该连接", type: "select", default: "1", options: [{ value: "1", label: "启用" }, { value: "0", label: "停用" }] },
+    ],
+    values: {
+      name: conn.name || "",
+      base_url: conn.base_url || "",
+      auth_mode: String(conn.auth_mode || "password") === "token" ? "token" : "password",
+      username: conn.username || "",
+      password: "",
+      manual_token: "",
+      enabled: conn.enabled === false ? "0" : "1",
+    },
+    validate: (out) => {
+      if (!String(out.base_url || "").trim()) return "请填写 OpenList 基地址";
+      if (out.auth_mode === "token") {
+        // 编辑时留空=沿用已配置令牌；新建或原本就没配则必须填
+        if (!String(out.manual_token || "").trim() && !hasManualToken) {
+          return "鉴权方式为「直接使用令牌」时必须填写 OpenList 令牌";
+        }
+        return "";
+      }
+      if (!String(out.username || "").trim()) return "账号密码登录方式必须填写登录账号";
+      return "";
+    },
+    onSave: async (out) => {
+      const payload = {
+        name: out.name || "",
+        base_url: out.base_url || "",
+        auth_mode: out.auth_mode === "token" ? "token" : "password",
+        username: out.username || "",
+        enabled: out.enabled !== "0",
+      };
+      if (out.password) payload.password = out.password;
+      if (out.manual_token) payload.manual_token = out.manual_token;
+      if (editing) {
+        await apiFetch(`/_admin/api/openlist/connections/${connId}`, { method: "PUT", body: JSON.stringify(payload) });
+      } else {
+        await apiFetch("/_admin/api/openlist/connections", { method: "POST", body: JSON.stringify(payload) });
+      }
+      await loadOpenlistConnections();
+      showToast("OpenList 连接已保存。");
+    },
+  });
+}
+
+export async function testOpenlistConnection(connId) {
+  try {
+    const result = await apiFetch(`/_admin/api/openlist/connections/${connId}/test`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    showToast(result.message, !result.success);
+  } catch (e) { showToast(e.message, true); }
+}
+
+export async function deleteOpenlistConnection(connId) {
+  const conn = OPENLIST_CONNECTIONS.find((x) => Number(x.id) === Number(connId)) || {};
+  if (!window.confirm(`确认删除 OpenList 连接「${conn.name || conn.base_url || connId}」？`)) return;
+  try {
+    await apiFetch(`/_admin/api/openlist/connections/${connId}`, { method: "DELETE" });
+    await loadOpenlistConnections();
+    showToast("OpenList 连接已删除。");
+  } catch (e) { showToast(e.message, true); }
+}
+
 // ============ 封禁管理 ============
 
 export function isValidIpOrCidr(str) {
@@ -3367,7 +3571,7 @@ export async function loadBannedIpList() {
   try {
     const data = await apiFetch("/_admin/api/banned-ips");
     state.bannedIps = data.items || [];
-    setText("navCountSecurity", String(state.bannedIps.length));
+    setText("navCountBan", String(state.bannedIps.length));
     renderBannedIpListPage();
   } catch (_) {}
 }

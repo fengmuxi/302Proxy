@@ -19,7 +19,11 @@
       <div class="nav-item active" data-page="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>系统概览</span></div>
       <div class="nav-group-label">配置与运营</div>
       <div class="nav-item" data-page="routing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg><span>路由配置</span><span class="nav-count" id="navCountRouting">0</span></div>
-      <div class="nav-item" data-page="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>安全与封禁</span><span class="nav-count" id="navCountSecurity">0</span></div>
+      <div class="nav-item" data-page="ban"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg><span>封禁管理</span><span class="nav-count" id="navCountBan">0</span></div>
+      <div class="nav-item" data-page="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>访问防护</span></div>
+      <div class="nav-item" data-page="performance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>性能优化</span></div>
+      <div class="nav-item" data-page="integration"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span>集成对接</span></div>
+      <div class="nav-item" data-page="openlist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg><span>OpenList 上游</span></div>
       <div class="nav-item" data-page="geo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>IP 定位</span></div>
       <div class="nav-item" data-page="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>日志与审计</span></div>
       <div class="nav-item" data-page="audit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span>审计日志</span></div>
@@ -66,7 +70,7 @@
       </div>
       <div class="grid cols-2" style="margin-top:16px">
         <div class="card">
-          <div class="panel-head"><div class="panel-title">近期拦截事件</div><button class="btn btn-sm" data-goto="security">查看全部</button></div>
+          <div class="panel-head"><div class="panel-title">近期拦截事件</div><button class="btn btn-sm" data-goto="ban">查看全部</button></div>
           <ul class="mini-list" style="padding:6px 16px 12px" id="blocksBody"></ul>
         </div>
         <div class="card">
@@ -122,7 +126,39 @@
 
     <!-- ===== Security ===== -->
     <div class="page" id="page-security" hidden>
-      <div class="page-head"><div><h1 class="page-title">安全与封禁</h1><p class="page-desc">查看封禁名单、配置自动封禁策略与白名单。</p></div></div>
+      <div class="page-head"><div><h1 class="page-title">访问防护</h1><p class="page-desc">登录防爆破、单 IP 并发限制与主动速率限制等访问防护配置。</p></div></div>
+      <div class="grid cols-2">
+        <div class="card">
+          <!-- 状态隐藏域放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML，放里面会被清掉导致编辑弹窗取不到值 -->
+          <input type="hidden" id="stream_guard_max" value="0">
+          <div class="panel-head"><div class="panel-title">单 IP 并发限制 (stream_guard)</div><span class="pill pill-neutral" id="streamGuardPill">未启用</span></div>
+          <div class="panel-body" id="streamGuardBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <!-- 状态隐藏域同样放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML -->
+          <input type="hidden" id="login_max_attempts" value="5">
+          <input type="hidden" id="login_lockout_minutes" value="15">
+          <input type="hidden" id="login_cooldown_seconds" value="0">
+          <div class="panel-head"><div class="panel-title">登录防爆破 (login_protection)</div><span class="pill pill-neutral" id="loginProtectionPill">未配置</span></div>
+          <div class="panel-body" id="loginProtectionBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editLoginProtectionBtn">编辑配置</button></div>
+        </div>
+        <div class="card">
+          <input type="hidden" id="rate_limit_enabled" value="0">
+          <input type="hidden" id="rate_limit_rps" value="10">
+          <input type="hidden" id="rate_limit_burst" value="20">
+          <input type="hidden" id="rate_limit_per_ip" value="1">
+          <div class="panel-head"><div class="panel-title">主动速率限制 (rate_limit)</div><span class="pill pill-neutral" id="rateLimitPill">未启用</span></div>
+          <div class="panel-body" id="rateLimitBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editRateLimitBtn">编辑配置</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 封禁管理 ===== -->
+    <div class="page" id="page-ban" hidden>
+      <div class="page-head"><div><h1 class="page-title">封禁管理</h1><p class="page-desc">查看与管理 IP 封禁名单、配置自动封禁策略与白名单。</p></div></div>
       <div class="hint" style="margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--info);background:var(--surface-2);border-radius:6px;color:var(--text-2);line-height:1.7;font-size:13px">
         <strong style="color:var(--text)">封禁规则说明：</strong>IP 封禁只拦截<strong>代理转发路径</strong>（命中路由组 / 规则的请求），<strong>不影响后台管理</strong>（<code class="mono">/_admin</code>）及系统内置接口（<code class="mono">/_health</code>、<code class="mono">/json/version</code>、<code class="mono">/_block</code>）的访问，被封禁的 IP 仍可正常打开后台。<br>
         「路径前缀」留空 = 全局封禁（拦截该 IP 的所有代理请求）；填写如 <code class="mono">/play</code> = 仅拦截该前缀下的代理请求。
@@ -208,8 +244,12 @@
             <select id="log_match_strategy"><option value="">全部</option><option value="ip_whitelist_match">IP 白名单命中</option><option value="region_match">地区命中</option><option value="default_route">默认路由</option><option value="priority_fallback">优先级回退</option><option value="no_route">未匹配路由</option></select>
           </div>
           <div class="filter-item">
+            <span class="fi-label">上游类型</span>
+            <select id="log_upstream_type"><option value="">全部</option><option value="http">HTTP 直连</option><option value="openlist">OpenList</option></select>
+          </div>
+          <div class="filter-item">
             <span class="fi-label">结果状态</span>
-            <select id="log_result_status"><option value="">全部</option><option value="forwarded">转发成功</option><option value="cache_hit">缓存命中</option><option value="forwarded_client_error">上游 4xx</option><option value="upstream_error">上游异常</option><option value="proxy_error">代理异常</option><option value="no_route">未匹配路由</option><option value="hotlink_blocked">盗链拦截</option><option value="ua_blocked">UA 拦截</option><option value="signature_invalid">签名校验失败</option></select>
+            <select id="log_result_status"><option value="">全部</option><option value="forwarded">转发成功</option><option value="cache_hit">缓存命中</option><option value="forwarded_client_error">上游 4xx</option><option value="upstream_error">上游异常</option><option value="proxy_error">代理异常</option><option value="openlist_error">OpenList 异常</option><option value="no_route">未匹配路由</option><option value="hotlink_blocked">盗链拦截</option><option value="ua_blocked">UA 拦截</option><option value="signature_invalid">签名校验失败</option></select>
           </div>
           <div class="filter-item">
             <span class="fi-label">开始日期</span>
@@ -354,56 +394,8 @@
 
     <!-- ===== System ===== -->
     <div class="page" id="page-system" hidden>
-      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">请求结果缓存、请求去重、单 IP 并发限制、登录防爆破等运行时配置。备份恢复、邮件提醒与加签防护已独立为单独菜单。</p></div></div>
+      <div class="page-head"><div><h1 class="page-title">系统设置</h1><p class="page-desc">仅保留配置历史与导入导出。其余运行时配置已按功能归入「性能优化」「集成对接」「OpenList 上游」「安全与封禁」等菜单。</p></div></div>
       <div class="grid cols-2">
-        <div class="card">
-          <div class="panel-head"><div class="panel-title">请求结果缓存 (ip_result_cache)</div><div class="panel-head-actions"><span class="pill pill-ok" id="ipCachePill">启用</span><button class="btn btn-sm" id="editIpCacheBtn">编辑</button></div></div>
-          <div class="panel-body" id="ipCacheBody">
-            <div id="ipCacheSettings"></div>
-            <div id="ipCacheStats"></div>
-          </div>
-          <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="clearResultCache">清空缓存</button></div>
-        </div>
-        <div class="card">
-          <div class="panel-head"><div class="panel-title">请求去重 (request_dedup)</div><span class="pill pill-ok" id="dedupPill">启用</span></div>
-          <div class="panel-body" id="dedupBody"></div>
-          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="saveDedup">保存去重配置</button><button class="btn btn-sm" id="clearDedup">清空去重缓存</button></div>
-        </div>
-        <div class="card">
-          <!-- 状态隐藏域放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML，放里面会被清掉导致编辑弹窗取不到值 -->
-          <input type="hidden" id="stream_guard_max" value="0">
-          <div class="panel-head"><div class="panel-title">单 IP 并发限制 (stream_guard)</div><span class="pill pill-neutral" id="streamGuardPill">未启用</span></div>
-          <div class="panel-body" id="streamGuardBody"></div>
-          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editStreamGuardBtn">编辑配置</button></div>
-        </div>
-        <div class="card">
-          <!-- 状态隐藏域同样放卡片根节点：loadXxx 会重建 panel-body 的 innerHTML -->
-          <input type="hidden" id="login_max_attempts" value="5">
-          <input type="hidden" id="login_lockout_minutes" value="15">
-          <input type="hidden" id="login_cooldown_seconds" value="0">
-          <div class="panel-head"><div class="panel-title">登录防爆破 (login_protection)</div><span class="pill pill-neutral" id="loginProtectionPill">未配置</span></div>
-          <div class="panel-body" id="loginProtectionBody"></div>
-          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editLoginProtectionBtn">编辑配置</button></div>
-        </div>
-        <div class="card">
-          <input type="hidden" id="rate_limit_enabled" value="0">
-          <input type="hidden" id="rate_limit_rps" value="10">
-          <input type="hidden" id="rate_limit_burst" value="20">
-          <input type="hidden" id="rate_limit_per_ip" value="1">
-          <div class="panel-head"><div class="panel-title">主动速率限制 (rate_limit)</div><span class="pill pill-neutral" id="rateLimitPill">未启用</span></div>
-          <div class="panel-body" id="rateLimitBody"></div>
-          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editRateLimitBtn">编辑配置</button></div>
-        </div>
-        <div class="card">
-          <input type="hidden" id="cors_enabled" value="0">
-          <input type="hidden" id="cors_allowed_origins" value="">
-          <input type="hidden" id="cors_allowed_methods" value="GET,HEAD,OPTIONS">
-          <input type="hidden" id="cors_allow_credentials" value="0">
-          <input type="hidden" id="cors_max_age" value="600">
-          <div class="panel-head"><div class="panel-title">跨域资源共享 (CORS)</div><span class="pill pill-neutral" id="corsPill">未启用</span></div>
-          <div class="panel-body" id="corsBody"></div>
-          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editCorsBtn">编辑配置</button></div>
-        </div>
         <div class="card">
           <input type="hidden" id="settings_history_module" value="rate-limit">
           <div class="panel-head"><div class="panel-title">配置历史 / 导出导入</div><span class="pill pill-neutral">P2</span></div>
@@ -427,6 +419,58 @@
             <button class="btn btn-sm" id="exportModuleBtn">导出</button>
             <button class="btn btn-sm" id="importModuleBtn">导入</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Performance ===== -->
+    <div class="page" id="page-performance" hidden>
+      <div class="page-head"><div><h1 class="page-title">性能优化</h1><p class="page-desc">请求结果缓存与请求去重：降低上游压力、减少重复拉流的运行时加速配置。</p></div></div>
+      <div class="grid cols-2">
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">请求结果缓存 (ip_result_cache)</div><div class="panel-head-actions"><span class="pill pill-ok" id="ipCachePill">启用</span><button class="btn btn-sm" id="editIpCacheBtn">编辑</button></div></div>
+          <div class="panel-body" id="ipCacheBody">
+            <div id="ipCacheSettings"></div>
+            <div id="ipCacheStats"></div>
+          </div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-sm" id="clearResultCache">清空缓存</button></div>
+        </div>
+        <div class="card">
+          <div class="panel-head"><div class="panel-title">请求去重 (request_dedup)</div><span class="pill pill-ok" id="dedupPill">启用</span></div>
+          <div class="panel-body" id="dedupBody"></div>
+          <div class="panel-body" style="padding-top:0;display:flex;gap:8px"><button class="btn btn-primary btn-sm" id="saveDedup">保存去重配置</button><button class="btn btn-sm" id="clearDedup">清空去重缓存</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Integration ===== -->
+    <div class="page" id="page-integration" hidden>
+      <div class="page-head"><div><h1 class="page-title">集成对接</h1><p class="page-desc">跨域资源共享 (CORS) 等对外对接配置，控制浏览器端跨域访问策略。</p></div></div>
+      <div class="grid cols-2">
+        <div class="card">
+          <input type="hidden" id="cors_enabled" value="0">
+          <input type="hidden" id="cors_allowed_origins" value="">
+          <input type="hidden" id="cors_allowed_methods" value="GET,HEAD,OPTIONS">
+          <input type="hidden" id="cors_allow_credentials" value="0">
+          <input type="hidden" id="cors_max_age" value="600">
+          <div class="panel-head"><div class="panel-title">跨域资源共享 (CORS)</div><span class="pill pill-neutral" id="corsPill">未启用</span></div>
+          <div class="panel-body" id="corsBody"></div>
+          <div class="panel-body" style="padding-top:0"><button class="btn btn-primary btn-sm" id="editCorsBtn">编辑配置</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== OpenList 上游 ===== -->
+    <div class="page" id="page-openlist" hidden>
+      <div class="page-head"><div><h1 class="page-title">OpenList 上游</h1><p class="page-desc">在此维护 OpenList 连接；「上游类型 = OpenList」的转发规则必须绑定其中一个连接。支持两种鉴权方式：<strong>账号密码登录</strong>（自动换取令牌）与<strong>直接使用令牌</strong>（不登录、不使用账号密码）。</p></div></div>
+      <div class="card">
+        <div class="panel-head"><div class="panel-title">OpenList 连接</div><div class="panel-head-actions"><button class="btn btn-sm btn-primary" id="addOpenlistConnBtn">+ 新增连接</button></div></div>
+        <div class="table-wrap no-border">
+          <table><thead><tr><th>名称</th><th>基地址</th><th>账号</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+            <tbody id="openlistConnList"><tr><td colspan="5" class="empty" style="padding:26px 0">加载中…</td></tr></tbody></table>
+        </div>
+        <div class="panel-body" style="padding-top:0">
+          <div class="feature-desc">旧版「系统全局默认连接」已取消：首次升级会自动迁移为一条名为「系统默认连接」的记录，原本依赖默认连接的规则也将自动改绑到它。</div>
         </div>
       </div>
     </div>

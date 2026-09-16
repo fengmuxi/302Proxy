@@ -43,6 +43,7 @@ import {
   loadRedirectSigningSettings, openRedirectSigningSettings,
   loadApiDoc, openApiDocTry, filterApiDoc,
   loadEmailSettings, openEmailSettings, testEmail,
+  loadOpenlistConnections, openOpenlistConnection, testOpenlistConnection, deleteOpenlistConnection,
   loadBannedIpList, renderBannedIpListPage, openBanModal, openBanExtendModal,
   banIpFromLog, unbanIp, setBanPermanent, clearBans,
   loadApiKeys, openApiKeyCreateModal, openApiKeyPermModal, toggleApiKey, deleteApiKey,
@@ -360,6 +361,7 @@ function bindLogs() {
     setValue("log_rule_request_host", "");
     setValue("log_match_strategy", "");
     setValue("log_result_status", "");
+    setValue("log_upstream_type", "");
     setValue("log_referer", "");
     setValue("log_date_from", "");
     setValue("log_date_to", "");
@@ -371,6 +373,7 @@ function bindLogs() {
   // 筛选下拉变化时更新 chips（数据由“查询”按钮触发）
   $("log_match_strategy")?.addEventListener("change", renderAllChips);
   $("log_result_status")?.addEventListener("change", renderAllChips);
+  $("log_upstream_type")?.addEventListener("change", renderAllChips);
 
   // 全选 / 批量删除 / 清空
   $("route-log-select-all")?.addEventListener("change", (e) => {
@@ -548,6 +551,17 @@ function bindSystem() {
 
   $("editEmailBtn")?.addEventListener("click", () => openEmailSettings());
   $("testEmailBtn")?.addEventListener("click", () => testEmail());
+  // OpenList：连接列表（新增按钮 + 行内操作事件委托）
+  $("addOpenlistConnBtn")?.addEventListener("click", () => openOpenlistConnection());
+  $("openlistConnList")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const connId = Number(btn.dataset.id);
+    const action = btn.dataset.action;
+    if (action === "test-openlist-conn") testOpenlistConnection(connId);
+    else if (action === "edit-openlist-conn") openOpenlistConnection(connId);
+    else if (action === "delete-openlist-conn") deleteOpenlistConnection(connId);
+  });
 
   $("editIpCacheBtn")?.addEventListener("click", () => openIpCacheSettings());
   $("clearResultCache")?.addEventListener("click", () => clearIpCache());
@@ -684,11 +698,15 @@ function bindGlobalShortcuts() {
 const PAGE_INDEX = [
   { page: "overview", title: "系统概览", kw: "概览 首页 总览 仪表盘 dashboard overview" },
   { page: "routing", title: "路由配置", kw: "路由 规则 转发 前缀 重定向 routing rule" },
-  { page: "security", title: "安全与封禁", kw: "安全 封禁 黑名单 白名单 解封 api 密钥 key token security ban" },
+  { page: "ban", title: "封禁管理", kw: "封禁 黑名单 白名单 解封 拦截 封禁名单 ban" },
+  { page: "security", title: "访问防护", kw: "访问 防护 登录保护 防爆破 并发 限流 速率 security" },
   { page: "geo", title: "IP 定位", kw: "定位 地理 离线库 mmdb 在线源 geo" },
   { page: "logs", title: "日志与审计", kw: "日志 请求日志 应用日志 logs log" },
   { page: "audit", title: "审计日志", kw: "审计 操作记录 审计日志 后台操作 audit" },
-  { page: "system", title: "系统设置", kw: "系统 设置 缓存 去重 并发 登录保护 system" },
+  { page: "performance", title: "性能优化", kw: "性能 优化 缓存 去重 结果缓存 请求去重 加速 performance cache" },
+  { page: "integration", title: "集成对接", kw: "集成 对接 cors 跨域 资源共享 integration" },
+  { page: "openlist", title: "OpenList 上游", kw: "openlist 上游 回源 媒体 目录 openlist upstream" },
+  { page: "system", title: "系统设置", kw: "系统 设置 配置历史 导出 导入 system" },
   { page: "signing", title: "加签防护", kw: "签名 加签 防盗链 签名链接 signed url redirect" },
   { page: "apidoc", title: "API 文档", kw: "api 文档 接口 文档 文档页 endpoint 开发者 doc" },
   { page: "backup", title: "备份与恢复", kw: "备份 恢复 快照 回滚 下载 backup restore" },
@@ -698,17 +716,21 @@ const PAGE_INDEX = [
 const COMMAND_INDEX = [
   { title: "新建规则", sub: "创建一个转发规则", page: "routing", action: "new-rule" },
   { title: "新建路由组", sub: "创建一个路径前缀路由组", page: "routing", action: "new-group" },
-  { title: "手动封禁 IP", sub: "封禁一个 IP 或网段", page: "security", action: "new-ban" },
-  { title: "编辑自动封禁策略", sub: "配置自动封禁参数", page: "security", action: "auto-ban-settings" },
+  { title: "手动封禁 IP", sub: "封禁一个 IP 或网段", page: "ban", action: "new-ban" },
+  { title: "编辑自动封禁策略", sub: "配置自动封禁参数", page: "ban", action: "auto-ban-settings" },
   { title: "在线定位源配置", sub: "编辑在线定位源", page: "geo", action: "geo-online-settings" },
   { title: "离线库配置", sub: "编辑离线 MMDB 配置", page: "geo", action: "geo-offline-settings" },
   { title: "清空定位缓存", sub: "清除在线定位结果缓存", page: "geo", action: "clear-geo-cache" },
   { title: "编辑邮件配置", sub: "配置 SMTP 邮件提醒", page: "email", action: "email-settings" },
   { title: "发送测试邮件", sub: "验证邮件提醒配置", page: "email", action: "test-email" },
-  { title: "登录防爆破配置", sub: "配置登录失败次数与锁定时长", page: "system", action: "login-protection-settings" },
+  { title: "登录防爆破配置", sub: "配置登录失败次数与锁定时长", page: "security", action: "login-protection-settings" },
+  { title: "单 IP 并发限制配置", sub: "配置单 IP 最大并发数", page: "security", action: "stream-guard-settings" },
+  { title: "主动速率限制配置", sub: "配置 RPS / 突发 / 单 IP 限流", page: "security", action: "rate-limit-settings" },
   { title: "查看审计日志", sub: "查看后台管理操作记录", page: "audit", action: "goto" },
-  { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "system", action: "ip-cache-settings" },
-  { title: "请求去重配置", sub: "编辑请求去重参数", page: "system", action: "dedup-settings" },
+  { title: "请求缓存配置", sub: "编辑请求结果缓存", page: "performance", action: "ip-cache-settings" },
+  { title: "请求去重配置", sub: "编辑请求去重参数", page: "performance", action: "dedup-settings" },
+  { title: "CORS 配置", sub: "编辑跨域资源共享策略", page: "integration", action: "cors-settings" },
+  { title: "新增 OpenList 连接", sub: "添加一个 OpenList 实例，并在规则中绑定", page: "openlist", action: "openlist-conn-new" },
   { title: "创建备份", sub: "生成一份数据快照", page: "backup", action: "create-backup" },
   { title: "API 文档", sub: "查看/试调用后台接口", page: "apidoc", action: "goto" },
   { title: "签发 API 密钥", sub: "创建调用后台接口的密钥", page: "apikeys", action: "new-apikey" },
@@ -753,7 +775,7 @@ function searchIndex(q) {
   // 封禁 IP
   (state.bannedIps || []).forEach((b) => {
     const hay = [b.ip, b.reason].map((v) => String(v || "")).join(" ").toLowerCase();
-    if (hay.includes(q)) results.push({ type: "封禁IP", title: b.ip, sub: b.reason || "", page: "security", action: "goto" });
+    if (hay.includes(q)) results.push({ type: "封禁IP", title: b.ip, sub: b.reason || "", page: "ban", action: "goto" });
   });
 
   // 在线定位源
@@ -804,8 +826,8 @@ function applySearchResult(r) {
   switch (r.action) {
     case "new-rule": activatePage("routing"); openRuleModal(null); break;
     case "new-group": activatePage("routing"); openRouteGroupModal(null); break;
-    case "new-ban": activatePage("security"); openBanModal(); break;
-    case "auto-ban-settings": activatePage("security"); openAutoBanSettings(); break;
+    case "new-ban": activatePage("ban"); openBanModal(); break;
+    case "auto-ban-settings": activatePage("ban"); openAutoBanSettings(); break;
     case "geo-online-settings": activatePage("geo"); openGeoOnlineSettings(); break;
     case "geo-offline-settings": activatePage("geo"); openGeoOfflineSettings(); break;
     case "clear-geo-cache":
@@ -814,9 +836,13 @@ function applySearchResult(r) {
       break;
     case "email-settings": activatePage("email"); openEmailSettings(); break;
     case "test-email": activatePage("email"); testEmail(); break;
-    case "login-protection-settings": activatePage("system"); openLoginProtectionSettings(); break;
-    case "ip-cache-settings": activatePage("system"); openIpCacheSettings(); break;
-    case "dedup-settings": activatePage("system"); openDedupSettings(); break;
+    case "login-protection-settings": activatePage("security"); openLoginProtectionSettings(); break;
+    case "stream-guard-settings": activatePage("security"); openStreamGuardSettings(); break;
+    case "rate-limit-settings": activatePage("security"); openRateLimitSettings(); break;
+    case "ip-cache-settings": activatePage("performance"); openIpCacheSettings(); break;
+    case "dedup-settings": activatePage("performance"); openDedupSettings(); break;
+    case "cors-settings": activatePage("integration"); openCorsSettings(); break;
+    case "openlist-conn-new": activatePage("openlist"); openOpenlistConnection(); break;
     case "create-backup": activatePage("backup"); createBackup(); break;
     case "new-apikey": activatePage("apikeys"); openApiKeyCreateModal(); break;
   }
