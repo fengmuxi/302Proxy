@@ -127,18 +127,25 @@ flowchart TD
 
 1. 客户端 `GET /play/xxx` → `handle_proxy`（`main.py:846`）
 2. `select_route` 命中规则，读出 `rule.follow_redirects`（`main.py:904`）
-   - **关键（2026-09-05 修复）**：首次代理请求（非 `/_signed` 重入）固定
-     `force_external_redirect=True`（`main.py:1028`），使 `RedirectHandler` 的
-     `follow_redirects=(False if force_external_redirect else rule.follow_redirects)`
-     （`proxy_core.py:1886` / `:2321`）**强制为 False**——无论规则 `follow_redirects` 取值，
-     上游 3xx 都原样返回并命中四处改写点（`:1914`/`:2136`/`:2304`/`:2399`）生成签名链接。
+   - **关键（2026-09-05 修复，2026-09-11 收紧）**：首次代理请求（非 `/_signed` 重入）且
+     **302 加签改写已开启**时 `force_external_redirect=True`（`main.py` handle_proxy），
+     使 `RedirectHandler` 的 `follow_redirects=(False if force_external_redirect else rule.follow_redirects)`
+     **强制为 False**——上游 3xx 原样返回并命中四处改写点生成签名链接。
      修复前 B 模式规则（`follow_redirects=True`）首次请求会内部跟随上游直出 200，完全跳过加签流程。
      （仅 `/_signed` 重入 `_signed_reentry` 命中快照时 `force_external_redirect=False`，允许内部跟随。）
+   - **关键（2026-09-11 修复：加签关闭时尊重规则跟随设置）**：`force_external_redirect` 原先被
+     无条件置 True，但 302 加签改写**默认关闭**——关闭时根本没有签名链接可生成，强制不跟随
+     只剩副作用：规则里明确勾了「跟随重定向」也被原样透传上游 302，并把上游裸 CDN 链接
+     泄漏给客户端（OpenList 规则实测复现：`/d/...` 返回 302 + 123 云盘 CDN 裸链）。
+     现改为 `force_external_redirect = signed_redirect.enabled and 非重入`：
+     - 加签**开**：首次请求必签发签名链接（原修复语义保留），领取链接后按模式跟随/回显；
+     - 加签**关**：交还 `rule.follow_redirects` 决定——True→内部跟随后直出内容，
+       False→按裸链语义透传 302。与下文「加签关闭时行为不变」的本意一致。
    - **关键（2026-09-05 二次修复）**：改写成功后同步 `redirect_info.redirect_url = 改写后的签名链接`
-     （四处改写点均用 `replace(redirect_info, redirect_url=rewritten)`：`proxy_core.py:1914`/`:2136`/`:2304`/`:2399`），
+     （四处改写点均用 `replace(redirect_info, redirect_url=rewritten)`），
      使路由日志 `redirect_location` 如实记录**实际返回给客户端的签名链接**，而非上游裸 CDN 地址。
-     注意：流式实时改写（`:2136`）用独立 `log_redirect_info` 变量、不原地改 `redirect_info`，
-     以免污染 `ip_cache.put_redirect`（`:2167`）误存签名链接、破坏后续重入重签。
+     注意：流式实时改写用独立 `log_redirect_info` 变量、不原地改 `redirect_info`，
+     以免污染 `ip_cache.put_redirect` 误存签名链接、破坏后续重入重签。
    - **关键（2026-09-05 四次修复：流式结果缓存绕过封堵）**：B 模式重入会把 200 结果写进
      `ip_cache`（键 `client_ip+target_url`），播放器随后再请求**原始 /play 地址**时命中
      流式缓存分支（`proxy_core.py` streaming 命中）直接回 200 媒体，**无需签名链接即可拿到

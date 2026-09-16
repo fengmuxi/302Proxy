@@ -44,7 +44,8 @@
 
 - 同 IP 同链接**不会**回放旧签名串：整串每次重新签发；`ip_result_cache.put_redirect` 必须存上游裸地址（非签名链接），命中走 `_build_rewritten_redirect` 重新签发。
 - `_signed_cache` 存的是上游 302 决策快照（key = resource_id），**不是签名链接本身**。
-- `force_external_redirect` 三态：首次代理请求强制 False 跟随后改写生成签名链接；`/_signed/` 重入允许内部跟随；缓存分支在加签开启 + 强制外部重定向时改走现签，封堵「原始地址命中流式缓存绕过签名」的洞。
+- `force_external_redirect` 语义（2026-09-11 收紧）：`signed_redirect.enabled` **开启**时，首次代理请求强制不跟随后改写生成签名链接；`/_signed/` 重入允许内部跟随；缓存分支在加签开启 + 强制外部重定向时改走现签，封堵「原始地址命中流式缓存绕过签名」的洞。**加签关闭时不再强制**，交还 `rule.follow_redirects` 决定（True 内部跟随直出内容 / False 裸链透传 302）——原先无条件强制导致加签关闭时规则勾了「跟随重定向」也回 302 并泄漏上游裸链。
+- **OpenList 取链直链日志（2026-09-11）**：`_resolve_openlist_route` 成功分支用 `logger.info("OpenList 取链成功: 连接=… 鉴权=… OpenList路径=… 直链=…")` 打印**完整、不截断**的直链（默认日志级别 INFO，`config.setup_logging`，DEBUG 不可见）；转发日志 `route_logs.target_url` 落同一条链接，两处必须一致。失败路径仍 WARNING（无直链可打），切忌降回 DEBUG 或加截断。
 
 ## 五、前置 nginx 反代部署约束
 
